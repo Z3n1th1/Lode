@@ -38,13 +38,13 @@ if [[ -z "$PY" ]]; then
 fi
 
 # --- Required secrets (fall back to .env values) ---
-: "${WEBUI_ADMIN_PASSWORD:?WEBUI_ADMIN_PASSWORD required (>=16 chars). Set in .env or export.}"
-: "${WEBUI_SESSION_SECRET:?WEBUI_SESSION_SECRET required (>=32 chars). Set in .env or export.}"
+: "${LODE_ADMIN_PASSWORD:?LODE_ADMIN_PASSWORD required (>=16 chars). Set in .env or export.}"
+: "${LODE_SESSION_SECRET:?LODE_SESSION_SECRET required (>=32 chars). Set in .env or export.}"
 
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
-PORT="${WEBUI_PORT:-8088}"
+PORT="${LODE_PORT:-8088}"
 STATE_DIR="${LODE_STATE_DIR:-$SCRIPT_DIR/lode-state}"
 
 exec "$PY" -m console.server \

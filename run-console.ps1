@@ -54,11 +54,11 @@ if (-not $pythonExe) {
     throw 'Python 3.10+ runtime not found. Install Python or set PA_PYTHON to its executable.'
 }
 
-if (-not $env:WEBUI_ADMIN_PASSWORD) {
-    throw 'WEBUI_ADMIN_PASSWORD is required and must be at least 12 characters.'
+if (-not $env:LODE_ADMIN_PASSWORD) {
+    throw 'LODE_ADMIN_PASSWORD is required and must be at least 12 characters.'
 }
-if (-not $env:WEBUI_SESSION_SECRET) {
-    throw 'WEBUI_SESSION_SECRET is required and must be at least 32 characters.'
+if (-not $env:LODE_SESSION_SECRET) {
+    throw 'LODE_SESSION_SECRET is required and must be at least 32 characters.'
 }
 
 $previousLocation = Get-Location

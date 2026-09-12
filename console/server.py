@@ -20,12 +20,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
 
-    password = os.environ.get("WEBUI_ADMIN_PASSWORD", "")
-    session_secret = os.environ.get("WEBUI_SESSION_SECRET", "")
+    password = os.environ.get("LODE_ADMIN_PASSWORD", "")
+    session_secret = os.environ.get("LODE_SESSION_SECRET", "")
     if len(password) < MIN_PASSWORD_LENGTH:
-        parser.error(f"WEBUI_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters")
+        parser.error(f"LODE_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters")
     if len(session_secret) < MIN_SESSION_SECRET_LENGTH:
-        parser.error(f"WEBUI_SESSION_SECRET must be at least {MIN_SESSION_SECRET_LENGTH} characters")
+        parser.error(f"LODE_SESSION_SECRET must be at least {MIN_SESSION_SECRET_LENGTH} characters")
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
 

@@ -39,7 +39,7 @@ def _python() -> str:
 
 def cmd_console(args: argparse.Namespace) -> int:
     """Start the Console server."""
-    port = str(args.port or os.environ.get("WEBUI_PORT", "8088"))
+    port = str(args.port or os.environ.get("LODE_PORT", "8088"))
     state_dir = args.state_dir or os.environ.get("LODE_STATE_DIR", str(ROOT / "lode-state"))
     cmd = [
         _python(), "-m", "console.server",

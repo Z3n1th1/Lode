@@ -15,7 +15,7 @@ if str(PENTEST_AGENT) not in sys.path:
     sys.path.insert(0, str(PENTEST_AGENT))
 
 
-SECRET_SENTINEL = "WEBUI_SECRET_SENTINEL"
+SECRET_SENTINEL = "LODE_SECRET_SENTINEL"
 
 
 def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:

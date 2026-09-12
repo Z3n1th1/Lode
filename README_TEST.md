@@ -21,8 +21,8 @@
 启动本机 Console：
 
 ```powershell
-$env:WEBUI_ADMIN_PASSWORD = '<至少12位本机密码>'
-$env:WEBUI_SESSION_SECRET = '<至少32位随机会话密钥>'
+$env:LODE_ADMIN_PASSWORD = '<至少12位本机密码>'
+$env:LODE_SESSION_SECRET = '<至少32位随机会话密钥>'
 .\run-console.ps1 -StateDir .\lode-state -Port 8088
 ```
 

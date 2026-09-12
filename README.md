@@ -147,8 +147,8 @@ npm ci --ignore-scripts
 npm run build
 Set-Location ..
 
-$env:WEBUI_ADMIN_PASSWORD = '<至少16字符的独立强口令>'
-$env:WEBUI_SESSION_SECRET = '<至少32字符的随机会话签名密钥>'
+$env:LODE_ADMIN_PASSWORD = '<至少16字符的独立强口令>'
+$env:LODE_SESSION_SECRET = '<至少32字符的随机会话签名密钥>'
 python -m console.server --state-dir 'C:\path\to\feishu-state' --port 8088
 ```
 

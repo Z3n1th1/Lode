@@ -54,7 +54,7 @@ python lode.py console
 ### 访问
 
 浏览器打开 `http://127.0.0.1:8088`
-- 密码在 `.env` 的 `WEBUI_ADMIN_PASSWORD`
+- 密码在 `.env` 的 `LODE_ADMIN_PASSWORD`
 - 只监听本地，不暴露公网
 
 ### 对话流程
@@ -175,9 +175,9 @@ LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
 
 # Console
-WEBUI_ADMIN_PASSWORD=至少16字符
-WEBUI_SESSION_SECRET=至少32字符
-WEBUI_PORT=8088
+LODE_ADMIN_PASSWORD=至少16字符
+LODE_SESSION_SECRET=至少32字符
+LODE_PORT=8088
 
 # SRC agent 默认值
 SRC_MAX_CYCLES=20
@@ -213,7 +213,7 @@ projects/
 ## 6. 常见问题
 
 **Q: Console 打不开？**
-检查 `http://127.0.0.1:8088/healthz` 是否返回 `{"status":"ok"}`。端口被占用改 `.env` 的 `WEBUI_PORT`。
+检查 `http://127.0.0.1:8088/healthz` 是否返回 `{"status":"ok"}`。端口被占用改 `.env` 的 `LODE_PORT`。
 
 **Q: Agent 说 "LLM unavailable"？**
 检查 `.env` 的 `LLM_API_KEY` 是否正确，`python lode.py doctor` 看 `llm_api_key_set`。
