@@ -1,99 +1,49 @@
 <script setup lang="ts">
-// 控制面板抽屉:核心面板平铺,其余收进「更多工具」折叠组。
-// 系统主体是 SRC agent,运维面板默认收起,避免首屏信息过载(功能不删,只是降噪)。
+// 控制面板抽屉:只保留 SRC 工作流真正会用到的 6 个面板。
+// 其余低频运维面板已删除(系统主体是 SRC agent,不做功能堆砌)。
 import { computed, h, type Component } from 'vue'
 import { NDrawer, NDrawerContent, NIcon, NMenu, NSelect, type MenuOption } from 'naive-ui'
-import {
-  Activity, Archive, Bell, FileCheck2, Fingerprint, FolderKanban, Gauge,
-  KeyRound, Layers, Network, Radar, ShieldCheck, SlidersHorizontal, Target, Workflow, Wrench
-} from '@lucide/vue'
+import { Bell, FolderKanban, KeyRound, SlidersHorizontal, Target, Workflow } from '@lucide/vue'
 
 import { activePage, panelsOpen, pageNames } from '../store'
-import WorkbenchPanel from './panels/WorkbenchPanel.vue'
+import SrcAutopilotPanel from './panels/SrcAutopilotPanel.vue'
+import FindingsPanel from './panels/FindingsPanel.vue'
 import ProjectsPanel from './panels/ProjectsPanel.vue'
 import TrajectoryPanel from './panels/TrajectoryPanel.vue'
-import IntakePanel from './panels/IntakePanel.vue'
-import AssetsPanel from './panels/AssetsPanel.vue'
-import RunsPanel from './panels/RunsPanel.vue'
-import ApprovalsPanel from './panels/ApprovalsPanel.vue'
-import FindingsPanel from './panels/FindingsPanel.vue'
-import ReportsPanel from './panels/ReportsPanel.vue'
-import IntelligencePanel from './panels/IntelligencePanel.vue'
-import PocPanel from './panels/PocPanel.vue'
-import SecretsPanel from './panels/SecretsPanel.vue'
-import SandboxPanel from './panels/SandboxPanel.vue'
-import RoutesPanel from './panels/RoutesPanel.vue'
 import HealthPanel from './panels/HealthPanel.vue'
-import ProfilesPanel from './panels/ProfilesPanel.vue'
-import HarnessPanel from './panels/HarnessPanel.vue'
-import SrcAutopilotPanel from './panels/SrcAutopilotPanel.vue'
+import SecretsPanel from './panels/SecretsPanel.vue'
 
 const icon = (component: Component) => () => h(NIcon, null, { default: () => h(component) })
 
 const ICONS: Record<string, Component> = {
-  workbench: Gauge,
+  'src-autopilot': Target,
+  findings: Bell,
   projects: FolderKanban,
   trajectory: Workflow,
-  intake: Target,
-  assets: Fingerprint,
-  runs: Activity,
-  approvals: ShieldCheck,
-  findings: Bell,
-  reports: FileCheck2,
-  intelligence: Radar,
-  'src-autopilot': Target,
-  poc: Archive,
-  secrets: KeyRound,
-  sandbox: Wrench,
-  routes: Network,
   health: SlidersHorizontal,
-  profiles: Layers,
-  harness: Wrench
+  secrets: KeyRound
 }
 
-// 核心:SRC 工作流日常真正会用到的
-const CORE_KEYS = ['src-autopilot', 'findings', 'projects', 'trajectory', 'health']
-// 更多:低频运维面板,折叠收纳
-const MORE_KEYS = [
-  'workbench', 'intake', 'assets', 'runs', 'approvals', 'reports',
-  'intelligence', 'poc', 'secrets', 'sandbox', 'routes', 'profiles', 'harness'
-]
+const PANEL_KEYS = ['src-autopilot', 'findings', 'projects', 'trajectory', 'health', 'secrets']
 
-const toOption = (key: string): MenuOption => ({
+const menuOptions: MenuOption[] = PANEL_KEYS.map(key => ({
   label: pageNames[key] ?? key,
   key,
   icon: ICONS[key] ? icon(ICONS[key]) : undefined
-})
+}))
 
-const menuOptions: MenuOption[] = [
-  { type: 'group', label: '核心', key: '__core', children: CORE_KEYS.map(toOption) },
-  { label: '更多工具', key: '__more', children: MORE_KEYS.map(toOption) }
-]
-
-const selectOptions = [...CORE_KEYS, ...MORE_KEYS].map(k => ({ label: pageNames[k] ?? k, value: k }))
+const selectOptions = PANEL_KEYS.map(key => ({ label: pageNames[key] ?? key, value: key }))
 
 const panelComponents: Record<string, Component> = {
-  workbench: WorkbenchPanel,
+  'src-autopilot': SrcAutopilotPanel,
+  findings: FindingsPanel,
   projects: ProjectsPanel,
   trajectory: TrajectoryPanel,
-  intake: IntakePanel,
-  assets: AssetsPanel,
-  runs: RunsPanel,
-  approvals: ApprovalsPanel,
-  findings: FindingsPanel,
-  reports: ReportsPanel,
-  intelligence: IntelligencePanel,
-  poc: PocPanel,
-  secrets: SecretsPanel,
-  sandbox: SandboxPanel,
-  routes: RoutesPanel,
   health: HealthPanel,
-  profiles: ProfilesPanel,
-  harness: HarnessPanel,
-  'src-autopilot': SrcAutopilotPanel
+  secrets: SecretsPanel
 }
 
-const activePanel = computed(() => panelComponents[activePage.value] ?? WorkbenchPanel)
+const activePanel = computed(() => panelComponents[activePage.value] ?? SrcAutopilotPanel)
 </script>
 
 <template>
@@ -126,5 +76,4 @@ const activePanel = computed(() => panelComponents[activePage.value] ?? Workbenc
 }
 .pd-menu :deep(.n-menu-item-content) { border-radius: 9px; }
 .pd-menu :deep(.n-menu-item-content-header) { font-size: 13px; }
-.pd-menu :deep(.n-menu-item-group-title) { font-size: 11px; }
 </style>

@@ -72,28 +72,16 @@ export async function resolveIntakeProfile(preferred: string): Promise<string> {
 }
 
 export const pageNames: Record<string, string> = {
-  workbench: '工作台',
+  'src-autopilot': 'SRC 黑板',
+  findings: '发现与证据',
   projects: '项目',
   trajectory: '会话/轨迹',
-  intake: '目标接入',
-  assets: '资产与指纹',
-  runs: '目标运行',
-  approvals: '人工确认',
-  findings: '发现与证据',
-  reports: '报告与核销',
-  intelligence: '资讯雷达',
-  'src-autopilot': 'SRC 自动化',
-  poc: 'PoC 关联',
-  secrets: '密钥状态',
-  sandbox: '工具隔离',
-  routes: '线路与代理',
   health: '运行健康',
-  profiles: '测试策略',
-  harness: 'Harness (dsh)'
+  secrets: '密钥状态'
 }
 
 // ---- 壳状态:主视图可在「对话台」与「SRC 挖掘」间切换,旧面板降入次级抽屉 ----
-export const activePage = ref('workbench')
+export const activePage = ref('src-autopilot')
 export const panelsOpen = ref(false)
 // 主视图:src = LLM SRC 挖掘台(默认);chat = 原 Strix 对话台
 export const mainView = ref<'src' | 'chat'>('src')
