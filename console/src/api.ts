@@ -81,16 +81,20 @@ export interface SrcCandidate {
   sources: string[]; phase: string; status: string; requires_human_review: boolean; updated_at: number
 }
 export interface SrcIntent {
-  intent_id: string; candidate_id: string; priority: number; phase: string; status: string
+  intent_id: string; candidate_id: string; target?: string; priority: number; phase: string; status: string
   requires_human_review: boolean; updated_at: number
+  depends_on?: string[]; attempts?: number; max_attempts?: number; last_error?: string
 }
 export interface SrcClaim { intent_id: string; worker_id: string; heartbeat_at: number; lease_expires_at: number }
 export interface SrcDeadEnd { intent_id: string; reason: string; detail: string; created_at: number }
 export interface SrcHint { intent_id: string; hint: string; source: string; created_at: number }
+export interface SrcWorkmem { goal?: string; focus?: string; todos?: { todo_id: string; text: string; status: string }[] }
+export interface SrcTimelineItem { kind: string; summary: string; at: number }
 export interface SrcAutopilotView {
   schema: 'SrcAutopilotView/v1'; available: boolean; revision?: number; error?: string
   run: { run_id?: string; status?: string; round?: number; max_rounds?: number; stop_reason?: string; candidate_count?: number; no_new_rounds?: number; updated_at?: number }
   candidates: SrcCandidate[]; intents: SrcIntent[]; claims: SrcClaim[]; dead_ends: SrcDeadEnd[]; hints: SrcHint[]
+  workmem?: SrcWorkmem; timeline?: SrcTimelineItem[]
 }
 
 export async function loadIntel(limit = 60): Promise<IntelRow[]> {

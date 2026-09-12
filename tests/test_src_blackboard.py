@@ -179,5 +179,50 @@ class SrcBlackboardTimelineWorkmemTests(unittest.TestCase):
             self.assertEqual([], snapshot["workmem"]["todos"])
 
 
+class SrcBlackboardTemporalFactTests(unittest.TestCase):
+    """graphiti-style: facts carry a validity window; dead-ends invalidate, not delete."""
+
+    def test_sync_creates_episode_and_facts_are_temporal(self) -> None:
+        clock = [1000.0]
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", now_fn=lambda: clock[0])
+            board.sync_candidates(
+                [{"candidate_id": "SC-X", "url": "https://ex.com/x", "priority": 50}],
+                run_id="r1",
+            )
+            snap = board.snapshot()
+            fact = snap["facts"][0]
+            self.assertEqual(1000.0, fact["valid_from"])
+            self.assertIsNone(fact["valid_to"])
+            self.assertTrue(fact["episode_id"])
+            # the observation batch is recorded as a timeline episode
+            self.assertTrue(
+                any(i.get("item_id") == fact["episode_id"] and i.get("kind") == "episode"
+                    for i in snap["timeline"])
+            )
+
+    def test_dead_end_supersedes_fact_but_keeps_history(self) -> None:
+        clock = [1000.0]
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", now_fn=lambda: clock[0])
+            board.sync_candidates(
+                [{"candidate_id": "SC-Y", "url": "https://ex.com/y", "priority": 50}],
+                run_id="r2",
+            )
+            fact_id = board.snapshot()["facts"][0]["fact_id"]
+            intent_id = board.snapshot()["intents"][0]["intent_id"]
+
+            clock[0] = 1005.0
+            claim = board.claim_next("w1")
+            board.add_dead_end(intent_id, "no_finding")
+
+            fact = board.snapshot()["facts"][0]
+            self.assertEqual(1005.0, fact["valid_to"])
+            self.assertEqual("no_finding", fact["superseded_reason"])
+            # valid at t=1002, invalid at t=1010
+            self.assertIn(fact_id, [f["fact_id"] for f in board.facts_as_of(1002.0)])
+            self.assertNotIn(fact_id, [f["fact_id"] for f in board.facts_as_of(1010.0)])
+
+
 if __name__ == "__main__":
     unittest.main()

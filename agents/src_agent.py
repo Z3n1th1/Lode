@@ -410,6 +410,9 @@ _ALLOWED_METHODS = {"GET", "HEAD"}
 # "no finding" conclusions are NOT retried. Backoff is 0 so the retry happens
 # inside the bounded cycle loop; the attempt cap (default 3) bounds the work.
 RETRY_BACKOFF_SECONDS = 0.0
+# 收尾门:reasoner 想收尾但工作记忆里还有未完成 todo 时,最多再逼它跑这么多轮
+# (yaklang 的 "gate finish checkpoints on remaining todos")。
+MAX_STOP_BLOCKS = 2
 
 
 class SrcAgentLoop:
@@ -435,6 +438,7 @@ class SrcAgentLoop:
         total_findings = 0
         stop_reason = ""
         errors: List[str] = []
+        stop_blocks = 0
 
         for cycle in range(self.config.max_cycles):
             cycles_run = cycle + 1
@@ -466,6 +470,13 @@ class SrcAgentLoop:
                 errors.append("reasoner_returned_none")
                 break
             if reason_result.get("should_stop"):
+                # 收尾门:工作记忆里还有未完成 todo 就不许收尾,最多挡 MAX_STOP_BLOCKS 次。
+                open_todos = self._open_todos()
+                if open_todos and stop_blocks < MAX_STOP_BLOCKS:
+                    stop_blocks += 1
+                    errors.append(f"stop_blocked:{len(open_todos)}_open_todos")
+                    self._timeline("todo_gate", "", f"还有 {len(open_todos)} 个未完成 todo,暂不收敛")
+                    continue
                 stop_reason = reason_result.get("stop_reason", "reasoner_stopped")
                 break
 
@@ -519,6 +530,17 @@ class SrcAgentLoop:
             self.blackboard.timeline_append(kind, intent_id=intent_id, summary=summary)
         except Exception:  # noqa: BLE001 - timeline is advisory
             pass
+
+    def _open_todos(self) -> List[Dict[str, Any]]:
+        """Unfinished working-memory todos (gates the finish checkpoint)."""
+        try:
+            workmem = self.blackboard.snapshot().get("workmem") or {}
+        except Exception:  # noqa: BLE001 - gate is advisory if no blackboard
+            return []
+        return [
+            t for t in (workmem.get("todos") or [])
+            if isinstance(t, dict) and t.get("status") == "open"
+        ]
 
     def _reason(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Call LLM Reasoner to select intents and generate hypotheses."""

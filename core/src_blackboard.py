@@ -113,6 +113,8 @@ class SrcBlackboard:
             facts = {str(item.get("fact_id")): item for item in state["facts"] if item.get("fact_id")}
             intents = {str(item.get("intent_id")): item for item in state["intents"] if item.get("intent_id")}
             added_facts = added_intents = 0
+            # 本批观察 = 一个 episode(graphiti 概念):所有事实都带溯源到它。
+            episode_id = "T-" + _digest("episode", run_id, now, len(state["timeline"]))
             for candidate in candidates[:MAX_ITEMS]:
                 if not isinstance(candidate, Mapping):
                     continue
@@ -132,6 +134,11 @@ class SrcBlackboard:
                         "sources": [_text(item, 40) for item in (candidate.get("sources") or [])[:12]],
                         "run_id": _text(run_id, 80),
                         "confidence": "observed",
+                        # 时序事实(graphiti 式):失效不删除,保留有效期窗口。
+                        "valid_from": now,
+                        "valid_to": None,
+                        "superseded_by": "",
+                        "episode_id": episode_id,
                         "created_at": now,
                         "updated_at": now,
                     }
@@ -170,6 +177,15 @@ class SrcBlackboard:
                     intent["updated_at"] = now
             state["facts"] = list(facts.values())[-MAX_ITEMS:]
             state["intents"] = sorted(intents.values(), key=lambda item: (-int(item.get("priority") or 0), item["intent_id"]))[:MAX_ITEMS]
+            state["timeline"].append({
+                "item_id": episode_id,
+                "at": now,
+                "kind": "episode",
+                "intent_id": "",
+                "bucket": int(now // (TIMELINE_BUCKET_MINUTES * 60)),
+                "summary": f"observe run={_text(run_id, 80)} facts+{added_facts} intents+{added_intents}",
+            })
+            state["timeline"] = state["timeline"][-MAX_TIMELINE_ITEMS:]
             self._event(state, "candidates_synced", {"run_id": _text(run_id, 80), "facts": added_facts, "intents": added_intents})
             self._save_unlocked(state)
             return {"facts_added": added_facts, "intents_added": added_intents}
@@ -203,6 +219,13 @@ class SrcBlackboard:
                 if intent:
                     intent["status"] = "dead_end"
                     intent["updated_at"] = self._now()
+                    # 死路 = 对应候选事实失效(保留历史窗口,不删除)。
+                    cid = _text(intent.get("candidate_id"), 80)
+                    if cid:
+                        self._supersede_fact_unlocked(
+                            state, "F-" + _digest("candidate", cid),
+                            reason=reason, now=self._now(),
+                        )
                 self._event(state, "dead_end_recorded", {"intent_id": intent_id, "reason": reason})
                 self._save_unlocked(state)
             return row
@@ -442,6 +465,68 @@ class SrcBlackboard:
             self._event(state, "timeline_compressed", {"folded": len(older), "version": head["version"]})
             self._save_unlocked(state)
             return dict(head)
+
+    # ---------- 时序事实(graphiti 式:失效不删除,保留有效期)----------
+
+    def supersede_fact(self, fact_id: str, *, by_fact_id: str = "", reason: str = "") -> Dict[str, Any]:
+        """Invalidate a fact without deleting it (keeps its validity window)."""
+        fact_id = _text(fact_id, 80)
+        if not fact_id:
+            raise ValueError("fact_id_required")
+        with AdvisoryFileLock(self.lock_path):
+            state = self._load_unlocked(create=True)
+            row = self._supersede_fact_unlocked(
+                state, fact_id, by_fact_id=by_fact_id, reason=reason, now=self._now(),
+            )
+            if row is None:
+                raise ValueError("fact_not_found")
+            self._event(state, "fact_superseded", {"fact_id": fact_id, "by": _text(by_fact_id, 80)})
+            self._save_unlocked(state)
+            return dict(row)
+
+    def facts_as_of(self, ts: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Facts whose validity window covers ``ts`` (default: now)."""
+        at = self._now() if ts is None else float(ts)
+        with AdvisoryFileLock(self.lock_path, create=False):
+            state = self._load_unlocked(create=False)
+        out: List[Dict[str, Any]] = []
+        for fact in state["facts"]:
+            start_raw = fact.get("valid_from")
+            if start_raw is None:
+                start_raw = fact.get("created_at")
+            try:
+                start = float(start_raw or 0)
+            except (TypeError, ValueError):
+                start = 0.0
+            end_raw = fact.get("valid_to")
+            try:
+                end = float(end_raw) if end_raw is not None else None
+            except (TypeError, ValueError):
+                end = None
+            if start <= at and (end is None or end > at):
+                out.append(fact)
+        return out
+
+    @staticmethod
+    def _supersede_fact_unlocked(
+        state: Dict[str, Any],
+        fact_id: str,
+        *,
+        by_fact_id: str = "",
+        reason: str = "",
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        fact = next((f for f in state["facts"] if f.get("fact_id") == fact_id), None)
+        if fact is None:
+            return None
+        if fact.get("valid_to") is None:
+            stamp = time.time() if now is None else now
+            fact["valid_to"] = stamp
+            fact["superseded_by"] = _text(by_fact_id, 80)
+            if reason:
+                fact["superseded_reason"] = _safe_text(reason, 120)
+            fact["updated_at"] = stamp
+        return fact
 
     # ---------- 工作记忆(yaklang TODO delta 的轻量版)----------
 

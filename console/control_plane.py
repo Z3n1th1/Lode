@@ -1431,10 +1431,16 @@ class ReadOnlyControlPlane:
         intents_view = [{
             "intent_id": _text(item.get("intent_id"), limit=80),
             "candidate_id": _text(item.get("candidate_id"), limit=80),
+            "target": _text(item.get("target"), limit=300),
             "priority": max(0, min(100, int(_number(item.get("priority"))))),
             "phase": _text(item.get("phase"), limit=64),
             "status": _text(item.get("status"), limit=24),
             "requires_human_review": item.get("requires_human_review") is True,
+            # DAG 依赖边 + 失败重试状态
+            "depends_on": [_text(dep, limit=80) for dep in (item.get("depends_on") or [])[:12]],
+            "attempts": max(0, int(_number(item.get("attempts")))),
+            "max_attempts": max(1, int(_number(item.get("max_attempts")) or 3)),
+            "last_error": _text(item.get("last_error"), limit=160),
             "updated_at": _number(item.get("updated_at")),
         } for item in board.get("intents", [])[:MAX_VISIBLE_ITEMS * 5] if isinstance(item, dict)]
         claims_view = [{
@@ -1455,6 +1461,21 @@ class ReadOnlyControlPlane:
             "source": _text(item.get("source"), limit=64),
             "created_at": _number(item.get("created_at")),
         } for item in board.get("hints", [])[-MAX_VISIBLE_ITEMS:] if isinstance(item, dict)]
+        wm_raw = board.get("workmem") if isinstance(board.get("workmem"), dict) else {}
+        workmem_view = {
+            "goal": _text(wm_raw.get("goal"), limit=500),
+            "focus": _text(wm_raw.get("focus"), limit=300),
+            "todos": [{
+                "todo_id": _text(t.get("todo_id"), limit=60),
+                "text": _text(t.get("text"), limit=300),
+                "status": _text(t.get("status"), limit=16),
+            } for t in (wm_raw.get("todos") or [])[-MAX_VISIBLE_ITEMS:] if isinstance(t, dict)],
+        }
+        timeline_view = [{
+            "kind": _text(item.get("kind"), limit=32),
+            "summary": _text(item.get("summary"), limit=220),
+            "at": _number(item.get("at")),
+        } for item in (board.get("timeline") or [])[-60:] if isinstance(item, dict)]
         return {
             "schema": "SrcAutopilotView/v1",
             "available": True,
@@ -1474,6 +1495,8 @@ class ReadOnlyControlPlane:
             "claims": claims_view,
             "dead_ends": dead_ends_view,
             "hints": hints_view,
+            "workmem": workmem_view,
+            "timeline": timeline_view,
         }
 
     def snapshot(self) -> Dict[str, Any]:

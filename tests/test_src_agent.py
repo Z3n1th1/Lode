@@ -341,6 +341,38 @@ class TestSrcAgentLoop(unittest.TestCase):
             self.assertEqual(intent["status"], "dead_end")
             self.assertGreaterEqual(len(summary["errors"]), 1)
 
+    def test_stop_is_blocked_while_todos_are_open(self):
+        """reasoner says stop, but open workmem todos gate the finish checkpoint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            scope = _make_scope()
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            bb.workmem_apply_todos([
+                {"op": "add", "text": "verify IDOR on /user/{id}"},
+                {"op": "add", "text": "re-check the 500 endpoint"},
+            ])
+
+            def always_stop(system, user, **kw):
+                return json.dumps({
+                    "reasoning": "looks done", "should_stop": True,
+                    "stop_reason": "all_done", "selected_intents": [],
+                })
+
+            summary = run_src_agent(
+                bb_path, scope,
+                max_cycles=5,
+                fetcher=lambda url, **kw: (200, "ok", {}),
+                llm_complete_fn=always_stop,
+                worker_id="test-w",
+            )
+            self.assertTrue(
+                any(str(e).startswith("stop_blocked") for e in summary["errors"]),
+                summary["errors"],
+            )
+            # blocked the configured number of times before finally allowing the stop
+            self.assertEqual("all_done", summary["stop_reason"])
+
     def test_blackboard_not_found(self):
         scope = _make_scope()
         # Hermetic: a path that cannot exist, inside a temp dir (never touches the
