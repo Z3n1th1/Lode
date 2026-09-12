@@ -40,7 +40,7 @@ python lode.py console
 **后台常驻**（Windows 服务）：
 ```powershell
 # 用 NSSM 或任务计划程序
-nssm install Lode "C:\Python311\python.exe" "E:\LLM\lode\lode.py console"
+nssm install Lode "C:\Python311\python.exe" "E:\LLM\Lode\lode.py console"
 ```
 
 ---
