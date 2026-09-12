@@ -1,0 +1,3 @@
+﻿value,kind,source,sources,observed_at,confidence,scope_status,evidence_ref,tags,score,is_new
+https://example.com/,url,builtin-seed,builtin-seed,2026-08-18T16:18:44Z,1.0,in_scope,scope.seed_urls,scope-seed,40.0,False
+https://api.example.com/docs,url,fixture-file,fixture-file,2026-08-18T16:18:44Z,0.5,in_scope,,api,28.0,False

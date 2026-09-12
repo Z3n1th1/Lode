@@ -1,0 +1,12 @@
+[Unit]
+Description=Run SignalHarbor every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* *:00,30:00
+RandomizedDelaySec=60s
+Persistent=true
+Unit=signalharbor.service
+
+[Install]
+WantedBy=timers.target

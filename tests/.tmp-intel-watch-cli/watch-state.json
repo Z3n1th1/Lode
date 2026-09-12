@@ -1,0 +1,13 @@
+{
+  "consecutive_errors": 0,
+  "interval_sec": 1.0,
+  "last_error": "",
+  "last_run_id": "20260818T161844Z-aba35b86",
+  "max_runs": 2,
+  "program": "fixture-src",
+  "runs_completed": 2,
+  "schema": "IntelWatchState/v1",
+  "started_at": "2026-08-18T16:18:43Z",
+  "status": "completed",
+  "stopped_at": "2026-08-18T16:18:44Z"
+}

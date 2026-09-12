@@ -1,0 +1,2 @@
+{"confidence": 1.0, "evidence_ref": "scope.seed_urls", "is_new": true, "kind": "url", "observed_at": "2026-08-18T16:04:19Z", "scope_status": "in_scope", "score": 65.0, "source": "seed", "sources": ["seed"], "tags": ["scope-seed"], "value": "https://example.com/"}
+{"confidence": 0.5, "evidence_ref": "", "is_new": true, "kind": "url", "observed_at": "2026-08-18T16:04:19Z", "scope_status": "in_scope", "score": 53.0, "source": "fixture-file", "sources": ["fixture-file"], "tags": ["api"], "value": "https://api.example.com/docs"}

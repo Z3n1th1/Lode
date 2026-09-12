@@ -1,0 +1,17 @@
+schema: ModelPolicy/v1
+# 2026-08-07 用户拍板：只用 deepseek + grok（token 管够，暂不加其他）；决策层用 deepseek。
+# 这是 SSOT（仓库为源），部署时同步到 VPS 并注入真实密钥到 .env（.env 绝不进 git）。
+providers:
+  deepseek: {api_key_env: DEEPSEEK_API_KEY, base_url: "https://api.deepseek.com"}
+  grok:     {api_key_env: GROK_API_KEY,     base_url: "https://api.x.ai/v1"}
+defaults:
+  max_tokens: null        # 不限制返回长度（用户要求）
+  reasoning: prefer        # 低成本模型优先走深度推理/思考，强化能力
+tiers:
+  extraction: deepseek            # 提取/分诊/摘要/假设发散
+  reasoning: deepseek             # 判断主力
+  diversity_second_opinion: grok  # MoA 跨厂商第二意见（Verifier≠执行者）
+  decision: deepseek              # 决策层（用户拍板）
+note: >
+  目前无 agent runtime 消费本配置（仅 guardrails-mcp 已建，不调 LLM）；
+  真实密钥（从本地 Hermes 取）在 agent runtime 落地时注入 .env，绝不进 git。

@@ -1,0 +1,67 @@
+# xiasql-core：ORDER BY 注入评判规则（自研插件正式提取）
+# 来源：bp extension/sql/sankai-xiasql/h4nsec-xiasql-codex-Claude/h4nsec-xiasql-stable.py
+# 提取日期：2026-08-07；提取人：主 agent（worker 网络失败后本地完成）
+# 价值：相比简单参数名表，这套规则有【归一化】【两级判定（字段名/方向名）】【响应侧确认】三层设计，误报更低。
+schema: TrafficRuleSet/v1
+rule_set: xiasql-core
+source: 自研 xiasql burp 插件（自用）
+rationale: ORDER BY 拼接点无法参数化，报错回显快、出洞率高；响应侧确认机制可区分"参数被采信"与"参数被忽略"
+
+normalization:
+  # 判定前参数名归一化：去全部非字母数字字符 + 小写（sort_name/sort-name/sortName 归一为 sortname）
+  strip_non_alnum: true
+  lowercase: true
+
+rules:
+  - id: xiasql_order_field
+    category: sqli_orderby
+    priority: P0
+    match:
+      type: param_name_normalized
+      exact: [sort, sortby, sortfield, sortcolumn, orderby, orderfield, ordercolumn,
+              sortorder, sorttype, sortrule, column, field]
+      prefix: [sort, orderby]
+      suffix: [.field, .column]      # 归一化前判定（带点号后缀）
+    suggested_action: ORDER BY 注入候选；先 baseline，再单引号/报错/布尔差异探针（人工门内）
+    rationale: 排序字段名参数直接拼 ORDER BY 的概率最高
+
+  - id: xiasql_order_direction
+    category: sqli_orderby
+    priority: P0
+    match:
+      type: param_name_normalized
+      exact: [order, dir, direction, sortdir, orderdir, ordertype, desc, asc]
+      suffix: [.order, .dir, .direction]
+      ends_with: [dir, direction]
+    suggested_action: 同上；方向参数常被直接拼接（ASC/DESC 位置）
+    rationale: 方向参数若未白名单校验即为拼接点
+
+  - id: xiasql_order_candidate
+    category: sqli_orderby
+    priority: P1
+    match:
+      type: param_name_normalized
+      contains: [sort, order, dir, direction, column, field]
+    suggested_action: 排序相关宽候选；优先级低于精确命中
+    rationale: 宽匹配兜底，由值格式与响应侧确认收敛
+
+  - id: xiasql_order_response_confirm
+    category: sqli_orderby_confirm
+    priority: P0
+    match:
+      type: response_json_key     # 响应 JSON 键出现排序参数名（含路径分隔变体）
+      key_pattern: '(?i)(^|[._\[\]-])(sort|order|orderby|sortby|sortfield|sortcolumn|sortorder|sorttype|sortrule|orderfield|ordercolumn|ordertype|sortdir|orderdir|direction|dir)([._\[\]-]|$)'
+      normalized_keys: [sort, sortby, sortfield, sortcolumn, orderby, orderfield, ordercolumn,
+                        sortorder, sorttype, sortrule, sortval, sortname, column, field,
+                        order, dir, direction, sortdir, orderdir, ordertype, desc, asc]
+    suggested_action: 响应回显排序键=参数被采信的证据；与请求侧命中配对时升 candidate
+    rationale: 请求参数名出现在响应 JSON 键中，说明服务端真的消费了该参数——区分"采信"与"忽略"，这是降误报的关键确认步骤
+
+confidence_rules:
+  - when: 仅请求侧命中（order_field/order_direction）
+    confidence: hint
+  - when: 请求侧命中 + 响应侧确认（response_confirm 同端点命中）
+    confidence: candidate
+  - when: candidate + 值格式为"字段名/列号/字段+方向一体"（如 asc,desc / createTime / 1 / id asc）
+    confidence: urgent
+    note: 值格式分级来自插件 order.txt：纯字段名、纯列号、字段+方向一体为高风险

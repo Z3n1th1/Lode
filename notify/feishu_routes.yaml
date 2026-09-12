@@ -1,0 +1,12 @@
+schema: FeishuRoutes/v1
+# 2026-08-08 探测得到的真实 chat_id(小夏机器人已在这 4 个群，token+list+send 全部实测通过）。
+# 这里只有群 ID（非机密）；app_secret 绝不写这里——运行时从环境 FEISHU_APP_SECRET 读。
+base: https://open.feishu.cn
+app_id_env: FEISHU_APP_ID
+app_secret_env: FEISHU_APP_SECRET
+routes:
+  security_alert: {chat_id: oc_9feba6983c60c6511b610244f6b030bc, group: pa-安全告警}   # 新登录IP/异常痕迹/护栏拦截高危
+  human_approval: {chat_id: oc_9db6bfc734e7f868782557eafa7a1087, group: pa-人工审批}   # 审批门 + 敏感解密2FA申请
+  finding:        {chat_id: oc_c40d6ec7f7b89292096bffb2e3d04773, group: pa-发现成果}   # 二次验证通过的确认发现/报告草稿
+  ops_selfcheck:  {chat_id: oc_f659b9aba170eba15da8beb213382b2f, group: pa-运行自查}   # 定期任务预告+结果/备份/drift/audit/心跳
+default: ops_selfcheck

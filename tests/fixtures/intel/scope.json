@@ -1,0 +1,7 @@
+{
+  "program": "fixture-src",
+  "authorization": "offline authorized fixture",
+  "allowed_domains": ["example.com"],
+  "allowed_ips": [],
+  "seed_urls": ["https://example.com/"]
+}

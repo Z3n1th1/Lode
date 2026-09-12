@@ -1,0 +1,32 @@
+{
+  "program": "eternal-hackerone",
+  "authorization": "HackerOne Bug Bounty Program - Eternal Security Team authorized testing per program policy. SQLi campaign active Sept 5-13 2026.",
+  "scope": {
+    "allowed_domains": [
+      "zomato.com",
+      "blinkit.com",
+      "zomans.com",
+      "runnr.in",
+      "hyperpure.com",
+      "grofers.com",
+      "grofer.io",
+      "district.in",
+      "insider.in",
+      "eternal.com"
+    ],
+    "allowed_hosts": [
+      "api2.grofers.com",
+      "api.grofers.com",
+      "www.district.in",
+      "mcp-server.zomato.com"
+    ],
+    "forbidden_hosts": [
+      "ticketnew.com",
+      "edition.in"
+    ],
+    "rate_limit": {
+      "timeout_seconds": 10,
+      "surface_delay_seconds": 1.0
+    }
+  }
+}

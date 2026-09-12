@@ -1,0 +1,15 @@
+{
+  "program": "replace-with-authorized-program",
+  "authorization": "",
+  "allowed_domains": [],
+  "allowed_hosts": [],
+  "allowed_ips": [],
+  "forbidden_hosts": [],
+  "seed_urls": [],
+  "rate_limit": {
+    "timeout_seconds": 8,
+    "surface_delay_seconds": 0.4
+  },
+  "max_items": 200
+}
+

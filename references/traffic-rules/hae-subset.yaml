@@ -1,0 +1,87 @@
+# hae-subset：敏感信息被动识别规则子集（HaE 公开分类重建）
+# 来源：gh0stkey/HaE（★4.4k）公开规则分类；本次代理断连未能同步官方 Rules.yml，
+#       按 HaE 公开分类重建核心子集；联网后同步官方规则并 diff 替换。
+# 提取日期：2026-08-07
+schema: TrafficRuleSet/v1
+rule_set: hae-subset
+source: gh0stkey/HaE 公开分类重建
+rationale: 敏感信息/凭据是最常见的"低垂果实"与高危入口；被动识别零成本
+
+rules:
+  - id: hae_cloud_aksk
+    category: credential
+    priority: P0
+    match:
+      type: body_regex
+      scope: [response, request]
+      pattern: '(?i)\b(AKID[A-Za-z0-9]{13,}|LTAI[A-Za-z0-9]{12,}|AKIA[A-Z0-9]{16}|AIza[0-9A-Za-z\-_]{35})\b'
+    suggested_action: 云 AK/SK 泄露候选；本地验证指纹→FQDN 精确放行流程（铁律 D）
+    rationale: 腾讯 LTAI/阿里 AKID/AWS AKIA/Google AIza 是格式确定性最高的云凭据前缀
+
+  - id: hae_jwt
+    category: credential
+    priority: P1
+    match:
+      type: body_regex
+      scope: [response, request]
+      pattern: 'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    suggested_action: JWT 本地解码（A0）；弱密钥离线试算走 jwt-offline（零目标流量）
+    rationale: JWT 结构确定，离线可判 alg/有效期/敏感声明
+
+  - id: hae_generic_secret
+    category: credential
+    priority: P1
+    match:
+      type: body_regex
+      scope: [response]
+      pattern: '(?i)(secret|secretkey|secret_key|appsecret|client_secret|apikey|api_key|access_key|private_key)["\x27]?\s*[:=]\s*["\x27][A-Za-z0-9/+=_\-]{8,}["\x27]'
+    suggested_action: 密钥类字段泄露候选；先判归属（自己凭证职责内不报——三问归属问）
+    rationale: 通用密钥字段名；注意与"返回本账号自己的 SDK 密钥"误报区分
+
+  - id: hae_internal_ip
+    category: info_disclosure
+    priority: P1
+    match:
+      type: body_regex
+      scope: [response]
+      pattern: '\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b'
+    suggested_action: 内网地址泄露；只记录（是拼图不是漏洞），进 Observations/信息集
+    rationale: 内网 IP 辅助拓扑推断；单独不构成漏洞，不升 candidate
+
+  - id: hae_email
+    category: info_disclosure
+    priority: P2
+    match:
+      type: body_regex
+      scope: [response]
+      pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+    suggested_action: 邮箱收集；批量大体积命中才提示（防噪声）
+    rationale: 低价值；只在批量暴露（员工邮箱清单级）时升级
+
+  - id: hae_phone_cn
+    category: info_disclosure
+    priority: P2
+    match:
+      type: body_regex
+      scope: [response]
+      pattern: '\b1[3-9]\d{9}\b'
+    suggested_action: 手机号命中；注意与测试数据/占位号段区分；批量出现=PII 泄露候选（人工门后验证归属）
+    rationale: 中国手机号格式；单个出现大概率是测试数据，批量出现才有意义
+
+  - id: hae_stack_trace
+    category: debug_leak
+    priority: P1
+    match:
+      type: body_regex
+      scope: [response]
+      pattern: '(?i)(at\s+[\w.$]+\([\w.]+\.java:\d+\)|Traceback \(most recent call last\)|PHP (Notice|Warning|Fatal error)|NullPointerException|com\.alibaba\.fastjson)'
+    suggested_action: 栈追踪/debug 泄露；含框架指纹则触发知识加载链（fastjson/ThinkPHP/Spring）
+    rationale: 栈追踪同时泄露代码路径、框架与版本线索，是首开 checklist 的命中信号
+
+confidence_rules:
+  - when: 命中且为单点出现
+    confidence: hint
+  - when: 命中且响应含真实业务数据/批量同类（≥10 条）
+    confidence: candidate
+  - when: credential 类命中且字段值非占位/非示例
+    confidence: urgent

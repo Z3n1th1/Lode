@@ -1,0 +1,4 @@
+[
+  {"value":"https://www.cisa.gov/known-exploited-vulnerabilities-catalog","kind":"cve","source":"demo-security","title":"CISA Known Exploited Vulnerabilities Catalog","summary":"公开漏洞目录演示条目；仅用于验证安全雷达链路。","tags":["security","cve","public-intel"]},
+  {"value":"https://www.schneier.com/blog/archives/2026/01/security-research.html","kind":"article","source":"demo-security","title":"Security research article (demo)","summary":"公开安全研究文章演示条目，不代表已验证漏洞。","tags":["security","research","public-intel"]}
+]

@@ -1,0 +1,4 @@
+[
+  {"value": "https://api.example.com/docs", "kind": "url", "source": "fixture-file", "tags": ["api"]},
+  {"value": "https://outside.example.net/admin", "kind": "url", "source": "fixture-file"}
+]

@@ -1,0 +1,36 @@
+{
+  "schema": "IntelSources/v1",
+  "sources": [
+    {
+      "enabled": true,
+      "id": "builtin-seed",
+      "item_count": 1,
+      "kind": "builtin",
+      "last_error": "",
+      "last_run": "2026-08-18T16:04:19Z",
+      "last_status": "ok",
+      "name": "授权范围 seed",
+      "provider": "seed",
+      "tags": [
+        "passive",
+        "scope"
+      ],
+      "trusted": true,
+      "url": ""
+    },
+    {
+      "enabled": true,
+      "id": "builtin-crtsh",
+      "kind": "builtin",
+      "name": "crt.sh 证书透明度",
+      "provider": "crtsh",
+      "tags": [
+        "passive",
+        "certificate",
+        "subdomain"
+      ],
+      "trusted": true,
+      "url": "https://crt.sh/"
+    }
+  ]
+}

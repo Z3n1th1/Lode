@@ -1,0 +1,62 @@
+{
+  "schema": "IntelSources/v1",
+  "sources": [
+    {
+      "id": "research-project-zero",
+      "provider": "rss",
+      "kind": "rss",
+      "name": "Google Project Zero",
+      "url": "https://googleprojectzero.blogspot.com/feeds/posts/default",
+      "enabled": true,
+      "trusted": true,
+      "interval_sec": 3600,
+      "tags": ["research", "vulnerability", "disclosure"]
+    },
+    {
+      "id": "research-github-security-lab",
+      "provider": "rss",
+      "kind": "rss",
+      "name": "GitHub Security Lab",
+      "url": "https://github.blog/security/vulnerability-research/feed/",
+      "enabled": true,
+      "trusted": true,
+      "interval_sec": 3600,
+      "tags": ["research", "vulnerability", "disclosure"]
+    },
+    {
+      "id": "research-portswigger",
+      "provider": "rss",
+      "kind": "rss",
+      "name": "PortSwigger Research",
+      "url": "https://portswigger.net/research/rss",
+      "enabled": true,
+      "trusted": true,
+      "interval_sec": 3600,
+      "tags": ["research", "web-security", "disclosure"]
+    },
+    {
+      "id": "poc-nuclei-templates-releases",
+      "provider": "rss",
+      "kind": "rss",
+      "name": "Nuclei templates releases",
+      "url": "https://github.com/projectdiscovery/nuclei-templates/releases.atom",
+      "enabled": true,
+      "trusted": true,
+      "interval_sec": 3600,
+      "tags": ["poc", "template", "release"]
+    },
+    {
+      "id": "social-x-public-security",
+      "provider": "twitter",
+      "kind": "twitter",
+      "name": "X public security watch",
+      "url": "https://api.x.com/2/tweets/search/recent",
+      "query": "(CVE OR vulnerability OR 0day) (PoC OR exploit OR disclosure) -is:retweet lang:en",
+      "enabled": false,
+      "trusted": false,
+      "interval_sec": 1800,
+      "tags": ["social", "public-intel", "untrusted-content", "credentialed"]
+    }
+  ]
+}
+

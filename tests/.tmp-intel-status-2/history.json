@@ -1,0 +1,7 @@
+{
+  "keys": [
+    "url:https://api.example.com/docs",
+    "url:https://example.com/"
+  ],
+  "schema": "IntelHistory/v1"
+}

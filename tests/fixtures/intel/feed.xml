@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel>
+  <item><title>API update</title><link>https://api.example.com/docs</link><description>Authorized API documentation changed.</description></item>
+  <item><title>Foreign research</title><link>https://outside.example.net/admin</link><description>Public research article, stored as metadata only.</description></item>
+</channel></rss>

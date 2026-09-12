@@ -1,0 +1,274 @@
+{
+  "schema": "IntelSources/v1",
+  "sources": [
+    {
+      "enabled": true,
+      "id": "builtin-seed",
+      "item_count": 1,
+      "kind": "builtin",
+      "last_error": "",
+      "last_run": "2026-09-05T18:21:24Z",
+      "last_status": "ok",
+      "name": "授权范围 seed",
+      "provider": "seed",
+      "tags": [
+        "passive",
+        "scope"
+      ],
+      "trusted": true,
+      "url": ""
+    },
+    {
+      "enabled": true,
+      "id": "builtin-crtsh",
+      "item_count": 0,
+      "kind": "builtin",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "crt.sh 证书透明度",
+      "provider": "crtsh",
+      "tags": [
+        "passive",
+        "certificate",
+        "subdomain"
+      ],
+      "trusted": true,
+      "url": "https://crt.sh/"
+    },
+    {
+      "enabled": true,
+      "id": "builtin-cisa-kev",
+      "item_count": 0,
+      "kind": "builtin",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "CISA Known Exploited Vulnerabilities",
+      "provider": "cisa_kev",
+      "tags": [
+        "public-intel",
+        "cve",
+        "known-exploited"
+      ],
+      "trusted": true,
+      "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    },
+    {
+      "enabled": true,
+      "id": "security-project-zero",
+      "interval_sec": 3600,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Google Project Zero",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "research",
+        "vulnerability",
+        "disclosure"
+      ],
+      "trusted": true,
+      "url": "https://googleprojectzero.blogspot.com/feeds/posts/default"
+    },
+    {
+      "enabled": true,
+      "id": "security-portswigger",
+      "interval_sec": 3600,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "PortSwigger Research",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "web-security",
+        "research"
+      ],
+      "trusted": true,
+      "url": "https://portswigger.net/research/rss"
+    },
+    {
+      "enabled": true,
+      "id": "security-nuclei-releases",
+      "interval_sec": 3600,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Nuclei templates releases",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "poc",
+        "release"
+      ],
+      "trusted": true,
+      "url": "https://github.com/projectdiscovery/nuclei-templates/releases.atom"
+    },
+    {
+      "enabled": true,
+      "id": "ai-simon-willison",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Simon Willison / AI engineering",
+      "provider": "rss",
+      "tags": [
+        "ai",
+        "developer",
+        "engineering",
+        "research"
+      ],
+      "trusted": true,
+      "url": "https://simonwillison.net/atom/everything/"
+    },
+    {
+      "enabled": true,
+      "id": "ai-huggingface",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Hugging Face Blog",
+      "provider": "rss",
+      "tags": [
+        "ai",
+        "developer",
+        "open-source",
+        "model"
+      ],
+      "trusted": true,
+      "url": "https://huggingface.co/blog/feed.xml"
+    },
+    {
+      "enabled": true,
+      "id": "ai-the-batch",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "The Batch / DeepLearning.AI",
+      "provider": "rss",
+      "tags": [
+        "ai",
+        "research",
+        "industry"
+      ],
+      "trusted": true,
+      "url": "https://www.deeplearning.ai/the-batch/feed/"
+    },
+    {
+      "enabled": true,
+      "id": "ai-google",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Google AI",
+      "provider": "rss",
+      "tags": [
+        "ai",
+        "developer",
+        "industry"
+      ],
+      "trusted": true,
+      "url": "https://blog.google/technology/ai/rss/"
+    },
+    {
+      "enabled": true,
+      "id": "finance-sec",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "U.S. SEC Press Releases",
+      "provider": "rss",
+      "tags": [
+        "finance",
+        "markets",
+        "regulation",
+        "filings"
+      ],
+      "trusted": true,
+      "url": "https://www.sec.gov/news/pressreleases.rss"
+    },
+    {
+      "enabled": true,
+      "id": "finance-federal-reserve",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Federal Reserve Press Releases",
+      "provider": "rss",
+      "tags": [
+        "finance",
+        "markets",
+        "macro",
+        "central-bank"
+      ],
+      "trusted": true,
+      "url": "https://www.federalreserve.gov/feeds/press_all.xml"
+    },
+    {
+      "enabled": true,
+      "id": "finance-cnbc-markets",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "CNBC Markets",
+      "provider": "rss",
+      "tags": [
+        "finance",
+        "markets",
+        "news",
+        "untrusted-content"
+      ],
+      "trusted": false,
+      "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    },
+    {
+      "enabled": true,
+      "id": "finance-yahoo-markets",
+      "interval_sec": 1800,
+      "item_count": 0,
+      "kind": "rss",
+      "last_error": "UnsafeSourceUrl: source_host_not_public",
+      "last_run": "2026-09-05T18:04:36Z",
+      "last_status": "error",
+      "name": "Yahoo Finance Markets",
+      "provider": "rss",
+      "tags": [
+        "finance",
+        "markets",
+        "stocks",
+        "untrusted-content"
+      ],
+      "trusted": false,
+      "url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+[Unit]
+Description=SignalHarbor bounded public news collection cycle
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=signalharbor
+Group=signalharbor
+WorkingDirectory=/opt/signalharbor
+EnvironmentFile=-/etc/signalharbor/signalharbor.env
+# Missing DeepSeek credentials degrade to source summaries; the timer keeps running.
+ExecStart=/opt/signalharbor/.venv/bin/python -m news run --registry /etc/signalharbor/sources.news.json --state-dir /var/lib/signalharbor --allow-missing-ai
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/signalharbor
+InaccessiblePaths=-/opt/pa-agent -/var/lib/pa-agent -/etc/pa-agent -/opt/surfaceforge -/var/lib/surfaceforge -/etc/surfaceforge
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=256M
+CPUQuota=30%
+TimeoutStartSec=600
+UMask=027
+
+[Install]
+WantedBy=multi-user.target

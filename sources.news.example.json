@@ -1,0 +1,14 @@
+{
+  "schema": "IntelSources/v1",
+  "profile": "public-news-radar",
+  "description": "独立公开资讯源：AI/开发者动态、财经金融和市场资讯。只读 RSS/Atom，不进入 SRC 安全控制面。",
+  "sources": [
+    {"id":"ai-simon-willison","provider":"rss","kind":"rss","name":"Simon Willison / AI engineering","url":"https://simonwillison.net/atom/everything/","enabled":true,"trusted":true,"interval_sec":1800,"tags":["ai","developer","engineering","research"]},
+    {"id":"ai-huggingface","provider":"rss","kind":"rss","name":"Hugging Face Blog","url":"https://huggingface.co/blog/feed.xml","enabled":true,"trusted":true,"interval_sec":1800,"tags":["ai","developer","open-source","model"]},
+    {"id":"ai-the-batch","provider":"rss","kind":"rss","name":"The Batch / DeepLearning.AI","url":"https://www.deeplearning.ai/the-batch/feed/","enabled":true,"trusted":true,"interval_sec":1800,"tags":["ai","research","industry"]},
+    {"id":"finance-sec","provider":"rss","kind":"rss","name":"U.S. SEC Press Releases","url":"https://www.sec.gov/news/pressreleases.rss","enabled":true,"trusted":true,"interval_sec":1800,"tags":["finance","markets","regulation","filings"]},
+    {"id":"finance-federal-reserve","provider":"rss","kind":"rss","name":"Federal Reserve Press Releases","url":"https://www.federalreserve.gov/feeds/press_all.xml","enabled":true,"trusted":true,"interval_sec":1800,"tags":["finance","markets","macro","central-bank"]},
+    {"id":"finance-cnbc-markets","provider":"rss","kind":"rss","name":"CNBC Markets","url":"https://www.cnbc.com/id/100003114/device/rss/rss.html","enabled":true,"trusted":false,"interval_sec":1800,"tags":["finance","markets","news","untrusted-content"]},
+    {"id":"finance-yahoo-markets","provider":"rss","kind":"rss","name":"Yahoo Finance Markets","url":"https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US","enabled":true,"trusted":false,"interval_sec":1800,"tags":["finance","markets","stocks","untrusted-content"]}
+  ]
+}

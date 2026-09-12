@@ -1,0 +1,50 @@
+[
+  {
+    "value": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+    "kind": "cve",
+    "source": "demo-security",
+    "title": "CISA Known Exploited Vulnerabilities Catalog",
+    "summary": "公开漏洞目录演示条目；仅用于验证雷达分类、评分和摘要链路。",
+    "tags": ["security", "cve", "public-intel"]
+  },
+  {
+    "value": "https://www.schneier.com/blog/archives/2026/01/security-research.html",
+    "kind": "article",
+    "source": "demo-security",
+    "title": "Security research article (demo)",
+    "summary": "公开安全研究文章演示条目，不代表已验证漏洞。",
+    "tags": ["security", "research", "public-intel"]
+  },
+  {
+    "value": "https://simonwillison.net/2026/01/01/example/",
+    "kind": "article",
+    "source": "demo-ai",
+    "title": "AI and developer tools update (demo)",
+    "summary": "AI 工具与开发者生态公开动态演示条目。",
+    "tags": ["ai", "developer", "public-intel"]
+  },
+  {
+    "value": "https://huggingface.co/blog/example",
+    "kind": "article",
+    "source": "demo-ai",
+    "title": "Open-source model release (demo)",
+    "summary": "开源模型与工程实践公开文章演示条目。",
+    "tags": ["ai", "developer", "public-intel"]
+  },
+  {
+    "value": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20260101a.htm",
+    "kind": "article",
+    "source": "demo-markets",
+    "title": "Federal Reserve market update (demo)",
+    "summary": "央行与宏观市场公开资讯演示条目，不构成投资建议。",
+    "tags": ["finance", "markets", "public-intel"]
+  },
+  {
+    "value": "https://finance.yahoo.com/news/example-market-update-000000000.html",
+    "kind": "article",
+    "source": "demo-markets",
+    "title": "Markets and equities update (demo)",
+    "summary": "股票与市场公开资讯演示条目，不构成投资建议。",
+    "tags": ["finance", "stocks", "markets", "public-intel"]
+  }
+]

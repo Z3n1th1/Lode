@@ -1,0 +1,17 @@
+schema: InertSurfaceAllowlist/v1
+# OPERATOR-owned. On the VPS this is a read-only bind mount owned by a separate
+# uid and HMAC-signed (set env GUARDRAILS_CONFIG_HMAC_KEY + a top-level `hmac:`).
+# The agent may READ it but must NOT be able to write it. A missing/invalid/
+# unsigned-in-prod config makes NOTHING auto-allow (fail-closed to human gate).
+#
+# "benign test data" is proven here, out-of-band, as a whitelist of surfaces
+# known inert — never inferred from a model's "benign" claim or a blacklist miss.
+
+inert_create_endpoints:
+  - method: POST
+    url_glob: "https://staging.example.com/api/qa/notes*"
+
+provisioned_test_principals:
+  - "qa-sandbox-user-1"
+
+# hmac: "<hex over the canonical JSON of the fields above>"   # REQUIRED in prod

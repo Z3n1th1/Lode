@@ -1,0 +1,5 @@
+[
+  {"name_value": "api.example.com\n*.cdn.example.com", "not_before": "2026-08-17T00:00:00Z"},
+  {"common_name": "outside.example.net"},
+  {"name_value": "api.example.com"}
+]

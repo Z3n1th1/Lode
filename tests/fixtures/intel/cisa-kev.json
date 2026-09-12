@@ -1,0 +1,16 @@
+{
+  "title": "CISA Known Exploited Vulnerabilities Catalog",
+  "catalogVersion": "fixture",
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2026-12345",
+      "vendorProject": "Fixture Vendor",
+      "product": "Fixture Product",
+      "vulnerabilityName": "Authorization bypass",
+      "dateAdded": "2026-08-19",
+      "requiredAction": "Apply vendor mitigations.",
+      "knownRansomwareCampaignUse": "Unknown",
+      "notes": "Fixture only."
+    }
+  ]
+}

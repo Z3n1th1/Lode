@@ -1,0 +1,111 @@
+{
+  "schema": "IntelSources/v1",
+  "sources": [
+    {
+      "enabled": true,
+      "id": "builtin-seed",
+      "item_count": 1,
+      "kind": "builtin",
+      "last_error": "",
+      "last_run": "2026-09-05T18:46:30Z",
+      "last_status": "ok",
+      "name": "授权范围 seed",
+      "provider": "seed",
+      "tags": [
+        "passive",
+        "scope"
+      ],
+      "trusted": true,
+      "url": ""
+    },
+    {
+      "enabled": true,
+      "id": "builtin-crtsh",
+      "kind": "builtin",
+      "name": "crt.sh 证书透明度",
+      "provider": "crtsh",
+      "tags": [
+        "passive",
+        "certificate",
+        "subdomain"
+      ],
+      "trusted": true,
+      "url": "https://crt.sh/"
+    },
+    {
+      "enabled": true,
+      "id": "builtin-cisa-kev",
+      "kind": "builtin",
+      "name": "CISA Known Exploited Vulnerabilities",
+      "provider": "cisa_kev",
+      "tags": [
+        "public-intel",
+        "cve",
+        "known-exploited"
+      ],
+      "trusted": true,
+      "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    },
+    {
+      "enabled": true,
+      "id": "security-project-zero",
+      "interval_sec": 3600,
+      "kind": "rss",
+      "name": "Google Project Zero",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "research",
+        "vulnerability",
+        "disclosure"
+      ],
+      "trusted": true,
+      "url": "https://googleprojectzero.blogspot.com/feeds/posts/default"
+    },
+    {
+      "enabled": true,
+      "id": "security-portswigger",
+      "interval_sec": 3600,
+      "kind": "rss",
+      "name": "PortSwigger Research",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "web-security",
+        "research"
+      ],
+      "trusted": true,
+      "url": "https://portswigger.net/research/rss"
+    },
+    {
+      "enabled": true,
+      "id": "security-nuclei-releases",
+      "interval_sec": 3600,
+      "kind": "rss",
+      "name": "Nuclei templates releases",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "poc",
+        "release"
+      ],
+      "trusted": true,
+      "url": "https://github.com/projectdiscovery/nuclei-templates/releases.atom"
+    },
+    {
+      "enabled": true,
+      "id": "security-github-advisories",
+      "interval_sec": 3600,
+      "kind": "rss",
+      "name": "GitHub Security Blog",
+      "provider": "rss",
+      "tags": [
+        "security",
+        "advisory",
+        "research"
+      ],
+      "trusted": true,
+      "url": "https://github.blog/tag/security/feed/"
+    }
+  ]
+}
