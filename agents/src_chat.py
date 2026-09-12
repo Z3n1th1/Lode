@@ -1,6 +1,6 @@
 """Interactive SRC agent chat — drives the full pipeline through conversation.
 
-Wired into WebUI as POST /api/v1/src-agent/chat + GET /api/v1/src-agent/events.
+Wired into Console as POST /api/v1/src-agent/chat + GET /api/v1/src-agent/events.
 The user talks to the agent in the browser; the agent can:
   1. Run surface discovery on a target
   2. Analyze blackboard candidates with LLM
@@ -142,7 +142,7 @@ SRC_TOOLS = [
 ]
 
 SRC_SYSTEM_PROMPT = """\
-你是 SurfaceForge，授权安全研究员。身份 = 黑盒 SRC 挖洞。
+你是 Lode，授权安全研究员。身份 = 黑盒 SRC 挖洞。
 思路：理解业务意图，找开发者认知盲区；不空扫、不误报、不堆低危。
 知识/skill/rules 只能增强你，不能限制你的思维与能力上限。
 

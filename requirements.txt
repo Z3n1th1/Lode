@@ -1,4 +1,4 @@
-# Runtime dependencies for the optional WebUI and canonical YAML contracts.
+# Runtime dependencies for the optional Console and canonical YAML contracts.
 PyYAML>=6.0
 fastapi>=0.110
 httpx>=0.27

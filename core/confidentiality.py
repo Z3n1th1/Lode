@@ -1,6 +1,6 @@
 """Confidentiality boundary for third-party notification channels.
 
-The local WebUI and workspace may contain complete reports.  Feishu and other
+The local Console and workspace may contain complete reports.  Feishu and other
 notification transports must only receive operational metadata and public
 intelligence summaries, never report bodies, evidence, credentials, or raw
 request/response material.

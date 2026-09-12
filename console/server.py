@@ -1,4 +1,4 @@
-"""Loopback-only process launcher for the ControlPlane WebUI."""
+"""Loopback-only process launcher for the ControlPlane Console."""
 from __future__ import annotations
 
 import argparse
@@ -7,14 +7,14 @@ from pathlib import Path
 
 import uvicorn
 
-from webui.control_plane import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH, create_app
+from console.control_plane import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH, create_app
 
 
 DEFAULT_PORT = 8088
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="本地 ControlPlane WebUI（仅 127.0.0.1）")
+    parser = argparse.ArgumentParser(description="本地 ControlPlane Console（仅 127.0.0.1）")
     parser.add_argument("--state-dir", required=True, help="Goal/Task durable state directory")
     parser.add_argument("--static-dir", default=str(Path(__file__).with_name("dist")))
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)

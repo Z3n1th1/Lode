@@ -1,6 +1,6 @@
-# SurfaceForge / SignalHarbor VPS 运行手册
+# Lode / SignalHarbor VPS 运行手册
 
-面向使用者的名字是 **SurfaceForge（猎面台）** 和 **SignalHarbor（信号舱）**；源码兼容名仍是 `pentest-agent`、`intel`、`news`。
+面向使用者的名字是 **Lode（Lode）** 和 **SignalHarbor（信号舱）**；源码兼容名仍是 `pentest-agent`、`intel`、`news`。
 
 这里提供的是本地部署模板，不是已在你的 VPS 上完成的安全验收。systemd 配置、网络出口与实际运行效果还需要在目标服务器验证；不能承诺零漏洞、不会被反制或运行时可读源码绝不泄漏。
 
@@ -31,7 +31,7 @@ journalctl -u signalharbor.service -n 100 --no-pager
 
 `signalharbor.service` 每 30 分钟执行一轮、有 10 分钟超时和 256 MiB 内存上限。没有 `DEEPSEEK_API_KEY` 时自动保留来源摘要，配置 key 后才调用 DeepSeek；key 只放 root 可读的 `EnvironmentFile` 或 systemd credential，不放命令行。只提交公开标题和摘要。飞书只用单向 notifier，默认不启用入站 Bot。需要通知时配置独立机器人凭据，并用 systemd override 在原 `ExecStart` 末尾明确增加 `--feishu`。
 
-## SurfaceForge 自动 SRC
+## Lode 自动 SRC
 
 不要把所有域名交给 worker。每个项目先写书面授权 scope，明确 `allowed_domains/allowed_hosts`、速率、超时和禁止项；再由 `src_surface.py` 做低频 GET，`src_autopilot.py` 只做候选分诊。多个 worker 通过 `src-blackboard.json` 的 claim/heartbeat/finish 协调，单个 intent 只有一个租约。
 
@@ -39,7 +39,7 @@ journalctl -u signalharbor.service -n 100 --no-pager
 
 ## VPS 安全基线
 
-- SSH 只开放密钥登录、禁用 root 密码登录；WebUI 和 webhook 只绑定 loopback，通过固定 upstream 的 TLS 反代和 IP allowlist访问。
+- SSH 只开放密钥登录、禁用 root 密码登录；Console 和 webhook 只绑定 loopback，通过固定 upstream 的 TLS 反代和 IP allowlist访问。
 - `signalharbor` 和 SRC worker 使用不同的非 sudo UID，各自独立状态目录；不要把宿主 SSH key、Docker socket、云平台凭据或整个宿主文件系统挂进 worker。
 - 用 UFW/nftables 或云安全组限制出站；SRC 目标必须是授权清单，不能用 `0.0.0.0/0` 代替白名单。
 - 每周检查 `systemctl status`、磁盘占用、journal 大小、失败 provider、watch state 和 runner blocked 记录；配置 logrotate，避免无限日志。

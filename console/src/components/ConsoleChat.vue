@@ -195,7 +195,7 @@ function scrollBottom(force = false) {
   })
 }
 
-// ---- F4 运行控制:续跑 / 分叉(webui 直发,排队处理;触发人工门时就地出审批按钮)----
+// ---- F4 运行控制:续跑 / 分叉(console 直发,排队处理;触发人工门时就地出审批按钮)----
 // 热修:本地乐观回声气泡——发送即渲染,不等回包;失败原地改错误气泡并带后端原因
 type EchoMsg = { id: number; text: string; status: 'sending' | 'sent' | 'failed'; err?: string }
 const echoes = ref<EchoMsg[]>([])
@@ -236,7 +236,7 @@ async function onFork() {
     const profile = await resolveIntakeProfile(profileOf.value[activeKey.value] || '')
     if (!profile) { sendMsg.value = '分叉失败:无可用策略档(测试策略未加载)'; return }
     const r = await submitProjectIntake({ target_url: target, name: 'fork:' + target, engagement_profile: profile, toggles: { scan_enabled: true } })
-    sendMsg.value = `已提交分叉 ${r.intake_id}(webui 直发,排队处理)`
+    sendMsg.value = `已提交分叉 ${r.intake_id}(console 直发,排队处理)`
   } catch (e) {
     sendMsg.value = '分叉失败:' + (e instanceof Error ? e.message : '未知错误')
   } finally { sending.value = false }
@@ -506,7 +506,7 @@ function roleLabel(m: ConvMessage) { return m.kind === 'user_message' ? '你' : 
       <footer class="cc-composer">
         <div class="cc-composer-row">
           <el-input v-model="composer" type="textarea" :rows="2" resize="none" :disabled="approvals.length > 0"
-            :placeholder="approvals.length ? '有待批确认门,先就地批准/拒绝后再输入' : '给该会话追加指导(webui 直发,排队处理;触发人工门时就地出审批按钮)。回车发送 / Shift+回车换行'"
+            :placeholder="approvals.length ? '有待批确认门,先就地批准/拒绝后再输入' : '给该会话追加指导(console 直发,排队处理;触发人工门时就地出审批按钮)。回车发送 / Shift+回车换行'"
             @keyup.enter.exact.prevent="onSend" />
           <div class="cc-composer-btns">
             <el-button type="primary" :loading="sending" :disabled="!composer.trim() || !activeKey || approvals.length > 0" @click="onSend">发送</el-button>

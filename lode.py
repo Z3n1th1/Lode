@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""SurfaceForge unified CLI — cross-platform entry point.
+"""Lode unified CLI — cross-platform entry point.
 
 Works identically on Windows / Linux / macOS. Auto-loads .env for API keys.
 
 Usage:
-  python surfaceforge.py webui                 # start the WebUI
-  python surfaceforge.py scan <url>            # surface discovery only
-  python surfaceforge.py agent <blackboard>    # LLM agent loop on existing blackboard
-  python surfaceforge.py auto <url>            # full: scan → agent → report
-  python surfaceforge.py progress              # show test progress summary
-  python surfaceforge.py doctor                # environment check
+  python lode.py console                 # start the Console
+  python lode.py scan <url>            # surface discovery only
+  python lode.py agent <blackboard>    # LLM agent loop on existing blackboard
+  python lode.py auto <url>            # full: scan → agent → report
+  python lode.py progress              # show test progress summary
+  python lode.py doctor                # environment check
 """
 from __future__ import annotations
 
@@ -37,14 +37,14 @@ def _python() -> str:
     return sys.executable
 
 
-def cmd_webui(args: argparse.Namespace) -> int:
-    """Start the WebUI server."""
+def cmd_console(args: argparse.Namespace) -> int:
+    """Start the Console server."""
     port = str(args.port or os.environ.get("WEBUI_PORT", "8088"))
-    state_dir = args.state_dir or os.environ.get("WEBUI_STATE_DIR", str(ROOT / "webui-state"))
+    state_dir = args.state_dir or os.environ.get("LODE_STATE_DIR", str(ROOT / "lode-state"))
     cmd = [
-        _python(), "-m", "webui.server",
+        _python(), "-m", "console.server",
         "--state-dir", state_dir,
-        "--static-dir", str(ROOT / "webui" / "dist"),
+        "--static-dir", str(ROOT / "console" / "dist"),
         "--port", port,
     ]
     return subprocess.call(cmd, cwd=str(ROOT))
@@ -117,7 +117,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
 def cmd_progress(args: argparse.Namespace) -> int:
     """Show test progress summary."""
     from core.test_log import SrcTestLog
-    state_dir = Path(args.state_dir or ROOT / "webui-state")
+    state_dir = Path(args.state_dir or ROOT / "lode-state")
     log = SrcTestLog(state_dir)
     print(json.dumps(log.summary(), ensure_ascii=False, indent=2))
     return 0
@@ -126,7 +126,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
 def cmd_sessions(args: argparse.Namespace) -> int:
     """List past SRC chat sessions and their state (for resuming)."""
     from core.src_blackboard import SrcBlackboard
-    state_dir = Path(args.state_dir or ROOT / "webui-state")
+    state_dir = Path(args.state_dir or ROOT / "lode-state")
     chat_dir = state_dir / "src-chat"
     if not chat_dir.is_dir():
         print(json.dumps({"sessions": []}, indent=2))
@@ -166,7 +166,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     from agents.surface_discovery import SurfaceScope
     from core.src_blackboard import SrcBlackboard
 
-    state_dir = Path(args.state_dir or ROOT / "webui-state")
+    state_dir = Path(args.state_dir or ROOT / "lode-state")
     sess_dir = state_dir / "src-chat" / args.session_id
     if not sess_dir.is_dir():
         print(f"ERROR: session not found: {args.session_id}", file=sys.stderr)
@@ -206,7 +206,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com"),
         "llm_model": os.environ.get("LLM_MODEL", "deepseek-chat"),
         "env_file": (ROOT / ".env").is_file(),
-        "webui_dist": (ROOT / "webui" / "dist" / "index.html").is_file(),
+        "console_dist": (ROOT / "console" / "dist" / "index.html").is_file(),
     }
     # Check key modules
     mod_status = {}
@@ -233,13 +233,13 @@ def _load_scope(scope_path: str) -> "SurfaceScope":
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="surfaceforge", description="SurfaceForge SRC automation CLI")
+    p = argparse.ArgumentParser(prog="lode", description="Lode SRC automation CLI")
     sub = p.add_subparsers(dest="command", required=True)
 
-    w = sub.add_parser("webui", help="Start the WebUI server")
+    w = sub.add_parser("console", help="Start the Console server")
     w.add_argument("--port", type=int, default=None)
     w.add_argument("--state-dir", default=None)
-    w.set_defaults(func=cmd_webui)
+    w.set_defaults(func=cmd_console)
 
     s = sub.add_parser("scan", help="Surface discovery only")
     s.add_argument("url")

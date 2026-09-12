@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SurfaceForge SRC Agent launcher — Linux / macOS
+# Lode SRC Agent launcher — Linux / macOS
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,6 +1,6 @@
 # 公开安全情报收集层（Intel）
 
-`intel` 是与 Strix、LLM、飞书和 WebUI 解耦的公开资讯收集引擎（代码模块名保留 Intel）。SRC 安全平台默认只使用安全源；AI/开发者和财经金融市场使用独立的 `run-news.ps1`/`sources.news.example.json`，可选通过 `python -m news summarize` 调用 DeepSeek 处理公开摘要。所有源只读公开 RSS/Atom/API，不负责目标站点路由提取或主动扫描：
+`intel` 是与 Strix、LLM、飞书和 Console 解耦的公开资讯收集引擎（代码模块名保留 Intel）。SRC 安全平台默认只使用安全源；AI/开发者和财经金融市场使用独立的 `run-news.ps1`/`sources.news.example.json`，可选通过 `python -m news summarize` 调用 DeepSeek 处理公开摘要。所有源只读公开 RSS/Atom/API，不负责目标站点路由提取或主动扫描：
 
 - 读取一份明确授权的 scope 或已经确认的 `TargetCard/v1`；
 - 从 scope seed、crt.sh、CISA KEV、RSS/Atom、page-watch、官方 X/Twitter API 和离线 JSON/JSONL/CSV 导入候选；
@@ -80,13 +80,13 @@ $py = 'C:\Users\Z3n1th\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 
 环境变量仍由现有通知适配器读取：`FEISHU_WEBHOOK` 和可选的 `FEISHU_SECRET`。飞书入站 bot 的白名单、人工门和任务审批继续由 `notify/feishu_reply_consumer.py` 负责，情报 watcher 的摘要消息不能直接触发扫描。
 
-Twitter/X provider 只使用官方 recent-search API，token 只从 `X_BEARER_TOKEN` 或 `TWITTER_BEARER_TOKEN` 读取，不写入 `sources.json`。来源在 WebUI 中默认关闭，填写 query、设置环境变量并人工启用后才会采集。
+Twitter/X provider 只使用官方 recent-search API，token 只从 `X_BEARER_TOKEN` 或 `TWITTER_BEARER_TOKEN` 读取，不写入 `sources.json`。来源在 Console 中默认关闭，填写 query、设置环境变量并人工启用后才会采集。
 
 ## 数据源注册表
 
-WebUI 的“资讯雷达数据源”接口现在写入 `<state_dir>\sources.json`。默认有两个 builtin：`seed` 和 `crtsh`。WebUI 新增的 `rss`/`page_watch` 默认不可信，URL 只能是公网 HTTP(S)，网络层还会重新解析并拒绝 loopback、私网、保留地址和本地域名。
+Console 的“资讯雷达数据源”接口现在写入 `<state_dir>\sources.json`。默认有两个 builtin：`seed` 和 `crtsh`。Console 新增的 `rss`/`page_watch` 默认不可信，URL 只能是公网 HTTP(S)，网络层还会重新解析并拒绝 loopback、私网、保留地址和本地域名。
 
-注册表只管理来源和启停，不在 WebUI 请求线程里抓取网络。采集 CLI 传入 `--registry <state_dir>\sources.json` 或 state 目录即可加载启用来源；来源失败会记录为 provider error，不影响其他来源和 scope 过滤。
+注册表只管理来源和启停，不在 Console 请求线程里抓取网络。采集 CLI 传入 `--registry <state_dir>\sources.json` 或 state 目录即可加载启用来源；来源失败会记录为 provider error，不影响其他来源和 scope 过滤。
 
 ## 从候选继续挖
 

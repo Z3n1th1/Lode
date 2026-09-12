@@ -6,7 +6,7 @@
 
 - provider 池：LLM_PROVIDERS="name|base_url|api_key|model,name2|base2|key2|model2"。
   未设置时回退单组 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL。调用失败自动故障转移到
-  下一 provider（含 401/404 端点路径探测）。活跃 provider 可由 webui
+  下一 provider（含 401/404 端点路径探测）。活跃 provider 可由 console
   （POST /api/v1/model/active）写 model_active_provider.json 运行时切换：
   _providers() 每次调用重读该文件并把活跃 provider 提到 failover 队首，无需重启。
 - 工具协议（主）：provider 原生 function calling（OpenAI 兼容 tools/tool_calls，
@@ -209,7 +209,7 @@ def loop_tasks_file() -> Path:
 
 def active_provider_file() -> Path:
     """活跃 provider 状态文件：LLM_ACTIVE_PROVIDER_FILE env
-    → /opt/pentest-agent/runtime/model_active_provider.json（webui control_plane 写入处）
+    → /opt/pentest-agent/runtime/model_active_provider.json（console control_plane 写入处）
     → goals 同级目录。文件只含 name/model/set_at，绝不含 key。"""
     raw = os.environ.get("LLM_ACTIVE_PROVIDER_FILE", "").strip()
     if raw:
@@ -250,7 +250,7 @@ def set_active_provider(name: str) -> Optional[Dict[str, str]]:
 
 
 def _providers() -> List[Dict[str, str]]:
-    """池 + 活跃 provider 提队首：每次调用重读状态文件，webui 切换后下一次调用即生效。"""
+    """池 + 活跃 provider 提队首：每次调用重读状态文件，console 切换后下一次调用即生效。"""
     providers = _parse_providers()
     active = get_active_provider_name()
     if not active:

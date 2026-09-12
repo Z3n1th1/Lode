@@ -1,19 +1,19 @@
-# SurfaceForge — AI 驱动的 SRC 漏洞挖掘平台
+# Lode — AI 驱动的 SRC 漏洞挖掘平台
 
-> 跨平台（Windows / Linux / macOS）。统一入口 `surfaceforge.py`。
+> 跨平台（Windows / Linux / macOS）。统一入口 `lode.py`。
 
 ## 快速开始
 
 ```bash
 # 1. 配置（首次）
 cp .env.example .env
-# 编辑 .env：填入 LLM_API_KEY、WebUI 密码
+# 编辑 .env：填入 LLM_API_KEY、Console 密码
 
 # 2. 环境检查
-python surfaceforge.py doctor
+python lode.py doctor
 
-# 3. 启动 WebUI
-python surfaceforge.py webui
+# 3. 启动 Console
+python lode.py console
 # → 浏览器打开 http://127.0.0.1:8088
 ```
 
@@ -21,16 +21,16 @@ python surfaceforge.py webui
 
 | 命令 | 作用 |
 |------|------|
-| `python surfaceforge.py webui` | 启动 WebUI（管理入口） |
-| `python surfaceforge.py scan <url> --scope scope.json` | 表面发现 |
-| `python surfaceforge.py auto <url> --scope scope.json` | 全自动：扫描→分析 |
-| `python surfaceforge.py agent <blackboard> --scope scope.json` | LLM agent 循环 |
-| `python surfaceforge.py sessions` | 列出历史会话 |
-| `python surfaceforge.py resume <session_id> --scope scope.json` | 继续上次会话 |
-| `python surfaceforge.py progress` | 测试进度总览 |
-| `python surfaceforge.py doctor` | 环境检查 |
+| `python lode.py console` | 启动 Console（管理入口） |
+| `python lode.py scan <url> --scope scope.json` | 表面发现 |
+| `python lode.py auto <url> --scope scope.json` | 全自动：扫描→分析 |
+| `python lode.py agent <blackboard> --scope scope.json` | LLM agent 循环 |
+| `python lode.py sessions` | 列出历史会话 |
+| `python lode.py resume <session_id> --scope scope.json` | 继续上次会话 |
+| `python lode.py progress` | 测试进度总览 |
+| `python lode.py doctor` | 环境检查 |
 
-## WebUI API
+## Console API
 
 | 端点 | 作用 |
 |------|------|
@@ -55,7 +55,7 @@ python surfaceforge.py webui
 ## 项目结构
 
 ```
-surfaceforge.py             统一入口（三平台）
+lode.py             统一入口（三平台）
 agents/                     src_agent(LLM循环) / src_chat(对话+工具) / surface_discovery / src_autopilot
 core/                       config / src_blackboard / test_log / model_client / guardrails
 references/                 src-pentest-skill.md + knowledge-base/（49 个漏洞类型模块）
@@ -66,9 +66,9 @@ deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）
 ## 多平台部署
 
 见 `deploy/multi-platform.md`：
-- **Windows**: `run-webui.ps1` / NSSM 服务
-- **Linux**: `run-webui.sh` / systemd / Docker
-- **macOS**: `run-webui.sh` / launchd
+- **Windows**: `run-console.ps1` / NSSM 服务
+- **Linux**: `run-console.sh` / systemd / Docker
+- **macOS**: `run-console.sh` / launchd
 
 ## 安全边界
 
@@ -96,7 +96,7 @@ deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）
 | `agents/` | 角色定义（Scout/Hypothesis/CodeAuditor/Verifier/Reporter/Notifier）+ TargetQueue + 碰墙自愈闭环 | 角色=声明式 RoleCard（数据） |
 | `code-audit/` | 白盒审计隔离区（clone 落点/semgrep 规则/CodeAuditCard） | **克隆代码永不执行**（不 build/不跑 install 脚本） |
 | `notify/` | Notifier 渠道适配 + 飞书白名单控制入口 | 渠道配置走 deploy env；普通通知只出不进，飞书指令仅允许显式白名单；只发结论不发报告或证据细节 |
-| `webui/` | 本地只读控制台（Goal/Task/profile/sandbox 状态） | 当前固定 loopback；写操作、审批与远程管理尚未接入 |
+| `console/` | 本地只读控制台（Goal/Task/profile/sandbox 状态） | 当前固定 loopback；写操作、审批与远程管理尚未接入 |
 | `references/` | 领域知识/打法卡（数据，非代码） | 热更新生效（L1 通道）；新卡必须带 source+双审 |
 | `evals/` | golden CTF + A/B + 正向门 + 对抗 eval | 每次改动三门全绿才可部署 |
 | `audit/` | InvariantGate/AdversarialReview/AuditSweep/AcceptanceRun 产物 | 执行者≠审查者 |
@@ -135,21 +135,21 @@ deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）
 - 复盘与整改 plan：`../docs/复盘_2026-08-05_gm-test-996sdk_dp测试不足与整改plan.md`
 - 现有 skill canonical：`../skills/ai-pentest-matrix/`（护栏与知识的迁移来源）
 
-## 本地只读 ControlPlane WebUI（2026-08-12）
+## 本地只读 ControlPlane Console（2026-08-12）
 
-`webui/` 现提供中文、本地认证的运行状态工作台。它只投影 `goals.jsonl`、`pending_profiles.jsonl`、`strix_tasks.jsonl` 和合成 `SandboxRunCard` 的字段白名单；不会创建目标、批准动作、执行工具或向浏览器返回指令、会话标识、原始证据、文件路径或密钥。
+`console/` 现提供中文、本地认证的运行状态工作台。它只投影 `goals.jsonl`、`pending_profiles.jsonl`、`strix_tasks.jsonl` 和合成 `SandboxRunCard` 的字段白名单；不会创建目标、批准动作、执行工具或向浏览器返回指令、会话标识、原始证据、文件路径或密钥。
 
 首次构建与启动：
 
 ```powershell
-Set-Location .\webui
+Set-Location .\console
 npm ci --ignore-scripts
 npm run build
 Set-Location ..
 
 $env:WEBUI_ADMIN_PASSWORD = '<至少16字符的独立强口令>'
 $env:WEBUI_SESSION_SECRET = '<至少32字符的随机会话签名密钥>'
-python -m webui.server --state-dir 'C:\path\to\feishu-state' --port 8088
+python -m console.server --state-dir 'C:\path\to\feishu-state' --port 8088
 ```
 
-访问 `http://127.0.0.1:8088`。启动器将 host 固定为 `127.0.0.1`，没有开放地址参数；API 需要本地会话登录，`/healthz` 只用于健康检查。开发前端运行 `webui\npm run dev`，它同样固定 loopback，并只将 `/api` 代理到本地 `8088`。不要把此服务或开发服务器直接暴露到公网；远程管理仍需单独的 TLS、独立账号、IP allowlist、速率限制和审计发布方案。
+访问 `http://127.0.0.1:8088`。启动器将 host 固定为 `127.0.0.1`，没有开放地址参数；API 需要本地会话登录，`/healthz` 只用于健康检查。开发前端运行 `console\npm run dev`，它同样固定 loopback，并只将 `/api` 代理到本地 `8088`。不要把此服务或开发服务器直接暴露到公网；远程管理仍需单独的 TLS、独立账号、IP allowlist、速率限制和审计发布方案。

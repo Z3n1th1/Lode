@@ -4,7 +4,7 @@
 纪律（设计文档 §19/§20）：
 - 只发"结论 + 证据指针 + 需要你做什么"，**不发证据细节/凭据/请求响应**（渠道过第三方）。
 - 分级节流：P0 立即（confirmed 中危+ / 碰墙升级 / 红线触发）；P1 阶段收口；P2 定时摘报。
-- 审批回路不在此通道：飞书只用于通知，人工门批准必须回 mesh 内 WebUI。
+- 审批回路不在此通道：飞书只用于通知，人工门批准必须回 mesh 内 Console。
 
 配置（env，不进代码）：
   FEISHU_WEBHOOK   自定义机器人 webhook URL（https://open.feishu.cn/open-apis/bot/v2/hook/<token>）

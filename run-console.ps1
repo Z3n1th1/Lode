@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$StateDir = (Join-Path $PSScriptRoot 'webui-state'),
+    [string]$StateDir = (Join-Path $PSScriptRoot 'lode-state'),
     [ValidateRange(1, 65535)]
     [int]$Port = 8088
 )
@@ -64,9 +64,9 @@ if (-not $env:WEBUI_SESSION_SECRET) {
 $previousLocation = Get-Location
 try {
     Set-Location -LiteralPath $PSScriptRoot
-    & $pythonExe @pythonPrefix -m webui.server `
+    & $pythonExe @pythonPrefix -m console.server `
         --state-dir $StateDir `
-        --static-dir (Join-Path $PSScriptRoot 'webui\dist') `
+        --static-dir (Join-Path $PSScriptRoot 'console\dist') `
         --port $Port
     exit $LASTEXITCODE
 } finally {

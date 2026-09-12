@@ -1,23 +1,23 @@
 # 多平台部署指南
 
-SurfaceForge 支持 Windows / Linux / macOS 三平台部署。所有平台共用同一套 Python 代码，
-通过统一入口 `surfaceforge.py` 调用。
+Lode 支持 Windows / Linux / macOS 三平台部署。所有平台共用同一套 Python 代码，
+通过统一入口 `lode.py` 调用。
 
 ## 快速开始（三平台通用）
 
 ```bash
 # 1. 配置
 cp .env.example .env
-# 编辑 .env，填入 LLM_API_KEY 和 WebUI 密码
+# 编辑 .env，填入 LLM_API_KEY 和 Console 密码
 
 # 2. 环境检查
-python surfaceforge.py doctor
+python lode.py doctor
 
-# 3. 启动 WebUI
-python surfaceforge.py webui
+# 3. 启动 Console
+python lode.py console
 
 # 或一键完整扫描
-python surfaceforge.py auto https://target.com --scope scope.json
+python lode.py auto https://target.com --scope scope.json
 ```
 
 ---
@@ -28,19 +28,19 @@ python surfaceforge.py auto https://target.com --scope scope.json
 
 ```powershell
 # 方式 A：统一入口（推荐）
-python surfaceforge.py webui
+python lode.py console
 
 # 方式 B：PowerShell 脚本
-.\run-webui.ps1
+.\run-console.ps1
 .\run-src-agent.ps1 -Scope scope.json -Blackboard out/src-blackboard.json
 ```
 
-**启动脚本**：`run-webui.ps1`, `run-src-agent.ps1`, `run-src-autopilot.ps1`
+**启动脚本**：`run-console.ps1`, `run-src-agent.ps1`, `run-src-autopilot.ps1`
 
 **后台常驻**（Windows 服务）：
 ```powershell
 # 用 NSSM 或任务计划程序
-nssm install SurfaceForge "C:\Python311\python.exe" "E:\LLM\surfaceforge\surfaceforge.py webui"
+nssm install Lode "C:\Python311\python.exe" "E:\LLM\lode\lode.py console"
 ```
 
 ---
@@ -51,28 +51,28 @@ nssm install SurfaceForge "C:\Python311\python.exe" "E:\LLM\surfaceforge\surface
 
 ```bash
 # 方式 A：统一入口
-python3 surfaceforge.py webui
+python3 lode.py console
 
 # 方式 B：Shell 脚本
-chmod +x run-webui.sh run-src-agent.sh
-./run-webui.sh
+chmod +x run-console.sh run-src-agent.sh
+./run-console.sh
 ./run-src-agent.sh --scope scope.json --blackboard out/src-blackboard.json
 ```
 
 **systemd 常驻服务**：
 
 ```ini
-# /etc/systemd/system/surfaceforge.service
+# /etc/systemd/system/lode.service
 [Unit]
-Description=SurfaceForge WebUI
+Description=Lode Console
 After=network.target
 
 [Service]
 Type=simple
-User=surfaceforge
-WorkingDirectory=/opt/surfaceforge
-EnvironmentFile=/opt/surfaceforge/.env
-ExecStart=/usr/bin/python3 surfaceforge.py webui
+User=lode
+WorkingDirectory=/opt/lode
+EnvironmentFile=/opt/lode/.env
+ExecStart=/usr/bin/python3 lode.py console
 Restart=on-failure
 RestartSec=10
 # 安全加固
@@ -80,7 +80,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/surfaceforge/webui-state /opt/surfaceforge/projects
+ReadWritePaths=/opt/lode/lode-state /opt/lode/projects
 MemoryMax=2G
 
 [Install]
@@ -89,8 +89,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now surfaceforge
-sudo journalctl -u surfaceforge -f
+sudo systemctl enable --now lode
+sudo journalctl -u lode -f
 ```
 
 **Docker**（可选，隔离性最好）：
@@ -104,19 +104,19 @@ COPY . .
 RUN useradd -m -u 1000 forge && chown -R forge:forge /app
 USER forge
 EXPOSE 8088
-CMD ["python", "surfaceforge.py", "webui"]
+CMD ["python", "lode.py", "console"]
 ```
 
 ```yaml
 # docker-compose.yml
 services:
-  surfaceforge:
+  lode:
     build: .
     env_file: .env
     ports:
       - "127.0.0.1:8088:8088"
     volumes:
-      - ./webui-state:/app/webui-state
+      - ./lode-state:/app/lode-state
       - ./projects:/app/projects
     mem_limit: 2g
     security_opt:
@@ -131,36 +131,36 @@ services:
 前置：Python 3.10+（`brew install python@3.12`）
 
 ```bash
-python3 surfaceforge.py webui
-./run-webui.sh
+python3 lode.py console
+./run-console.sh
 ```
 
 **launchd 常驻服务**：
 
 ```xml
-<!-- ~/Library/LaunchAgents/com.surfaceforge.webui.plist -->
+<!-- ~/Library/LaunchAgents/com.lode.console.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.surfaceforge.webui</string>
+  <key>Label</key><string>com.lode.console</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/python3</string>
-    <string>/path/to/surfaceforge.py</string>
-    <string>webui</string>
+    <string>/path/to/lode.py</string>
+    <string>console</string>
   </array>
   <key>WorkingDirectory</key><string>/path/to/pentest-agent</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/surfaceforge.log</string>
-  <key>StandardErrorPath</key><string>/tmp/surfaceforge.err</string>
+  <key>StandardOutPath</key><string>/tmp/lode.log</string>
+  <key>StandardErrorPath</key><string>/tmp/lode.err</string>
 </dict>
 </plist>
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.surfaceforge.webui.plist
+launchctl load ~/Library/LaunchAgents/com.lode.console.plist
 ```
 
 ---
@@ -171,14 +171,14 @@ launchctl load ~/Library/LaunchAgents/com.surfaceforge.webui.plist
 
 ### 阶段 1：单机
 ```
-一台机器跑全部：WebUI + SRC agent + SignalHarbor
+一台机器跑全部：Console + SRC agent + SignalHarbor
 ```
 适合自己用，最简单。
 
 ### 阶段 2：主控 + 执行分离（推荐）
 ```
 主控机（本地/管理VM）
-  ├─ WebUI（管理入口，SSH 隧道访问）
+  ├─ Console（管理入口，SSH 隧道访问）
   ├─ 授权配置、私有 skill、完整报告
   └─ 审批服务
         ↓ 内网安全通道
@@ -212,7 +212,7 @@ launchctl load ~/Library/LaunchAgents/com.surfaceforge.webui.plist
 代码层面对平台差异做了抽象：
 - `core/config.py` 自动加载 `.env`（三平台一致）
 - `core/model_client.py` 的 `exec_workdir()` 区分 `os.name == "nt"`
-- `surfaceforge.py` 统一入口（三平台一致）
+- `lode.py` 统一入口（三平台一致）
 
 ---
 

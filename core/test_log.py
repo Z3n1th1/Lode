@@ -1,7 +1,7 @@
 """SRC test progress tracker — persistent log of all testing activity.
 
 Records: targets tested, endpoints explored, findings, dead ends, time spent.
-Provides a dashboard summary for WebUI and CLI.
+Provides a dashboard summary for Console and CLI.
 
 Storage: JSONL append-only log + periodic summary JSON.
 """

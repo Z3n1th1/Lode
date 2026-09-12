@@ -1,19 +1,19 @@
-# SurfaceForge / SignalHarbor 当前进度
+# Lode / SignalHarbor 当前进度
 
 ## 2026-09-06 最新续作
 
-- 用户可见名称：SurfaceForge（猎面台，SRC 控制面）与 SignalHarbor（信号舱，独立资讯）；内部目录名保持兼容。
+- 用户可见名称：Lode（Lode，SRC 控制面）与 SignalHarbor（信号舱，独立资讯）；内部目录名保持兼容。
 - SignalHarbor 已使用独立 `news run` 管道；systemd 改为 oneshot + timer，避免不匹配的 watchdog。每轮资源、采集、摘要和消息均有上限，单条摘要失败降级。
 - RSS 解析拒绝 DTD/实体并保留合法 CDATA，包含 UTF-16 回归；状态和锁文件拒绝符号链接。
 - Surface 入口增加有副作用 GET 和未知 operation selector 拦截；guardrails 修复 base allow 覆盖语义写操作检查的问题。
-- 本轮验证：Python `232 passed, 11 skipped`；WebUI `25 passed`；类型检查及 production build 通过。构建仍提示一个大于 500 kB 的 chunk，FastAPI 测试有上游弃用警告。
+- 本轮验证：Python `232 passed, 11 skipped`；Console `25 passed`；类型检查及 production build 通过。构建仍提示一个大于 500 kB 的 chunk，FastAPI 测试有上游弃用警告。
 - 尚未登录/加固 VPS，未做真实 DeepSeek/飞书验收，未接通完整外部 SRC runner。物理出站变量不是防火墙；部署和源码保密边界见 `docs/security-boundary.md`。
 
 以下保留历史进度，若数字或默认入口与上面冲突，以最新续作为准。
 
 更新时间：2026-09-06
 
-这份文件是下一次继续开发时的接续点。当前以源码和已构建 WebUI 为准；本轮不重新打 ZIP。
+这份文件是下一次继续开发时的接续点。当前以源码和已构建 Console 为准；本轮不重新打 ZIP。
 
 ## 当前状态
 
@@ -24,7 +24,7 @@
 | pentest-agent 控制面 | 可用但依赖外部 runner | TargetCard、scope、guardrail、人工门和 fail-closed 已保留；缺 Strix/private skill 时不会伪造成功 |
 | 飞书出站 | 已接入脱敏和分类路由 | 只发送状态、目标主机、风险计数和高层类型 |
 | 飞书双向 Bot | 代码链路已修复，待真实租户验收 | WebSocket 和 loopback webhook 都支持；webhook 通过官方 reply API 回消息 |
-| WebUI | 本机可用 | loopback + 登录；登录后可查看完整本机报告，报告不进飞书 |
+| Console | 本机可用 | loopback + 登录；登录后可查看完整本机报告，报告不进飞书 |
 | SRC 黑板/长跑协调 | 可用 | facts/intents/dead_ends/hints/claims；跨进程锁、原子写、heartbeat lease、过期回收 |
 
 ## 本轮已修复
@@ -51,8 +51,8 @@
 
 - Python 全仓：`211 passed, 11 skipped`。
 - 飞书专项：`29 passed`。
-- WebUI：`25 passed`。
-- WebUI production build：通过。
+- Console：`25 passed`。
+- Console production build：通过。
 - v4 runtime ZIP 解压回归：通过，且不含 `node_modules`。
 - v4 offline-webdev ZIP 解压回归：通过，包含锁定的离线依赖树。
 
@@ -60,18 +60,18 @@
 
 - `core/src_blackboard.py`：吸收 Cairn/Muteki 的 Blackboard、Fact/Intent/Dead-end、事件 revision、单 worker claim/lease 和 heartbeat；不执行网络、不保存原始证据。
 - `agents/src_autopilot.py`：load/merge/save 变为单次状态锁内事务；候选同步为需要人工/授权 runner 的 intent；输出文件原子替换，恢复时不会重复覆盖状态。
-- WebUI 增加 `/api/v1/src-autopilot` 和“SRC 自动化”只读面板，可查看轮次、候选优先级、claim 租约、死路与提示。
+- Console 增加 `/api/v1/src-autopilot` 和“SRC 自动化”只读面板，可查看轮次、候选优先级、claim 租约、死路与提示。
 - 增加 `run-src-autopilot.ps1` 和 [`docs/src-autopilot.md`](docs/src-autopilot.md)，支持首轮授权 surface 分诊和后续 `SrcSurfaceResult/v1` 续跑。
-- 新增黑板、并发 autopilot、WebUI 投影回归测试；全量回归现为 `209 passed, 10 skipped`，仍不宣称真实端到端 runner 已验收。
-- `run-intel.ps1` 与 `run-webui.ps1` 都会探测 Python 3.10+，不会误选 Windows `py.exe` 占位别名。
-- WebUI 本机 smoke：`/healthz` 200、登录 204、dashboard 与 `/api/v1/src-autopilot` 200；单进程工作集约 54 MB。
+- 新增黑板、并发 autopilot、Console 投影回归测试；全量回归现为 `209 passed, 10 skipped`，仍不宣称真实端到端 runner 已验收。
+- `run-intel.ps1` 与 `run-console.ps1` 都会探测 Python 3.10+，不会误选 Windows `py.exe` 占位别名。
+- Console 本机 smoke：`/healthz` 200、登录 204、dashboard 与 `/api/v1/src-autopilot` 200；单进程工作集约 54 MB。
 - 新增 `sources.radar.example.json` 与 `run-radar.ps1`，公开名称统一为“资讯雷达”，覆盖安全、AI/开发者、财经/市场 RSS/Atom。
 - `run-radar.ps1` 已补齐单源超时、Feishu 最低分和摘要条数参数，长跑可调且不改变常驻进程模型。
-- WebUI 现可直接投影资讯雷达最新 run 的候选；离线演示已写入 smoke state，API 可见安全、AI/开发者、财经/市场 7 条候选。
-- WebUI intake 服务端强制 brute-force 全禁用（所有标志 false、次数和频率为 0）；飞书入站限制消息长度、目标 ID 格式和备注长度。
-- WebUI 目标校验拒绝 URL 内嵌凭据/非法端口；gateway request budget 限制为 1..100，越界 fail-closed。
+- Console 现可直接投影资讯雷达最新 run 的候选；离线演示已写入 smoke state，API 可见安全、AI/开发者、财经/市场 7 条候选。
+- Console intake 服务端强制 brute-force 全禁用（所有标志 false、次数和频率为 0）；飞书入站限制消息长度、目标 ID 格式和备注长度。
+- Console 目标校验拒绝 URL 内嵌凭据/非法端口；gateway request budget 限制为 1..100，越界 fail-closed。
 - SRC 默认源已切换为纯安全 `sources.security.example.json`；AI/开发者与财经/市场迁移到独立 `run-news.ps1`、`sources.news.example.json` 和 `news` DeepSeek 摘要器。
-- WebUI smoke state 已切换为仅安全条目（CVE/研究/seed 共 3 条）；独立 news 输出不进入 SRC 页面。
+- Console smoke state 已切换为仅安全条目（CVE/研究/seed 共 3 条）；独立 news 输出不进入 SRC 页面。
 - `docs/src-autopilot.md` 已补充 ZIP 方法论的安全落地：种子队列、类型矩阵、基线/探针/差分、证据闭环和停止条件；未知 CVE/PoC 只生成待人工确认 intent，不自动利用。
 - 静态审查两个外部 skill ZIP：内容逐文件一致的重复副本，无二进制/宏/路径穿越/加密；发现 FOFA 脚本内硬编码凭据和未锁定 `npx` 供应链风险，未导入或执行。
 - 资讯雷达真实源 smoke 已执行；当前 Clash TUN DNS 将公网域名映射为 `198.18.0.x`，按安全策略被拒绝并逐源隔离，未绕过校验。
@@ -114,7 +114,7 @@ Set-Location .\pentest-agent
 python -m pytest -q
 python .\notify\feishu_reply_consumer.py --self-test
 
-Set-Location .\webui
+Set-Location .\console
 npm run test
 npm run build
 ```

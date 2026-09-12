@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SurfaceForge WebUI launcher — Linux / macOS
-# Auto-loads .env, resolves Python 3.10+, starts the WebUI server.
+# Lode Console launcher — Linux / macOS
+# Auto-loads .env, resolves Python 3.10+, starts the Console server.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,9 +45,9 @@ export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
 PORT="${WEBUI_PORT:-8088}"
-STATE_DIR="${WEBUI_STATE_DIR:-$SCRIPT_DIR/webui-state}"
+STATE_DIR="${LODE_STATE_DIR:-$SCRIPT_DIR/lode-state}"
 
-exec "$PY" -m webui.server \
+exec "$PY" -m console.server \
   --state-dir "$STATE_DIR" \
-  --static-dir "$SCRIPT_DIR/webui/dist" \
+  --static-dir "$SCRIPT_DIR/console/dist" \
   --port "$PORT"

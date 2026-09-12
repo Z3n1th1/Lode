@@ -1,9 +1,9 @@
 # deploy/ 部署区
 
 - docker-compose（容器化、restart:always、healthcheck）
-- wireguard/ mesh 配置（agent/webui 仅 mesh 可达）
+- wireguard/ mesh 配置（agent/console 仅 mesh 可达）
 - self-check.sh 基线检查：公网暴露端口/容器权限/依赖CVE/秘钥泄露/日志权限
-- 纪律：一切服务 bind 127.0.0.1；WebUI 仅 bind mesh 接口
+- 纪律：一切服务 bind 127.0.0.1；Console 仅 bind mesh 接口
 
 ## 监听与管理约束
 

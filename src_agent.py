@@ -24,7 +24,7 @@ from agents.surface_discovery import SurfaceScope
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="surfaceforge-src-agent",
+        prog="lode-src-agent",
         description="LLM-driven SRC agent: reads blackboard candidates, reasons about vulnerabilities, explores endpoints",
     )
     parser.add_argument("--scope", required=True, type=Path,

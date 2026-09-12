@@ -36,7 +36,7 @@
 - `hints`：人工或 worker 提供的短提示；
 - `claims`：带 heartbeat 和过期时间的单 worker 租约。
 
-runner 接入时使用 `core.src_blackboard.SrcBlackboard` 的 `claim_next()`、`heartbeat()` 和 `finish()`。过期租约会在下一次 claim 时自动回收，进程重启不会留下永久占用。结果引用不应写入 WebUI 投影；报告和证据继续只留在本机。
+runner 接入时使用 `core.src_blackboard.SrcBlackboard` 的 `claim_next()`、`heartbeat()` 和 `finish()`。过期租约会在下一次 claim 时自动回收，进程重启不会留下永久占用。结果引用不应写入 Console 投影；报告和证据继续只留在本机。
 
 最小 worker 循环如下，实际请求前仍要在 runner 自己的 TargetCard/guardrail 中再次校验：
 
@@ -54,9 +54,9 @@ if claimed:
 
 黑板锁和 autopilot 状态锁都是跨进程 sidecar 锁，并使用临时文件原子替换。多个 worker 可以并发处理不同 intent；同一 intent 在同一时间只会有一个有效 claim。
 
-## WebUI
+## Console
 
-本地 WebUI 的“SRC 自动化”面板只读展示轮次、候选、租约、死路和提示。默认从 WebUI state 目录读取 `src-blackboard.json`；黑板放在单独目录时设置 `PA_SRC_BLACKBOARD_PATH`，autopilot 状态文件可用 `PA_SRC_AUTOPILOT_STATE` 指定。两个变量都只影响本机投影，不会改变 scope 或执行策略。
+本地 Console 的“SRC 自动化”面板只读展示轮次、候选、租约、死路和提示。默认从 Console state 目录读取 `src-blackboard.json`；黑板放在单独目录时设置 `PA_SRC_BLACKBOARD_PATH`，autopilot 状态文件可用 `PA_SRC_AUTOPILOT_STATE` 指定。两个变量都只影响本机投影，不会改变 scope 或执行策略。
 
 如果还没有黑板，面板显示“等待黑板”，这不是失败；先完成首轮授权 surface 分诊即可。
 
@@ -88,7 +88,7 @@ python src_agent.py --scope scope.json --blackboard .\out\src-blackboard.json --
 - 任意异常收敛为 `dead_end`,绝不静默成功；
 - C 阶段 intent 带 `requires_human_review=True`,写操作/爆破/凭据复用/跨租户访问不会自动执行。
 
-WebUI 的“SRC 挖掘”主视图即通过 `/api/v1/src-agent/{sessions,history,chat,progress}` 驱动同一套循环,并把会话历史持久化到磁盘,重启不丢。
+Console 的“SRC 挖掘”主视图即通过 `/api/v1/src-agent/{sessions,history,chat,progress}` 驱动同一套循环,并把会话历史持久化到磁盘,重启不丢。
 
 ## 自动挖洞策略
 

@@ -20,7 +20,7 @@ DeepSeek 单条失败保留资讯并在后续轮次重试，不会使采集失�
 
 飞书是可选的单向消息：配置官方 `FEISHU_WEBHOOK` 和可选 `FEISHU_SECRET`，再加 `-Feishu`。不启用入站控制，不测试任何 SRC 目标。为避免泄漏，消息仅含标题、摘要、来源和公开文章链接；请为信号舱建立独立机器人，不使用 SRC 报告通知群。
 
-VPS 使用 [systemd 定时运行手册](../deploy/surfaceforge-runbook.md)，无需启动 WebUI 或开放新端口。底层等价命令是：
+VPS 使用 [systemd 定时运行手册](../deploy/lode-runbook.md)，无需启动 Console 或开放新端口。底层等价命令是：
 
 ```bash
 python -m news run --registry sources.news.example.json --state-dir news-data --allow-missing-ai

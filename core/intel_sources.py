@@ -1,4 +1,4 @@
-"""Thin WebUI adapter for the independent :mod:`intel` source registry."""
+"""Thin Console adapter for the independent :mod:`intel` source registry."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -256,7 +256,7 @@ export async function forkSession() {
       engagement_profile: profile,
       toggles: { scan_enabled: true }
     })
-    forkMsg.value = `已提交分叉 ${r.intake_id}(webui 直发,排队处理)`
+    forkMsg.value = `已提交分叉 ${r.intake_id}(console 直发,排队处理)`
   } catch (e) {
     forkMsg.value = '分叉失败:' + (e instanceof Error ? e.message : '未知错误')
   }
@@ -269,7 +269,7 @@ export async function submitGuidance() {
   if (!guidanceText.value.trim()) { guidanceErr.value = '请输入指导'; return }
   try {
     const r = await submitSessionGuidance({ session_id: s.session_id, target: projectDetail.value.target, guidance: guidanceText.value.trim() })
-    guidanceOk.value = `已提交 ${r.id}(webui 直发,排队处理)`
+    guidanceOk.value = `已提交 ${r.id}(console 直发,排队处理)`
     guidanceText.value = ''
     try { guidanceRows.value = await loadSessionGuidance(s.session_id) } catch { /* ignore */ }
   } catch (e) {

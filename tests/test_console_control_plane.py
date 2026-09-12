@@ -1,4 +1,4 @@
-"""Regression tests for the local, read-only ControlPlane WebUI."""
+"""Regression tests for the local, read-only ControlPlane Console."""
 from __future__ import annotations
 
 import json
@@ -27,8 +27,8 @@ def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
 
 
 class ReadOnlyControlPlaneTests(unittest.TestCase):
-    def test_intel_projects_latest_radar_run_into_webui_rows(self) -> None:
-        from webui.control_plane import ReadOnlyControlPlane
+    def test_intel_projects_latest_radar_run_into_console_rows(self) -> None:
+        from console.control_plane import ReadOnlyControlPlane
 
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "state"
@@ -46,7 +46,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
             self.assertEqual("article", rows[0]["kind"])
 
     def test_intake_toggle_sanitizer_hard_disables_bruteforce(self) -> None:
-        from webui.control_plane import _sanitize_toggles
+        from console.control_plane import _sanitize_toggles
 
         sanitized = _sanitize_toggles({
             "scan_enabled": True,
@@ -66,7 +66,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
         )))
 
     def test_public_target_rejects_embedded_credentials_and_bad_ports(self) -> None:
-        from webui.control_plane import _valid_public_target
+        from console.control_plane import _valid_public_target
 
         self.assertEqual("", _valid_public_target("https://user:secret@example.com"))
         self.assertEqual("", _valid_public_target("https://example.com:bad"))
@@ -199,7 +199,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 (root / f"{source_name}.lock").write_bytes(b"\0")
 
     def test_snapshot_refuses_sources_without_existing_lock_sidecars(self) -> None:
-        from webui.control_plane import ReadOnlyControlPlane
+        from console.control_plane import ReadOnlyControlPlane
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp)
@@ -222,7 +222,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(content, (state_dir / relative).read_bytes())
 
     def test_snapshot_is_redacted_bounded_and_does_not_change_state_files(self) -> None:
-        from webui.control_plane import ReadOnlyControlPlane
+        from console.control_plane import ReadOnlyControlPlane
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp)
@@ -258,7 +258,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(content, (state_dir / relative).read_bytes())
 
     def test_dashboard_requires_a_login_session(self) -> None:
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -294,7 +294,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
 
     def test_src_autopilot_projection_is_authenticated_bounded_and_local_only(self) -> None:
         from core.src_blackboard import SrcBlackboard
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -323,7 +323,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertTrue(dashboard["src_autopilot"]["available"])
 
     def test_login_supports_a_unicode_password(self) -> None:
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             password = "本地控制面-强口令-2026-安全测试"
@@ -337,17 +337,17 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(204, client.post("/api/v1/session", json={"password": password}).status_code)
 
     def test_app_rejects_short_authentication_secrets(self) -> None:
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
-            with self.assertRaisesRegex(ValueError, "^webui_password_too_short$"):
+            with self.assertRaisesRegex(ValueError, "^console_password_too_short$"):
                 create_app(
                     state_dir=state_dir,
                     password="short-password",
                     session_secret="session-secret-for-test-0123456789",
                 )
-            with self.assertRaisesRegex(ValueError, "^webui_session_secret_too_short$"):
+            with self.assertRaisesRegex(ValueError, "^console_session_secret_too_short$"):
                 create_app(
                     state_dir=state_dir,
                     password="strong-local-password",
@@ -356,7 +356,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
 
     def test_model_active_switch_endpoint(self) -> None:
         """R2: POST /api/v1/model/active 只接受池内 provider,原子写状态文件,GET /api/v1/models 回显。"""
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -403,7 +403,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-        from webui.control_plane import create_app
+        from console.control_plane import create_app
 
         class FakeDsh(BaseHTTPRequestHandler):
             def log_message(self, *args: object) -> None:

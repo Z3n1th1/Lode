@@ -13,20 +13,20 @@
 ## 0. 环境
 
 - Python 3.10+；情报与 surface 核心只使用标准库。
-- WebUI 运行时直接使用已经构建好的 `webui/dist`，不需要 `node_modules`。
+- Console 运行时直接使用已经构建好的 `console/dist`，不需要 `node_modules`。
 - 精简运行包不含 `node_modules`；完整离线开发包包含一份经过重新安装和验证的依赖树，可离线执行 `npm run test/build`。
-- `webui/node_modules` 仅用于开发测试（本机约 416 MB），不会被运行时加载或打入精简产物。
+- `console/node_modules` 仅用于开发测试（本机约 416 MB），不会被运行时加载或打入精简产物。
 - 可设置 `PA_PYTHON` 为 Python 可执行文件；否则脚本会探测可用的 Python 3.10+ 解释器。
 
-启动本机 WebUI：
+启动本机 Console：
 
 ```powershell
 $env:WEBUI_ADMIN_PASSWORD = '<至少12位本机密码>'
 $env:WEBUI_SESSION_SECRET = '<至少32位随机会话密钥>'
-.\run-webui.ps1 -StateDir .\webui-state -Port 8088
+.\run-console.ps1 -StateDir .\lode-state -Port 8088
 ```
 
-浏览器访问 `http://127.0.0.1:8088`。服务固定绑定 loopback，完整本机报告可以在登录后的 WebUI 中读取；报告和证据不会因此进入飞书外发通道。
+浏览器访问 `http://127.0.0.1:8088`。服务固定绑定 loopback，完整本机报告可以在登录后的 Console 中读取；报告和证据不会因此进入飞书外发通道。
 
 ## 1. 先跑离线情报回放
 
@@ -76,7 +76,7 @@ Set-Location <解压目录>\pentest-agent
 
 内置 CISA KEV 默认启用；示例还包括 Project Zero、GitHub Security Lab、PortSwigger Research 和 Nuclei templates release Atom。每个 provider 独立报错，单个源失败不会卡住 watcher；连续全源失败达到阈值才停止。
 
-X/Twitter 来源默认关闭。先设置官方 API token，再在 WebUI 或 `sources.json` 中启用：
+X/Twitter 来源默认关闭。先设置官方 API token，再在 Console 或 `sources.json` 中启用：
 
 ```powershell
 $env:X_BEARER_TOKEN = '<official-api-token>'
@@ -94,7 +94,7 @@ $env:FEISHU_SECRET = '<optional-signing-secret>'
 
 RSS/Atom 的 `title/description/summary/published` 和 X 帖子正文会先被提取、截断，再组成飞书摘要。默认不二次抓取文章全文，不调用 LLM，不发送请求响应、cookie、token、凭据或敏感证据。`-FeishuDryRun` 只打印 payload，不联网发送。情报摘要不能直接触发扫描；飞书入站审批仍受白名单和人工门控制。
 
-pentest-agent 的完整报告、skill 输出、原始请求响应和证据文件只保存在本机 WebUI/工作区。飞书只发送目标主机、任务状态、风险计数和高层漏洞类型；所有文本、回复、卡片和 webhook payload 在传输层再次脱敏，广播审计只记录内容哈希和字节数。
+pentest-agent 的完整报告、skill 输出、原始请求响应和证据文件只保存在本机 Console/工作区。飞书只发送目标主机、任务状态、风险计数和高层漏洞类型；所有文本、回复、卡片和 webhook payload 在传输层再次脱敏，广播审计只记录内容哈希和字节数。
 
 ### pentest-agent 双向 Bot
 
@@ -142,21 +142,21 @@ webhook 的 HTTP 响应仅用于确认事件收到，不会自动出现在聊天
 ```powershell
 python -m pytest -q
 
-Set-Location .\webui
+Set-Location .\console
 npm install
 npm run test
 npm run build
 ```
 
-2026-09-06 交付验证结果：Python 全仓 `206 passed, 10 skipped`；WebUI `25 passed`；生产构建通过。跳过项是未随附件提供的私有 `ai-pentest-matrix` 证据/执行契约和平台可选测试，不是静默失败。
+2026-09-06 交付验证结果：Python 全仓 `206 passed, 10 skipped`；Console `25 passed`；生产构建通过。跳过项是未随附件提供的私有 `ai-pentest-matrix` 证据/执行契约和平台可选测试，不是静默失败。
 
 `skills/ai-pentest-matrix/scripts` 不在当前工作区或附件中，完整主动渗透仍需要外部 Strix runner 和这套私有 guardrail/evidence 依赖。缺失时系统按设计 fail-closed；精简包与完整离线包都不会伪造或替代私有 skill，也不会把其中的报告内容发送到飞书。
 
 ## 6. 历史 ZIP 说明
 
-之前的 v4 ZIP 仍是历史交付物；本轮源码和 `webui/dist` 已直接验证，不再生成新的 ZIP。
+之前的 v4 ZIP 仍是历史交付物；本轮源码和 `console/dist` 已直接验证，不再生成新的 ZIP。
 
-- `runtime-slim`：包含 Python 源码、测试、WebUI `dist` 和配置示例，不含 `node_modules`。运行已构建 WebUI、情报 worker 和 surface 提取时用这个。
-- `offline-webdev`：在精简包基础上包含用 `package-lock.json` 全新安装并验证的 WebUI 开发依赖，可断网执行 `npm run test` 和 `npm run build`。
+- `runtime-slim`：包含 Python 源码、测试、Console `dist` 和配置示例，不含 `node_modules`。运行已构建 Console、情报 worker 和 surface 提取时用这个。
+- `offline-webdev`：在精简包基础上包含用 `package-lock.json` 全新安装并验证的 Console 开发依赖，可断网执行 `npm run test` 和 `npm run build`。
 
-本地原 `webui/node_modules` 是 npm 与 pnpm 混装后的依赖树，约 416.56 MiB / 57,431 文件，其中 `.pnpm`、`.ignored` 和顶层 hoisted 包存在大量重复；`.vite` 与 `.vite-temp` 是缓存。它们不是全部无用，但不适合原样打包。
+本地原 `console/node_modules` 是 npm 与 pnpm 混装后的依赖树，约 416.56 MiB / 57,431 文件，其中 `.pnpm`、`.ignored` 和顶层 hoisted 包存在大量重复；`.vite` 与 `.vite-temp` 是缓存。它们不是全部无用，但不适合原样打包。

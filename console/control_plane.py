@@ -1,4 +1,4 @@
-"""Bounded, read-only projections for the local ControlPlane WebUI."""
+"""Bounded, read-only projections for the local ControlPlane Console."""
 from __future__ import annotations
 
 import hmac
@@ -36,7 +36,7 @@ try:                                   # #76 情报数据源管理(可选;contro
 except Exception:                      # noqa: BLE001
     intel_sources = None               # type: ignore
 
-try:                                   # #53 指纹自修正卡片(可选;webui admin=人工门,可 propose/approve/reject)
+try:                                   # #53 指纹自修正卡片(可选;console admin=人工门,可 propose/approve/reject)
     from core import fingerprint_corrections as fp_corr  # type: ignore
 except Exception:                      # noqa: BLE001
     fp_corr = None                     # type: ignore
@@ -51,12 +51,12 @@ try:                                   # #77 PTT 活树(只读投影层级任务
 except Exception:                      # noqa: BLE001
     ptt_tree = None                    # type: ignore
 
-try:                                   # #79 sink 签名库(代码审计护城河;webui admin=人工门 approve/reject)
+try:                                   # #79 sink 签名库(代码审计护城河;console admin=人工门 approve/reject)
     from core import sink_kb           # type: ignore
 except Exception:                      # noqa: BLE001
     sink_kb = None                     # type: ignore
 
-try:                                   # #80 PoC 审批(搬进 Vue,退役 pa-poc-admin;webui admin=人工门)
+try:                                   # #80 PoC 审批(搬进 Vue,退役 pa-poc-admin;console admin=人工门)
     from core import poc_sync          # type: ignore
 except Exception:                      # noqa: BLE001
     poc_sync = None                    # type: ignore
@@ -71,7 +71,7 @@ try:                                   # #74 出站 egress 门(被拦列表 + �
 except Exception:                      # noqa: BLE001
     egress_gate = None                 # type: ignore
 
-try:                                   # #60 自进化反思卡(webui admin=人工门 approve/reject)
+try:                                   # #60 自进化反思卡(console admin=人工门 approve/reject)
     from core import self_evolve       # type: ignore
 except Exception:                      # noqa: BLE001
     self_evolve = None                 # type: ignore
@@ -131,7 +131,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class WebUIStaticFiles(StaticFiles):
+class ConsoleStaticFiles(StaticFiles):
     """Keep Vite module MIME types stable on hosts with incomplete registries."""
 
     _MEDIA_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
@@ -194,7 +194,7 @@ def _valid_public_target(raw: str) -> str:
         return ""
     # Credentials and malformed ports must never enter a durable intake
     # record.  Besides preventing accidental secret persistence, this keeps
-    # WebUI validation aligned with SurfaceScope.check_url().
+    # Console validation aligned with SurfaceScope.check_url().
     if u.username or u.password:
         return ""
     try:
@@ -894,7 +894,7 @@ class ReadOnlyControlPlane:
         except Exception:  # noqa: BLE001
             mem = {}
         services: Dict[str, str] = {}
-        for n in ("pa-feishu-reply", "pa-mihomo", "pa-poc-admin", "pa-dashboard", "pa-soybean-webui"):
+        for n in ("pa-feishu-reply", "pa-mihomo", "pa-poc-admin", "pa-dashboard", "pa-soybean-console"):
             try:
                 services[n] = subprocess.run(["systemctl", "is-active", n], capture_output=True,
                                              text=True, timeout=5).stdout.strip() or "unknown"
@@ -939,7 +939,7 @@ class ReadOnlyControlPlane:
     def set_active_model(self, name: str) -> Dict[str, Any]:
         """R2: 切换活跃 provider。只写 model_active_provider.json(原子替换);
         model_client._providers() 每次调用时读取该文件并把活跃 provider 提到 failover 队首。
-        name 必须命中 model_pool_status.json 里已知 provider(不引入 webui 侧不可见的新凭据)。"""
+        name 必须命中 model_pool_status.json 里已知 provider(不引入 console 侧不可见的新凭据)。"""
         name = (name or "").strip()
         if not name or len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             return {"ok": False, "error": "invalid_name"}
@@ -950,7 +950,7 @@ class ReadOnlyControlPlane:
             return {"ok": False, "error": "unknown_provider",
                     "providers": [str(p.get("name", "")) for p in providers][:20]}
         doc = {"name": name, "model": str(match.get("model", ""))[:40],
-               "up": bool(match.get("up")), "set_at": time.time(), "set_by": "webui"}
+               "up": bool(match.get("up")), "set_at": time.time(), "set_by": "console"}
         path = self.state_dir / "model_active_provider.json"
         tmp = self.state_dir / ".model_active_provider.json.tmp"
         try:
@@ -1146,7 +1146,7 @@ class ReadOnlyControlPlane:
         return traj[:800]
 
     def project_intakes(self) -> List[Dict[str, Any]]:
-        """列出 webui 已提交的新建项目请求(只读投影;status=pending_review,非授权、不代表已开跑)。"""
+        """列出 console 已提交的新建项目请求(只读投影;status=pending_review,非授权、不代表已开跑)。"""
         d = self.state_dir / "project_intake"
         out: List[Dict[str, Any]] = []
         try:
@@ -1527,9 +1527,9 @@ def create_app(
 ) -> FastAPI:
     """Create the same-origin local dashboard service without a public listener."""
     if len(password) < MIN_PASSWORD_LENGTH:
-        raise ValueError("webui_password_too_short")
+        raise ValueError("console_password_too_short")
     if len(session_secret) < MIN_SESSION_SECRET_LENGTH:
-        raise ValueError("webui_session_secret_too_short")
+        raise ValueError("console_session_secret_too_short")
 
     app = FastAPI(title="Pentest Agent ControlPlane", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(
@@ -1626,8 +1626,8 @@ def create_app(
                     domains.append(host)
 
             scope = SurfaceScope(
-                program=f"webui-{run_id}",
-                authorization=authorization or f"WebUI operator authorized scan of {target_url}",
+                program=f"console-{run_id}",
+                authorization=authorization or f"Console operator authorized scan of {target_url}",
                 allowed_domains=tuple(domains),
                 delay_seconds=0.5,
             )
@@ -1646,7 +1646,7 @@ def create_app(
                 max_cycles=max_cycles,
                 max_explore_per_cycle=max_explore,
                 reasoner_prefer=reasoner_prefer,
-                worker_id=f"webui-{run_id}",
+                worker_id=f"console-{run_id}",
             )
 
             with _src_agent_lock:
@@ -2027,8 +2027,8 @@ def create_app(
 
     @app.post("/api/v1/session/guidance")
     def session_guidance(payload: SessionGuidanceRequest, request: Request) -> JSONResponse:
-        """P5-e 受控写:对某会话追加"继续深挖"指导。webui 直发=直接进处理队列;
-        飞书侧只收提醒通知(不带审批要求)。若 agent 侧判定触发人工门,审批按钮在 webui 就地支出。"""
+        """P5-e 受控写:对某会话追加"继续深挖"指导。console 直发=直接进处理队列;
+        飞书侧只收提醒通知(不带审批要求)。若 agent 侧判定触发人工门,审批按钮在 console 就地支出。"""
         _require_session(request)
         if not SESSION_ID_RE.fullmatch(str(payload.session_id or "")):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_session_id")
@@ -2041,14 +2041,14 @@ def create_app(
         gid = f"SG-{int(time.time())}-{secrets.token_hex(3)}"
         rec = {"schema": "SessionGuidanceRequest/v1", "id": gid,
                "session_id": _text(payload.session_id, limit=128), "target": target,
-               "guidance": guidance, "status": "pending_review", "origin": "webui",
+               "guidance": guidance, "status": "pending_review", "origin": "console",
                "created_at": time.time(), "created_by": "control_plane"}
         try:
             _write_guidance(control_plane.state_dir, rec)
         except OSError:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="write_failed")
         return JSONResponse(content={"ok": True, "id": gid, "status": "pending_review",
-                                     "note": "已提交(webui 直发,排队处理;若触发人工门会在本页就地支审批按钮)"},
+                                     "note": "已提交(console 直发,排队处理;若触发人工门会在本页就地支审批按钮)"},
                             headers=_NOSTORE)
 
     @app.get("/api/v1/session/guidance")
@@ -2079,7 +2079,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="intake_write_failed")
         return JSONResponse(content={
             "ok": True, "intake_id": iid, "status": "pending_review",
-            "note": "已提交(webui 直发,排队处理;飞书仅收提醒通知,无审批要求)",
+            "note": "已提交(console 直发,排队处理;飞书仅收提醒通知,无审批要求)",
         }, headers=_NOSTORE)
 
     @app.get("/api/v1/project/intakes")
@@ -2262,7 +2262,7 @@ def create_app(
         _require_session(request)
         if socks_pool is None:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="socks_pool_unavailable")
-        ok, msg = socks_pool.add_proxy(str(payload.addr or ""), added_by="webui")
+        ok, msg = socks_pool.add_proxy(str(payload.addr or ""), added_by="console")
         if not ok:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
         return JSONResponse(content={"ok": True, "addr": str(payload.addr), "result": msg}, headers=_NOSTORE)
@@ -2305,7 +2305,7 @@ def create_app(
         _require_session(request)
         if egress_gate is None:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="egress_gate_unavailable")
-        ok, msg = egress_gate.add_allow(str(payload.host or ""), added_by="webui", reason=payload.reason or "")
+        ok, msg = egress_gate.add_allow(str(payload.host or ""), added_by="console", reason=payload.reason or "")
         if not ok:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
         return JSONResponse(content={"ok": True, "host": str(payload.host), "result": msg}, headers=_NOSTORE)
@@ -2515,7 +2515,7 @@ def create_app(
     # nginx speaks HTTPS with a self-signed cert (loopback only → verify off),
     # and it gates static assets behind its own basic auth. The upstream
     # credentials come from env PA_ARL_BASIC_AUTH ("user:pass", never committed);
-    # the webui session remains the outer gate. No WebSocket: ARL frontend polls.
+    # the console session remains the outer gate. No WebSocket: ARL frontend polls.
     arl_base = (arl_upstream or os.environ.get("PA_ARL_UPSTREAM") or "https://127.0.0.1:5173").rstrip("/")
     _arl_auth = os.environ.get("PA_ARL_BASIC_AUTH", "").strip()
     _ARL_AUTH_HEADER = ""
@@ -2588,7 +2588,7 @@ def create_app(
     if resolved_static_dir is not None and (resolved_static_dir / "index.html").is_file():
         assets_dir = resolved_static_dir / "assets"
         if assets_dir.is_dir():
-            app.mount("/assets", WebUIStaticFiles(directory=str(assets_dir)), name="assets")
+            app.mount("/assets", ConsoleStaticFiles(directory=str(assets_dir)), name="assets")
 
         @app.get("/", include_in_schema=False)
         def index() -> FileResponse:

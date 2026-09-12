@@ -1,6 +1,6 @@
-# SurfaceForge 使用说明
+# Lode 使用说明
 
-AI 驱动的 SRC 漏洞挖掘平台。三种使用方式：WebUI 对话、命令行、后台常驻。
+AI 驱动的 SRC 漏洞挖掘平台。三种使用方式：Console 对话、命令行、后台常驻。
 
 ---
 
@@ -28,7 +28,7 @@ $env:PA_PYTHON = "D:\Environment\Python\miniforge\envs\py310\python.exe"
 
 ---
 
-## 1. WebUI 方式（推荐日常用）
+## 1. Console 方式（推荐日常用）
 
 ### 启动
 
@@ -36,19 +36,19 @@ $env:PA_PYTHON = "D:\Environment\Python\miniforge\envs\py310\python.exe"
 ```powershell
 cd E:\LLM\pentest-agent
 $env:PA_PYTHON = "D:\Environment\Python\miniforge\envs\py310\python.exe"
-.\run-webui.ps1
+.\run-console.ps1
 ```
 
 **Linux / macOS:**
 ```bash
 cd /path/to/pentest-agent
 export PA_PYTHON=python3
-./run-webui.sh
+./run-console.sh
 ```
 
 **通用（三平台一致）:**
 ```bash
-python surfaceforge.py webui
+python lode.py console
 ```
 
 ### 访问
@@ -59,7 +59,7 @@ python surfaceforge.py webui
 
 ### 对话流程
 
-在 WebUI 里跟 agent 对话，例如：
+在 Console 里跟 agent 对话，例如：
 
 ```
 你: 帮我测 www.zomato.com，H1 Eternal 项目，scope 是 zomato.com 和 blinkit.com
@@ -81,39 +81,39 @@ Agent: [调用 auto_scan] 扫描→分析→报告，一条龙
 
 ### 环境检查
 ```bash
-python surfaceforge.py doctor
+python lode.py doctor
 ```
 输出 Python 版本、平台、API key 状态、模块加载状态。
 
 ### 单站扫描
 ```bash
-python surfaceforge.py scan https://www.zomato.com --scope scope-eternal.json --out-dir ./out
+python lode.py scan https://www.zomato.com --scope scope-eternal.json --out-dir ./out
 ```
 
 ### 全自动
 ```bash
-python surfaceforge.py auto https://www.zomato.com --scope scope-eternal.json --out-dir ./out
+python lode.py auto https://www.zomato.com --scope scope-eternal.json --out-dir ./out
 ```
 依次执行：表面发现 → 候选分诊 → LLM 分析 → 输出结果。
 
 ### LLM agent 循环
 ```bash
-python surfaceforge.py agent ./out/src-blackboard.json --scope scope-eternal.json --max-cycles 20
+python lode.py agent ./out/src-blackboard.json --scope scope-eternal.json --max-cycles 20
 ```
 
 ### 查看进度
 ```bash
-python surfaceforge.py progress --state-dir ./webui-state
+python lode.py progress --state-dir ./lode-state
 ```
 
 ### 列出会话
 ```bash
-python surfaceforge.py sessions
+python lode.py sessions
 ```
 
 ### 继续上次会话（中断后续跑）
 ```bash
-python surfaceforge.py resume src-c55cac7edd68 --scope scope-eternal.json
+python lode.py resume src-c55cac7edd68 --scope scope-eternal.json
 ```
 黑板状态持久化，进程挂了也能接着跑。
 
@@ -123,24 +123,24 @@ python surfaceforge.py resume src-c55cac7edd68 --scope scope-eternal.json
 
 ### Linux systemd
 ```ini
-# /etc/systemd/system/surfaceforge.service
+# /etc/systemd/system/lode.service
 [Unit]
-Description=SurfaceForge WebUI
+Description=Lode Console
 After=network.target
 
 [Service]
 Type=simple
-User=surfaceforge
-WorkingDirectory=/opt/surfaceforge
-EnvironmentFile=/opt/surfaceforge/.env
+User=lode
+WorkingDirectory=/opt/lode
+EnvironmentFile=/opt/lode/.env
 Environment=PA_PYTHON=/usr/bin/python3
-ExecStart=/usr/bin/python3 surfaceforge.py webui
+ExecStart=/usr/bin/python3 lode.py console
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/surfaceforge/webui-state /opt/surfaceforge/projects
+ReadWritePaths=/opt/lode/lode-state /opt/lode/projects
 MemoryMax=2G
 
 [Install]
@@ -148,8 +148,8 @@ WantedBy=multi-user.target
 ```
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now surfaceforge
-sudo journalctl -u surfaceforge -f
+sudo systemctl enable --now lode
+sudo journalctl -u lode -f
 ```
 
 ### macOS launchd
@@ -157,9 +157,9 @@ sudo journalctl -u surfaceforge -f
 
 ### Windows NSSM
 ```powershell
-nssm install SurfaceForge "D:\Environment\Python\miniforge\envs\py310\python.exe" "E:\LLM\pentest-agent\surfaceforge.py webui"
-nssm set SurfaceForge AppDirectory "E:\LLM\pentest-agent"
-nssm start SurfaceForge
+nssm install Lode "D:\Environment\Python\miniforge\envs\py310\python.exe" "E:\LLM\pentest-agent\lode.py console"
+nssm set Lode AppDirectory "E:\LLM\pentest-agent"
+nssm start Lode
 ```
 
 ---
@@ -174,7 +174,7 @@ LLM_API_KEY=sk-xxxxx
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
 
-# WebUI
+# Console
 WEBUI_ADMIN_PASSWORD=至少16字符
 WEBUI_SESSION_SECRET=至少32字符
 WEBUI_PORT=8088
@@ -212,11 +212,11 @@ projects/
 
 ## 6. 常见问题
 
-**Q: WebUI 打不开？**
+**Q: Console 打不开？**
 检查 `http://127.0.0.1:8088/healthz` 是否返回 `{"status":"ok"}`。端口被占用改 `.env` 的 `WEBUI_PORT`。
 
 **Q: Agent 说 "LLM unavailable"？**
-检查 `.env` 的 `LLM_API_KEY` 是否正确，`python surfaceforge.py doctor` 看 `llm_api_key_set`。
+检查 `.env` 的 `LLM_API_KEY` 是否正确，`python lode.py doctor` 看 `llm_api_key_set`。
 
 **Q: 扫描没结果？**
 目标可能有 WAF（如 Cloudflare），基础 fetcher 会 403。需要更强 HTTP client 或手工加候选。

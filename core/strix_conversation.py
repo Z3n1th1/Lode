@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#F1 读 Strix 真实多智能体对话 —— webui 对话台的"芯"。
+"""#F1 读 Strix 真实多智能体对话 —— console 对话台的"芯"。
 
 Strix 每次跑把完整对话存进 <task>/strix_runs/<run>/.state/agents.db(SQLite):
   agent_sessions(session_id, created_at, updated_at)   # 每个 agent 一行
