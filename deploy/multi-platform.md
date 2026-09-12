@@ -40,7 +40,7 @@ python surfaceforge.py webui
 **后台常驻**（Windows 服务）：
 ```powershell
 # 用 NSSM 或任务计划程序
-nssm install SurfaceForge "C:\Python311\python.exe" "E:\LLM\pentest-agent\surfaceforge.py webui"
+nssm install SurfaceForge "C:\Python311\python.exe" "E:\LLM\surfaceforge\surfaceforge.py webui"
 ```
 
 ---
