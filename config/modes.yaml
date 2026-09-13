@@ -1,0 +1,33 @@
+# Conversation modes. A mode bundles: which skill pack primes the turn, which
+# model tier to prefer, how much autonomy the agent has, and which tools are
+# offered. Preset via the UI selector, a new-session default, or natural
+# language ("进入 CTF 模式").
+modes:
+  chat:
+    title: 闲聊
+    skill: chat
+    tier: explorer
+    autonomy: none
+    tools: []
+    system_fragment: "纯对话模式：只讨论与推理，不主动发起任何扫描或请求。"
+  ctf:
+    title: CTF
+    skill: ctf
+    tier: reasoner
+    autonomy: auto
+    tools: [shell, fetch, decode, submit_flag]
+    system_fragment: "CTF 模式：工程化构造攻击链，先侦察再逐点利用，优先给出可直接运行的 payload/exploit。"
+  src_blackbox:
+    title: SRC 黑盒
+    skill: src-blackbox
+    tier: reasoner
+    autonomy: ask
+    tools: [scan_target, run_agent_analysis, fetch_url, show_blackboard, add_candidates, show_progress, auto_scan]
+    system_fragment: "SRC 黑盒模式：严格限定在授权范围内做只读侦察与漏洞验证，任何写操作先要人工确认。"
+  code_audit:
+    title: 代码审计
+    skill: code-audit
+    tier: reasoner
+    autonomy: ask
+    tools: [read_file, grep_scan, taint_trace, sink_lookup]
+    system_fragment: "代码审计模式：从 source 到 sink 追踪数据流，先给证据链再给结论。"

@@ -819,15 +819,21 @@ _sanitize_messages = llm_client.sanitize_messages
 
 
 
-def chat(session: SrcChatSession, user_message: str, *, timeout: float = 90.0) -> str:
-    """Process a user message, execute tools if needed, return final assistant text."""
+def chat(session: SrcChatSession, user_message: str, *, timeout: float = 90.0,
+         system_prompt: Optional[str] = None) -> str:
+    """Process a user message, execute tools if needed, return final assistant text.
+
+    ``system_prompt`` overrides the default SRC prompt — the unified chat uses it
+    to prime the turn with the active mode's skill pack.
+    """
     session.messages.append({"role": "user", "content": user_message})
     session.last_active = time.time()
     session.persist()
 
     # Build message list with system prompt (sanitized: never send dangling
     # tool_calls / orphan tool messages, which the provider rejects with 400).
-    messages = [{"role": "system", "content": SRC_SYSTEM_PROMPT}] + _sanitize_messages(session.messages[-40:])
+    prompt = (system_prompt or "").strip() or SRC_SYSTEM_PROMPT
+    messages = [{"role": "system", "content": prompt}] + _sanitize_messages(session.messages[-40:])
 
     def _dispatch(name: str, args: Dict[str, Any]) -> str:
         handler = _TOOL_DISPATCH.get(name)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -123,7 +124,54 @@ def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     return {"summary_ref": str(out_dir / "src-blackboard.json"), "progress": {"phase": "done"}}
 
 
-HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan}
+def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """One conversation turn: route the intent, run chat, escalate if asked.
+
+    Emits the unified event stream (user_message / mode_changed /
+    subtask_started / assistant_message) so the turn renders inline alongside any
+    subtask it launches.
+    """
+    from agents import src_chat
+    from core import intent_router, modes, skills
+
+    state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
+    session_id = job.session_id
+    text = str(job.payload.get("text") or "")
+    mode_name = str(job.payload.get("mode") or modes.DEFAULT_MODE)
+    mode = modes.get_mode(mode_name)
+
+    ctx.emit("user_message", text=text)
+    decision = intent_router.route(text, mode=mode)
+
+    if decision.mode and decision.mode != mode.name:
+        mode = modes.get_mode(decision.mode)
+        ctx.emit("mode_changed", mode=mode.name)
+
+    if decision.escalates and decision.target:
+        # Subtask node: a blackboard intent + a durable job (DAG/lease handled there).
+        run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
+        subtask = get_registry(state_dir).create(
+            session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
+            target=decision.target,
+            payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
+                     "reason": decision.reason},
+        )
+        ctx.emit("subtask_started", job_id=subtask.job_id, kind=decision.subtask_kind,
+                 target=decision.target, title=mode.title)
+        get_runner(state_dir).submit(subtask)
+
+    prompt = skills.compose_prompt(mode.skill)
+    if mode.system_fragment:
+        prompt = (prompt + "\n\n" + mode.system_fragment).strip()
+    session = src_chat._get_or_create_session(session_id, state_dir=state_dir)
+    reply = src_chat.chat(session, text, system_prompt=prompt or None)
+    ctx.emit("assistant_message", text=reply)
+    return {"summary_ref": f"session:{session_id}", "progress": {"mode": mode.name,
+                                                                "routed": decision.action}}
+
+
+HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan,
+            "chat_turn": _handler_chat_turn}
 
 
 # -- notify (best effort) ----------------------------------------------------

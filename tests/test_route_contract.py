@@ -81,6 +81,12 @@ ROUTE_CONTRACT = frozenset({
     ("GET", "/api/v1/jobs/{job_id}"),
     ("POST", "/api/v1/jobs/{job_id}/stop"),
     ("GET", "/api/v1/chat/sessions/{session_id}/stream"),
+    # unified conversation + modes (P4)
+    ("GET", "/api/v1/modes"),
+    ("POST", "/api/v1/chat/sessions"),
+    ("GET", "/api/v1/chat/sessions/{session_id}/events"),
+    ("POST", "/api/v1/chat/sessions/{session_id}/messages"),
+    ("POST", "/api/v1/chat/sessions/{session_id}/turn/stop"),
 })
 
 
