@@ -4,11 +4,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { NButton, NEmpty, NInput, NSpin, NTooltip, useMessage } from 'naive-ui'
 import {
-  Bot, Bug, CircleDot, FolderOpen, Plus, RefreshCw, Send, Terminal, User, Zap
+  Bot, Bug, CircleDot, Link2, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Send, Terminal,
+  Trash2, User, Zap
 } from '@lucide/vue'
 import {
-  loadSrcSessions, loadSrcHistory, sendSrcChat, loadSrcProgress,
-  type SrcSession, type SrcMessage, type SrcProgress
+  loadSrcSessionsView, loadSrcHistory, sendSrcChat, loadSrcProgress,
+  renameSrcSession, pinSrcSession, deleteSrcSession, pruneSrcSessions,
+  submitH1Intake, startSrcAgent,
+  type SrcSession, type SrcMessage, type SrcProgress, type SrcIntakeResult
 } from '../../api'
 
 const message = useMessage()
@@ -29,6 +32,21 @@ const busy = ref(false)
 const loadingSessions = ref(false)
 const loadingHistory = ref(false)
 const threadRef = ref<HTMLElement | null>(null)
+
+// ---- 会话管理:搜索 / 分组 / 重命名 / 删除 / 清理空会话 ----
+const emptyCount = ref(0)
+const sessionFilter = ref('')
+const editingId = ref('')
+const editingTitle = ref('')
+const pruning = ref(false)
+
+// ---- H1 接入:粘贴整页 / URL → 抽 scope 草稿 → 确认后开跑 ----
+const intakeOpen = ref(false)
+const intakeText = ref('')
+const intakeUrl = ref('')
+const intakeBusy = ref(false)
+const intakeResult = ref<SrcIntakeResult | null>(null)
+const starting = ref(false)
 
 const totals = computed(() => progress.value?.totals || {
   targets: 0, scans: 0, urls_explored: 0, total_explores: 0, findings: 0, dead_ends: 0, errors: 0
@@ -86,12 +104,164 @@ function hostOf(target?: string): string {
 async function refreshSessions() {
   loadingSessions.value = true
   try {
-    sessions.value = await loadSrcSessions()
+    const view = await loadSrcSessionsView()
+    sessions.value = view.sessions
+    emptyCount.value = view.empty_count
   } catch {
     message.error('加载会话列表失败')
   } finally {
     loadingSessions.value = false
   }
+}
+
+// 时间分组(ChatGPT/Codex 式):置顶 → 今天 → 昨天 → 近 7 天 → 更早
+function groupLabel(ts?: number): string {
+  if (!ts) return '更早'
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const t = ts * 1000
+  if (t >= startOfToday) return '今天'
+  if (t >= startOfToday - 86_400_000) return '昨天'
+  if (t >= startOfToday - 7 * 86_400_000) return '近 7 天'
+  return '更早'
+}
+
+const filteredSessions = computed(() => {
+  const q = sessionFilter.value.trim().toLowerCase()
+  if (!q) return sessions.value
+  return sessions.value.filter((s) =>
+    (s.title || '').toLowerCase().includes(q) ||
+    (s.last_user || '').toLowerCase().includes(q) ||
+    (s.first_user || '').toLowerCase().includes(q) ||
+    s.session_id.toLowerCase().includes(q)
+  )
+})
+
+const sessionGroups = computed(() => {
+  const groups: Array<{ label: string; items: SrcSession[] }> = []
+  for (const s of filteredSessions.value) {
+    const label = s.pinned ? '置顶' : groupLabel(s.updated_at)
+    let g = groups.find((x) => x.label === label)
+    if (!g) {
+      g = { label, items: [] }
+      groups.push(g)
+    }
+    g.items.push(s)
+  }
+  return groups
+})
+
+function startRename(s: SrcSession, e: Event) {
+  e.stopPropagation()
+  editingId.value = s.session_id
+  editingTitle.value = s.title || ''
+}
+
+async function commitRename(s: SrcSession) {
+  if (editingId.value !== s.session_id) return
+  const title = editingTitle.value.trim()
+  editingId.value = ''
+  if (!title || title === s.title) return
+  try {
+    await renameSrcSession(s.session_id, title)
+    s.title = title
+    message.success('已重命名')
+  } catch (e) {
+    message.error(`重命名失败:${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function togglePin(s: SrcSession, e: Event) {
+  e.stopPropagation()
+  try {
+    await pinSrcSession(s.session_id, !s.pinned)
+    await refreshSessions()
+  } catch (e) {
+    message.error(`置顶失败:${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function removeSession(s: SrcSession, e: Event) {
+  e.stopPropagation()
+  if (!window.confirm(`删除会话「${s.title || s.session_id}」?\n它的对话和该会话的扫描记录会一起删除。`)) return
+  try {
+    await deleteSrcSession(s.session_id)
+    if (activeSession.value === s.session_id) newSession()
+    await refreshSessions()
+    message.success('已删除')
+  } catch (e) {
+    message.error(`删除失败:${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function pruneEmpty() {
+  if (!emptyCount.value || pruning.value) return
+  if (!window.confirm(`清理 ${emptyCount.value} 个空会话?\n（只删没有对话、也没有扫描记录的)`) ) return
+  pruning.value = true
+  try {
+    const r = await pruneSrcSessions()
+    await refreshSessions()
+    message.success(`已清理 ${r.removed} 个空会话`)
+  } catch (e) {
+    message.error(`清理失败:${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    pruning.value = false
+  }
+}
+
+async function runIntake() {
+  const text = intakeText.value.trim()
+  const url = intakeUrl.value.trim()
+  if (!text && !url) {
+    message.warning('粘贴 H1 页面内容,或填一个 URL')
+    return
+  }
+  intakeBusy.value = true
+  intakeResult.value = null
+  try {
+    intakeResult.value = await submitH1Intake(text ? { text } : { url })
+    message.success('已解析出范围草稿,确认后再开跑')
+  } catch (e) {
+    message.error(`解析失败:${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    intakeBusy.value = false
+  }
+}
+
+async function startFromIntake() {
+  const d = intakeResult.value?.extracted
+  if (!d || starting.value) return
+  const target = d.candidate_targets[0] || d.in_scope.urls[0] || ''
+  if (!target) {
+    message.warning('没解析出可探测的目标 URL —— 手动并入对话更稳')
+    return
+  }
+  starting.value = true
+  try {
+    await startSrcAgent({
+      target_url: target,
+      authorization: `H1 ${d.program || 'program'} — operator-confirmed scope`,
+      allowed_domains: d.in_scope.domains,
+      allowed_hosts: d.in_scope.hosts,
+      reasoner_prefer: '',
+      explorer_prefer: ''
+    })
+    intakeOpen.value = false
+    message.success('已按确认的范围开跑,进度见本会话')
+  } catch (e) {
+    message.error(`开跑失败:${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    starting.value = false
+  }
+}
+
+function fillIntakeToChat() {
+  const d = intakeResult.value?.extracted
+  if (!d) return
+  const target = d.candidate_targets[0] || d.in_scope.urls[0] || d.in_scope.hosts[0] || ''
+  input.value = `扫描 ${target},scope 是 ${d.in_scope.domains.join(', ') || d.in_scope.hosts.join(', ')}` +
+    (d.program ? `,H1 项目 ${d.program}` : '')
+  intakeOpen.value = false
 }
 
 async function openSession(sid: string) {
@@ -206,6 +376,10 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
             <template #icon><RefreshCw :size="14" /></template>
           </n-button>
         </div>
+        <div class="sa-search">
+          <Search :size="13" class="sa-search-icon" />
+          <n-input v-model:value="sessionFilter" size="small" clearable placeholder="搜索会话" />
+        </div>
       </div>
 
       <div class="sa-side-stats">
@@ -214,31 +388,64 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
         <div class="sa-stat"><span>待挖</span><b class="warn">{{ totalQueued }}</b></div>
       </div>
 
+      <div v-if="emptyCount" class="sa-prune">
+        <n-button size="tiny" quaternary :loading="pruning" @click="pruneEmpty">
+          <template #icon><Trash2 :size="12" /></template>清理 {{ emptyCount }} 个空会话
+        </n-button>
+      </div>
+
       <div class="sa-session-list">
         <n-spin v-if="loadingSessions && !sessions.length" size="small" class="sa-list-spin" />
         <n-empty v-else-if="!sessions.length" size="small" description="还没有会话" class="sa-empty" />
-        <button
-          v-for="s in sessions"
-          :key="s.session_id"
-          class="sa-session"
-          :class="{ active: s.session_id === activeSession }"
-          @click="openSession(s.session_id)"
-        >
-          <div class="sa-session-top">
-            <span class="sa-session-dot" :class="{ live: s.session_id === activeSession }" />
-            <span class="sa-session-name" :title="s.session_id">{{ s.title || s.session_id }}</span>
-            <span class="sa-session-time">{{ relTime(s.updated_at) }}</span>
+        <n-empty v-else-if="!filteredSessions.length" size="small" description="没有匹配的会话" class="sa-empty" />
+        <template v-else>
+          <div v-for="g in sessionGroups" :key="g.label" class="sa-group">
+            <div class="sa-group-label">{{ g.label }}</div>
+            <div
+              v-for="s in g.items"
+              :key="s.session_id"
+              class="sa-session"
+              :class="{ active: s.session_id === activeSession, isempty: s.empty }"
+              role="button"
+              tabindex="0"
+              @click="openSession(s.session_id)"
+            >
+              <div class="sa-session-top">
+                <span class="sa-session-dot" :class="{ live: s.session_id === activeSession }" />
+                <n-input
+                  v-if="editingId === s.session_id"
+                  v-model:value="editingTitle"
+                  size="tiny"
+                  autofocus
+                  @click.stop
+                  @keydown.enter.prevent="commitRename(s)"
+                  @keydown.esc.prevent="editingId = ''"
+                  @blur="commitRename(s)"
+                />
+                <template v-else>
+                  <span class="sa-session-name" :title="s.session_id">{{ s.title || s.session_id }}</span>
+                  <span class="sa-session-time">{{ relTime(s.updated_at) }}</span>
+                </template>
+              </div>
+              <div class="sa-session-preview">{{ s.last_user || s.first_user || '（无对话）' }}</div>
+              <div class="sa-session-meta">
+                <span v-if="s.empty" class="sa-chip empty">空</span>
+                <span v-if="s.pinned" class="sa-chip pin">置顶</span>
+                <span class="sa-chip">{{ s.turns || 0 }} 轮</span>
+                <span v-if="hostOf(s.targets?.[0])" class="sa-chip target">{{ hostOf(s.targets?.[0]) }}</span>
+                <span v-if="s.hints" class="sa-chip ok">{{ s.hints }} 发现</span>
+                <span v-if="s.intents_queued" class="sa-chip warn">{{ s.intents_queued }} 待挖</span>
+              </div>
+              <div class="sa-session-tools" @click.stop>
+                <button class="sa-tool" :title="s.pinned ? '取消置顶' : '置顶'" @click="togglePin(s, $event)">
+                  <PinOff v-if="s.pinned" :size="12" /><Pin v-else :size="12" />
+                </button>
+                <button class="sa-tool" title="重命名" @click="startRename(s, $event)"><Pencil :size="12" /></button>
+                <button class="sa-tool danger" title="删除" @click="removeSession(s, $event)"><Trash2 :size="12" /></button>
+              </div>
+            </div>
           </div>
-          <div class="sa-session-preview">{{ s.last_user || '（空会话）' }}</div>
-          <div class="sa-session-meta">
-            <span class="sa-chip">{{ s.turns || 0 }} 轮</span>
-            <span v-if="hostOf(s.targets?.[0])" class="sa-chip target">
-              {{ hostOf(s.targets?.[0]) }}
-            </span>
-            <span v-if="s.hints" class="sa-chip ok">{{ s.hints }} 发现</span>
-            <span v-if="s.intents_queued" class="sa-chip warn">{{ s.intents_queued }} 待挖</span>
-          </div>
-        </button>
+        </template>
       </div>
 
       <div class="sa-side-foot">
@@ -253,6 +460,13 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
           <CircleDot :size="12" :class="{ live: !!activeSession }" />
           <span class="sa-topbar-title">{{ activeTitle || '新会话' }}</span>
           <span v-if="busy" class="sa-running">运行中</span>
+          <n-button
+            size="tiny" quaternary class="sa-intake-toggle"
+            :class="{ active: intakeOpen }"
+            @click="intakeOpen = !intakeOpen"
+          >
+            <template #icon><Link2 :size="12" /></template>H1 接入
+          </n-button>
         </div>
         <div class="sa-metrics">
           <n-tooltip><template #trigger>
@@ -269,6 +483,47 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
           </template>已排除的方向</n-tooltip>
         </div>
       </header>
+
+      <div v-if="intakeOpen" class="sa-intake">
+        <div class="sa-intake-head">
+          <Link2 :size="13" />
+          <b>H1 接入</b>
+          <span>粘贴项目页面内容或给一个 URL,LLM 抽成 scope 草稿 —— 确认后才开跑</span>
+          <span class="spacer" />
+          <n-button size="tiny" quaternary @click="intakeOpen = false">收起</n-button>
+        </div>
+        <n-input
+          v-model:value="intakeText"
+          type="textarea"
+          :autosize="{ minRows: 3, maxRows: 8 }"
+          placeholder="把 HackerOne 项目页整页粘到这里(范围、资产列表、排除项)…"
+        />
+        <div class="sa-intake-row">
+          <n-input v-model:value="intakeUrl" size="small" placeholder="…或者只给一个公开 URL" />
+          <n-button size="small" type="primary" :loading="intakeBusy" @click="runIntake">解析</n-button>
+        </div>
+
+        <div v-if="intakeResult" class="sa-intake-result">
+          <div class="sa-intake-line">
+            <b>{{ intakeResult.extracted.program || '(未识别项目名)' }}</b>
+            <span v-if="intakeResult.warnings.length" class="sa-warn">· {{ intakeResult.warnings.join(', ') }}</span>
+          </div>
+          <div v-if="intakeResult.extracted.in_scope.domains.length || intakeResult.extracted.in_scope.hosts.length" class="sa-chips">
+            <span v-for="d in intakeResult.extracted.in_scope.domains" :key="'d' + d" class="sa-chip target">{{ d }}</span>
+            <span v-for="h in intakeResult.extracted.in_scope.hosts" :key="'h' + h" class="sa-chip">{{ h }}</span>
+          </div>
+          <div v-if="intakeResult.extracted.candidate_targets.length" class="sa-chips">
+            <span v-for="t in intakeResult.extracted.candidate_targets" :key="t" class="sa-chip">{{ t }}</span>
+          </div>
+          <div v-if="intakeResult.extracted.out_of_scope.length" class="sa-intake-oos">
+            排除:{{ intakeResult.extracted.out_of_scope.join('、') }}
+          </div>
+          <div class="sa-intake-actions">
+            <n-button size="small" type="primary" :loading="starting" @click="startFromIntake">按这个范围开跑</n-button>
+            <n-button size="small" quaternary @click="fillIntakeToChat">填入对话</n-button>
+          </div>
+        </div>
+      </div>
 
       <div ref="threadRef" class="sa-thread">
         <n-spin v-if="loadingHistory" size="small" class="sa-thread-spin" />
@@ -568,4 +823,67 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
   text-align: center; font-size: 11px; color: var(--pa-text-3);
   padding: 8px 0 2px;
 }
+
+/* ---------- 会话管理:搜索 / 分组 / 行内操作 ---------- */
+.sa-search { position: relative; margin-top: 10px; }
+.sa-search-icon {
+  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  color: var(--pa-text-3); pointer-events: none; z-index: 1;
+}
+.sa-search :deep(.n-input__input-el) { padding-left: 22px; }
+
+.sa-prune {
+  padding: 7px 10px; border-bottom: 1px solid var(--pa-border-soft);
+  display: flex; justify-content: center;
+}
+.sa-prune :deep(.n-button) { font-size: 11.5px; }
+
+.sa-group { margin-bottom: 8px; }
+.sa-group-label {
+  font-size: 10.5px; color: var(--pa-text-3); font-weight: 600;
+  letter-spacing: .4px; padding: 6px 8px 4px; text-transform: uppercase;
+}
+.sa-session { position: relative; }
+.sa-session.isempty .sa-session-name { color: var(--pa-text-2); font-weight: 500; }
+.sa-session-tools {
+  position: absolute; top: 8px; right: 8px;
+  display: none; gap: 2px; background: var(--pa-surface);
+  border: 1px solid var(--pa-border-soft); border-radius: 7px; padding: 1px;
+  box-shadow: var(--pa-shadow-soft, 0 1px 3px rgb(0 0 0 / 6%));
+}
+.sa-session:hover .sa-session-tools,
+.sa-session:focus-within .sa-session-tools { display: flex; }
+.sa-tool {
+  display: grid; place-items: center; width: 22px; height: 22px;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--pa-text-3); border-radius: 5px; transition: all .12s;
+}
+.sa-tool:hover { background: var(--pa-bg); color: var(--pa-text); }
+.sa-tool.danger:hover { color: #c0392b; background: color-mix(in srgb, #c0392b 10%, transparent); }
+.sa-session:hover .sa-session-time { visibility: hidden; }
+.sa-chip.empty { color: var(--pa-text-3); border-style: dashed; }
+.sa-chip.pin { color: var(--pa-primary); border-color: color-mix(in srgb, var(--pa-primary) 30%, transparent); }
+
+/* ---------- H1 接入 ---------- */
+.sa-intake-toggle.active { color: var(--pa-primary); }
+.sa-intake {
+  border-bottom: 1px solid var(--pa-border-soft);
+  background: var(--pa-surface); padding: 12px 24px 14px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.sa-intake-head { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--pa-text-2); }
+.sa-intake-head b { color: var(--pa-text); font-weight: 650; }
+.sa-intake-head svg { color: var(--pa-primary); }
+.sa-intake-head .spacer { flex: 1; }
+.sa-intake-row { display: flex; gap: 8px; }
+.sa-intake-row :deep(.n-input) { flex: 1; }
+.sa-intake-result {
+  border: 1px solid var(--pa-border); border-radius: 10px;
+  padding: 11px 13px; background: var(--pa-bg); display: flex; flex-direction: column; gap: 8px;
+}
+.sa-intake-line { font-size: 12.5px; color: var(--pa-text); }
+.sa-warn { color: #c98a12; font-size: 11.5px; }
+.sa-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.sa-intake-oos { font-size: 11.5px; color: var(--pa-text-3); }
+.sa-intake-actions { display: flex; gap: 8px; margin-top: 2px; }
 </style>

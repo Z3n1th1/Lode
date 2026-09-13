@@ -37,6 +37,26 @@ def _python() -> str:
     return sys.executable
 
 
+def _prefer(args: argparse.Namespace, attr: str, env_name: str, default: str = "") -> str:
+    """CLI flag wins, else the env default set by the Console settings file."""
+    value = getattr(args, attr, None)
+    if value:
+        return str(value)
+    return os.environ.get(env_name, "").strip() or default
+
+
+def _run_agent(blackboard: str, scope_path: str, args: argparse.Namespace) -> dict:
+    from agents.src_agent import run_src_agent
+
+    scope = _load_scope(scope_path)
+    return run_src_agent(
+        blackboard, scope,
+        max_cycles=args.max_cycles,
+        reasoner_prefer=_prefer(args, "reasoner_prefer", "SRC_REASONER_PREFER", "deepseek"),
+        explorer_prefer=_prefer(args, "explorer_prefer", "SRC_EXPLORER_PREFER"),
+    )
+
+
 def cmd_console(args: argparse.Namespace) -> int:
     """Start the Console server."""
     port = str(args.port or os.environ.get("LODE_PORT", "8088"))
@@ -75,22 +95,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_agent(args: argparse.Namespace) -> int:
     """Run the LLM agent loop on an existing blackboard."""
-    from agents.src_agent import run_src_agent
-    scope = _load_scope(args.scope)
-    summary = run_src_agent(
-        args.blackboard, scope,
-        max_cycles=args.max_cycles,
-        reasoner_prefer=args.reasoner_prefer,
-    )
+    summary = _run_agent(args.blackboard, args.scope, args)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
     """Full pipeline: scan → autopilot → LLM agent."""
-    from agents.surface_discovery import SurfaceScope
     from agents.src_autopilot import SrcAutopilot
-    from agents.src_agent import run_src_agent
 
     scope = _load_scope(args.scope)
     out_dir = Path(args.out_dir)
@@ -105,11 +117,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     bb_path = out_dir / "src-blackboard.json"
     print(f"[2/2] LLM agent analysis (max {args.max_cycles} cycles) ...", file=sys.stderr)
-    summary = run_src_agent(
-        bb_path, scope,
-        max_cycles=args.max_cycles,
-        reasoner_prefer=args.reasoner_prefer,
-    )
+    summary = _run_agent(str(bb_path), args.scope, args)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
@@ -162,8 +170,6 @@ def cmd_resume(args: argparse.Namespace) -> int:
     Reads the session's blackboard (claims expire automatically on restart),
     requeues stale claims, and runs the agent loop until convergence.
     """
-    from agents.src_agent import run_src_agent
-    from agents.surface_discovery import SurfaceScope
     from core.src_blackboard import SrcBlackboard
 
     state_dir = Path(args.state_dir or ROOT / "lode-state")
@@ -185,12 +191,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
             stale += 1
     print(f"Session {args.session_id}: {stale} stale claims will be reclaimed by lease expiry", file=sys.stderr)
 
-    scope = _load_scope(args.scope)
-    summary = run_src_agent(
-        bb_path, scope,
-        max_cycles=args.max_cycles,
-        reasoner_prefer=args.reasoner_prefer,
-    )
+    summary = _run_agent(str(bb_path), args.scope, args)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
@@ -252,7 +253,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("blackboard")
     a.add_argument("--scope", required=True)
     a.add_argument("--max-cycles", type=int, default=20)
-    a.add_argument("--reasoner-prefer", default="deepseek")
+    a.add_argument("--reasoner-prefer", default=None,
+                   help="Provider substring for the Reasoner (default: SRC_REASONER_PREFER env)")
+    a.add_argument("--explorer-prefer", default=None,
+                   help="Provider substring for the Explorer (default: SRC_EXPLORER_PREFER env)")
     a.set_defaults(func=cmd_agent)
 
     au = sub.add_parser("auto", help="Full pipeline: scan → agent")
@@ -260,7 +264,8 @@ def build_parser() -> argparse.ArgumentParser:
     au.add_argument("--scope", required=True)
     au.add_argument("--out-dir", default="./out")
     au.add_argument("--max-cycles", type=int, default=20)
-    au.add_argument("--reasoner-prefer", default="deepseek")
+    au.add_argument("--reasoner-prefer", default=None)
+    au.add_argument("--explorer-prefer", default=None)
     au.set_defaults(func=cmd_auto)
 
     pr = sub.add_parser("progress", help="Show test progress summary")
@@ -275,7 +280,8 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("session_id")
     rs.add_argument("--scope", required=True)
     rs.add_argument("--max-cycles", type=int, default=20)
-    rs.add_argument("--reasoner-prefer", default="deepseek")
+    rs.add_argument("--reasoner-prefer", default=None)
+    rs.add_argument("--explorer-prefer", default=None)
     rs.add_argument("--state-dir", default=None)
     rs.set_defaults(func=cmd_resume)
 

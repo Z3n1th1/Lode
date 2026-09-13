@@ -9,6 +9,16 @@ import uvicorn
 
 from console.control_plane import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH, create_app
 
+# Load .env + the Console-managed LLM settings into os.environ. Importing
+# core.config already runs both; the explicit call below re-runs it with the
+# Console's own --state-dir so the settings file is found there too.
+try:
+    from core import llm_settings
+
+    import core.config  # noqa: F401
+except Exception:  # noqa: BLE001 - console still runs, just without saved settings
+    llm_settings = None
+
 
 DEFAULT_PORT = 8088
 
@@ -20,6 +30,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
 
+    state_dir = Path(args.state_dir)
+    if llm_settings is not None:
+        try:
+            llm_settings.load_llm_settings(state_dir=state_dir)
+        except Exception:  # noqa: BLE001 - settings are advisory
+            pass
+    # Keep the header's active-model switch and the agent's provider pool on the
+    # same file (model_client otherwise defaults to a non-existent /opt path).
+    os.environ.setdefault("LLM_ACTIVE_PROVIDER_FILE", str(state_dir / "model_active_provider.json"))
+
     password = os.environ.get("LODE_ADMIN_PASSWORD", "")
     session_secret = os.environ.get("LODE_SESSION_SECRET", "")
     if len(password) < MIN_PASSWORD_LENGTH:
@@ -30,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("port must be between 1 and 65535")
 
     app = create_app(
-        state_dir=Path(args.state_dir),
+        state_dir=state_dir,
         password=password,
         session_secret=session_secret,
         static_dir=Path(args.static_dir),

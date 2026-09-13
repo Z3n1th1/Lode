@@ -125,6 +125,61 @@ export async function loadModelPool(): Promise<ModelPool> {
 export async function setActiveModel(name: string): Promise<{ ok: boolean; active: string; model: string; up: boolean }> {
   return (await (await request('/api/v1/model/active', { method: 'POST', body: JSON.stringify({ name }) })).json())
 }
+
+// ---- LLM 供应商设置(界面配 key + 分层模型)。接口只回掩码,绝不回 api_key。----
+export interface LlmProviderView {
+  name: string
+  base_url: string
+  model: string
+  key_set: boolean
+  key_hint: string
+}
+export interface LlmProviderInput {
+  name: string
+  base_url: string
+  model: string
+  api_key?: string
+  clear_key?: boolean
+}
+export interface LlmSettingsView {
+  schema: string
+  updated_at: number
+  providers: LlmProviderView[]
+  tiers: Record<string, string>
+  settings_path?: string
+  effective?: {
+    providers_env_override: boolean
+    legacy_env_override: boolean
+    reasoner_prefer: string
+    explorer_prefer: string
+  }
+}
+export interface LlmTestResult {
+  ok: boolean
+  name: string
+  model: string
+  latency_ms: number
+  error: string
+}
+
+export async function loadLlmSettings(): Promise<LlmSettingsView> {
+  return (await (await request('/api/v1/llm/settings', { cache: 'no-store' })).json()) as LlmSettingsView
+}
+export async function saveLlmSettings(
+  providers: LlmProviderInput[],
+  tiers: Record<string, string>
+): Promise<LlmSettingsView & { ok: boolean; applied_env?: string[] }> {
+  return (await (await request('/api/v1/llm/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ providers, tiers })
+  })).json())
+}
+export async function testLlmProvider(payload: { name?: string; provider?: LlmProviderInput }): Promise<LlmTestResult> {
+  return (await (await request('/api/v1/llm/test', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })).json()) as LlmTestResult
+}
 export async function loadProxy(): Promise<ProxyStatus> {
   return (await (await request('/api/v1/proxy', { cache: 'no-store' })).json()) as ProxyStatus
 }
@@ -380,13 +435,18 @@ export interface SrcSession {
   title?: string
   updated_at: number
   turns?: number
+  empty?: boolean
+  pinned?: boolean
+  first_user?: string
   last_user?: string
+  created_at?: number
   facts?: number
   intents_queued?: number
   intents_done?: number
   hints?: number
   targets?: string[]
 }
+export interface SrcSessionsView { sessions: SrcSession[]; total: number; empty_count: number }
 export interface SrcChatEvent { kind: string; ts: number; tool?: string; args_preview?: string; [k: string]: unknown }
 export interface SrcChatReply { session_id: string; reply: string; events: SrcChatEvent[] }
 export interface SrcMessage { role: string; content: string }
@@ -398,9 +458,30 @@ export interface SrcProgress {
   sessions?: number
 }
 
+export async function loadSrcSessionsView(): Promise<SrcSessionsView> {
+  const data = (await (await request('/api/v1/src-agent/sessions', { cache: 'no-store' })).json()) as SrcSessionsView
+  return { sessions: data.sessions || [], total: data.total ?? (data.sessions || []).length, empty_count: data.empty_count ?? 0 }
+}
 export async function loadSrcSessions(): Promise<SrcSession[]> {
-  const data = (await (await request('/api/v1/src-agent/sessions', { cache: 'no-store' })).json()) as { sessions: SrcSession[] }
-  return data.sessions || []
+  return (await loadSrcSessionsView()).sessions
+}
+export async function renameSrcSession(sessionId: string, title: string): Promise<{ ok: boolean; session_id: string; title: string }> {
+  return (await (await request(`/api/v1/src-agent/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title })
+  })).json())
+}
+export async function pinSrcSession(sessionId: string, pinned: boolean): Promise<{ ok: boolean; session_id: string; pinned: boolean }> {
+  return (await (await request(`/api/v1/src-agent/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ pinned })
+  })).json())
+}
+export async function deleteSrcSession(sessionId: string): Promise<void> {
+  await request(`/api/v1/src-agent/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+}
+export async function pruneSrcSessions(): Promise<{ ok: boolean; removed: number; kept: number }> {
+  return (await (await request('/api/v1/src-agent/sessions/prune', { method: 'POST' })).json())
 }
 export async function loadSrcHistory(sessionId: string): Promise<SrcHistory> {
   return (await (await request('/api/v1/src-agent/history?session_id=' + encodeURIComponent(sessionId), { cache: 'no-store' })).json()) as SrcHistory
@@ -411,4 +492,43 @@ export async function sendSrcChat(message: string, sessionId = ''): Promise<SrcC
 export async function loadSrcProgress(sessionId = ''): Promise<SrcProgress> {
   const q = sessionId ? '?session_id=' + encodeURIComponent(sessionId) : ''
   return (await (await request('/api/v1/src-agent/progress' + q, { cache: 'no-store' })).json()) as SrcProgress
+}
+
+// ---- H1 接入:粘贴整页 / 给 URL → LLM 抽 scope(只抽取,开跑走 /src-agent/start) ----
+export interface SrcScopeDraft {
+  program: string
+  in_scope: { domains: string[]; hosts: string[]; urls: string[] }
+  out_of_scope: string[]
+  candidate_targets: string[]
+  notes: string
+}
+export interface SrcIntakeResult {
+  ok: boolean
+  id: string
+  source: string
+  extracted: SrcScopeDraft
+  warnings: string[]
+}
+export interface SrcAgentStartPayload {
+  target_url: string
+  authorization?: string
+  allowed_domains?: string[]
+  allowed_hosts?: string[]
+  max_cycles?: number
+  max_explore?: number
+  reasoner_prefer?: string
+  explorer_prefer?: string
+}
+
+export async function submitH1Intake(payload: { url?: string; text?: string }): Promise<SrcIntakeResult> {
+  return (await (await request('/api/v1/src-agent/intake', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })).json()) as SrcIntakeResult
+}
+export async function startSrcAgent(payload: SrcAgentStartPayload): Promise<{ ok: boolean; status: string; target: string }> {
+  return (await (await request('/api/v1/src-agent/start', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })).json())
 }

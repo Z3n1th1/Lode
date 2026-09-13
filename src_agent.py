@@ -43,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Worker ID for blackboard claims")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="LLM call timeout in seconds (default: 60)")
+    parser.add_argument("--recall-limit", type=int, default=5,
+                        help="Max similar past cases recalled per query (default: 5)")
+    parser.add_argument("--no-recall", dest="enable_recall", action="store_false",
+                        help="Disable memory retrieval over facts/dead-ends/history")
+    parser.add_argument("--no-dependencies", dest="enable_dependencies", action="store_false",
+                        help="Disable reasoner-produced dependency edges (DAG stays flat)")
+    parser.add_argument("--no-timeline-compress", dest="enable_timeline_compress", action="store_false",
+                        help="Disable automatic timeline compression on long runs")
     return parser
 
 
@@ -60,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
             explorer_prefer=args.explorer_prefer,
             worker_id=args.worker_id,
             timeout=args.timeout,
+            enable_recall=args.enable_recall,
+            recall_limit=args.recall_limit,
+            enable_dependencies=args.enable_dependencies,
+            enable_timeline_compress=args.enable_timeline_compress,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0

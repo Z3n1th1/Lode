@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import List
 
 from core.src_blackboard import SrcBlackboard
 
@@ -222,6 +223,105 @@ class SrcBlackboardTemporalFactTests(unittest.TestCase):
             # valid at t=1002, invalid at t=1010
             self.assertIn(fact_id, [f["fact_id"] for f in board.facts_as_of(1002.0)])
             self.assertNotIn(fact_id, [f["fact_id"] for f in board.facts_as_of(1010.0)])
+
+
+class SrcBlackboardRecallTests(unittest.TestCase):
+    """memory retrieval: reuse valid *and* superseded facts + dead-ends from history."""
+
+    def _seed(self, board: SrcBlackboard) -> List[str]:
+        board.sync_candidates(
+            [
+                {"candidate_id": "SC-A", "url": "https://example.com/api/users", "priority": 90},
+                {"candidate_id": "SC-B", "url": "https://other.test/x", "priority": 50},
+            ],
+            run_id="r1",
+        )
+        return [item["intent_id"] for item in board.snapshot()["intents"]]
+
+    def test_recall_returns_historical_fact_and_dead_end(self) -> None:
+        clock = [1000.0]
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", now_fn=lambda: clock[0])
+            first, _second = self._seed(board)
+            board.claim_next("w1")  # claims the 90-priority SC-A
+            clock[0] = 1005.0
+            board.add_dead_end(first, "no_finding_on_users")
+
+            results = board.recall(["https://example.com/api/users"], limit=1, per_query=3)
+            self.assertEqual(1, len(results))
+            fact = results[0]["facts"][0]
+            self.assertEqual("https://example.com/api/users", fact["url"])
+            self.assertFalse(fact["valid"])  # superseded by the dead-end
+            self.assertEqual("no_finding_on_users", fact["superseded_reason"])
+            self.assertIn("no_finding_on_users", [d["reason"] for d in results[0]["dead_ends"]])
+
+    def test_recall_ignores_unrelated_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json")
+            self._seed(board)
+            results = board.recall(["https://example.com/api/users"], limit=1, per_query=3)
+            self.assertTrue(all("other.test" not in f["url"] for f in results[0]["facts"]))
+
+    def test_recall_matches_same_host_different_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json")
+            self._seed(board)
+            results = board.recall(["https://example.com/api/orders"], limit=1, per_query=3)
+            self.assertIn(
+                "https://example.com/api/users",
+                [f["url"] for f in results[0]["facts"]],
+            )
+
+    def test_recall_empty_query_returns_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json")
+            self._seed(board)
+            self.assertEqual([], board.recall([]))
+            self.assertEqual([], board.recall("   "))
+
+
+class SrcBlackboardDagClaimTests(unittest.TestCase):
+    """reasoner-driven DAG: targeted claims honour deps; unsafe edges are dropped."""
+
+    def _seed(self, board: SrcBlackboard) -> List[str]:
+        board.sync_candidates(
+            [
+                {"candidate_id": "SC-A", "url": "https://example.com/a", "priority": 90},
+                {"candidate_id": "SC-B", "url": "https://example.com/b", "priority": 80},
+            ],
+            run_id="r",
+        )
+        return [item["intent_id"] for item in board.snapshot()["intents"]]
+
+    def test_claim_intent_targets_the_exact_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", default_lease_seconds=60)
+            _first, second = self._seed(board)
+            claim = board.claim_intent(second, "w1")
+            self.assertIsNotNone(claim)
+            self.assertEqual(second, claim["intent"]["intent_id"])
+            self.assertIsNone(board.claim_intent(second, "w2"))  # already claimed
+
+    def test_claim_intent_waits_for_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", default_lease_seconds=60)
+            first, second = self._seed(board)
+            board.set_dependencies(second, [first])
+
+            self.assertIsNone(board.claim_intent(second, "w1"))  # blocker unmet
+            self.assertIsNotNone(board.claim_intent(first, "w1"))
+            board.finish(first, "w1", status="completed")
+            self.assertIsNotNone(board.claim_intent(second, "w2"))
+
+    def test_set_dependencies_drops_unknown_self_and_cyclic_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", default_lease_seconds=60)
+            first, second = self._seed(board)
+            self.assertEqual([], board.set_dependencies(first, ["I-ghost"])["depends_on"])
+            self.assertEqual([], board.set_dependencies(first, [first])["depends_on"])
+            self.assertEqual([second], board.set_dependencies(first, [second])["depends_on"])
+            # second -> first would close a cycle (first -> second), so it is dropped.
+            self.assertEqual([], board.set_dependencies(second, [first])["depends_on"])
 
 
 if __name__ == "__main__":

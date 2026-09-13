@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -235,17 +236,27 @@ class SrcChatSession:
     last_active: float = field(default_factory=time.time)
     events: List[Dict[str, Any]] = field(default_factory=list)
     title: str = ""  # display name: target domain, falling back to the first prompt
+    pinned: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def persist(self) -> None:
-        """Write session messages + metadata to disk."""
+        """Write session messages + metadata to disk (creates the dir lazily).
+
+        A session with nothing to say is not written at all: creating one used to
+        materialize ``src-chat/<id>/session.json`` immediately, which is how the
+        session list filled up with empty shells.
+        """
         if not self.state_dir:
             return
+        if not self.messages and not self.events:
+            return
         try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
             doc = {
                 "schema": "SrcChatSession/v1",
                 "session_id": self.session_id,
                 "title": self.title,
+                "pinned": self.pinned,
                 "created_at": self.created_at,
                 "last_active": self.last_active,
                 "messages": self.messages[-60:],  # keep last 60 turns
@@ -257,6 +268,10 @@ class SrcChatSession:
             os.replace(staged, path)
         except OSError:
             pass
+
+    def turn_count(self) -> int:
+        """Number of real conversation turns (ignores non-chat roles)."""
+        return len([m for m in self.messages if isinstance(m, dict) and m.get("role") in ("user", "assistant")])
 
 
 _sessions: Dict[str, SrcChatSession] = {}
@@ -281,6 +296,7 @@ def _load_session_from_disk(sess_dir: Path) -> Optional[SrcChatSession]:
             sess.messages = doc.get("messages") or []
             sess.events = doc.get("events") or []
             sess.title = str(doc.get("title") or "")
+            sess.pinned = bool(doc.get("pinned"))
             sess.created_at = float(doc.get("created_at") or time.time())
             sess.last_active = float(doc.get("last_active") or time.time())
         except (OSError, ValueError, TypeError):
@@ -296,34 +312,82 @@ def _domain_of(url: str) -> str:
         return ""
 
 
+_SESSION_ID_SAFE = re.compile(r"src-[A-Za-z0-9]{1,64}")
+# A directory under src-chat/ is only a session if it holds a transcript or a
+# blackboard; anything else is a leftover, not a conversation.
+_SESSION_EVIDENCE = ("session.json", "src-blackboard.json")
+
+
+def _session_root(state_dir: Optional[Path]) -> Path:
+    return Path(state_dir) / "src-chat" if state_dir else Path("")
+
+
+def _safe_session_dir(state_dir: Optional[Path], session_id: str) -> Optional[Path]:
+    """Resolve a session directory, refusing path traversal and symlinks."""
+    if not state_dir:
+        return None
+    sid = str(session_id or "").strip()
+    if not _SESSION_ID_SAFE.fullmatch(sid):
+        return None
+    root = _session_root(state_dir)
+    candidate = root / sid
+    if candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    if resolved == root_resolved or root_resolved not in resolved.parents:
+        return None
+    return candidate
+
+
+def _turns_of(doc: Optional[dict]) -> int:
+    messages = (doc or {}).get("messages") or []
+    return len([m for m in messages if isinstance(m, dict) and m.get("role") in ("user", "assistant")])
+
+
 def list_sessions(state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """List all persisted sessions on disk, newest first."""
+    """List persisted sessions, pinned first then newest.
+
+    Directories without a transcript or a blackboard are skipped — they are
+    leftovers (an aborted mkdir, a stray summary file), and listing them is what
+    made the session list look full of empty entries.
+    """
     if not state_dir:
         return []
-    chat_dir = Path(state_dir) / "src-chat"
+    chat_dir = _session_root(state_dir)
     if not chat_dir.is_dir():
         return []
     out: List[Dict[str, Any]] = []
-    for sess_dir in sorted(chat_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not sess_dir.is_dir():
+    for sess_dir in chat_dir.iterdir():
+        if not sess_dir.is_dir() or sess_dir.is_symlink():
+            continue
+        if not any((sess_dir / name).is_file() for name in _SESSION_EVIDENCE):
             continue
         info: Dict[str, Any] = {
             "session_id": sess_dir.name,
             "updated_at": sess_dir.stat().st_mtime,
+            "turns": 0,
+            "empty": True,
+            "title": "",
+            "pinned": False,
         }
         doc_path = sess_dir / "session.json"
         title = ""
         if doc_path.is_file():
             try:
                 doc = json.loads(doc_path.read_text(encoding="utf-8"))
-                msgs = doc.get("messages") or []
-                info["turns"] = len(msgs)
+                info["turns"] = _turns_of(doc)
+                info["empty"] = info["turns"] == 0
+                info["pinned"] = bool(doc.get("pinned"))
                 title = str(doc.get("title") or "")
-                # Last user message preview
-                for m in reversed(msgs):
-                    if m.get("role") == "user":
-                        info["last_user"] = str(m.get("content", ""))[:120]
-                        break
+                users = [m for m in (doc.get("messages") or [])
+                         if isinstance(m, dict) and m.get("role") == "user"]
+                if users:
+                    info["first_user"] = str(users[0].get("content", ""))[:120]
+                    info["last_user"] = str(users[-1].get("content", ""))[:120]
                 info["created_at"] = doc.get("created_at")
             except (OSError, ValueError, TypeError):
                 pass
@@ -349,7 +413,88 @@ def list_sessions(state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
             title = str(info["last_user"])[:40]
         info["title"] = title or sess_dir.name
         out.append(info)
+    out.sort(key=lambda item: (not item["pinned"], -float(item.get("updated_at") or 0)))
     return out
+
+
+def rename_session(session_id: str, title: str, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Set a session's display title. Returns the updated metadata or None."""
+    sess_dir = _safe_session_dir(state_dir, session_id)
+    if sess_dir is None or not (sess_dir / "session.json").is_file():
+        return None
+    sess = _load_session_from_disk(sess_dir)
+    if sess is None:
+        return None
+    sess.title = str(title or "").strip()[:80]
+    sess.persist()
+    with _sessions_lock:
+        _sessions.pop(sess.session_id, None)  # force a fresh load next time
+    return {"session_id": sess.session_id, "title": sess.title, "pinned": sess.pinned}
+
+
+def set_session_pinned(session_id: str, pinned: bool, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Pin/unpin a session so it sorts to the top."""
+    sess_dir = _safe_session_dir(state_dir, session_id)
+    if sess_dir is None or not (sess_dir / "session.json").is_file():
+        return None
+    sess = _load_session_from_disk(sess_dir)
+    if sess is None:
+        return None
+    sess.pinned = bool(pinned)
+    sess.persist()
+    with _sessions_lock:
+        _sessions.pop(sess.session_id, None)
+    return {"session_id": sess.session_id, "title": sess.title, "pinned": sess.pinned}
+
+
+def delete_session(session_id: str, state_dir: Optional[Path] = None) -> bool:
+    """Delete one session workspace (transcript + blackboard + run artifacts)."""
+    sess_dir = _safe_session_dir(state_dir, session_id)
+    if sess_dir is None or not sess_dir.is_dir():
+        return False
+    try:
+        shutil.rmtree(sess_dir)
+    except OSError:
+        return False
+    with _sessions_lock:
+        _sessions.pop(str(session_id), None)
+    return True
+
+
+def prune_empty_sessions(state_dir: Optional[Path] = None) -> Dict[str, int]:
+    """Delete sessions with no conversation and no blackboard.
+
+    A session that ran a scan keeps its blackboard and is never pruned, even when
+    the transcript is empty — that work is real and deleting it would lose evidence.
+    """
+    if not state_dir:
+        return {"removed": 0, "kept": 0}
+    chat_dir = _session_root(state_dir)
+    if not chat_dir.is_dir():
+        return {"removed": 0, "kept": 0}
+    removed = kept = 0
+    for sess_dir in list(chat_dir.iterdir()):
+        if not sess_dir.is_dir() or sess_dir.is_symlink():
+            continue
+        doc_path = sess_dir / "session.json"
+        doc: Optional[dict] = None
+        if doc_path.is_file():
+            try:
+                doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                doc = None
+        has_work = (sess_dir / "src-blackboard.json").is_file()
+        if _turns_of(doc) == 0 and not has_work:
+            try:
+                shutil.rmtree(sess_dir)
+                removed += 1
+                with _sessions_lock:
+                    _sessions.pop(sess_dir.name, None)
+            except OSError:
+                kept += 1
+        else:
+            kept += 1
+    return {"removed": removed, "kept": kept}
 
 
 def _get_or_create_session(session_id: str = "", state_dir: Optional[Path] = None) -> SrcChatSession:
@@ -370,16 +515,16 @@ def _get_or_create_session(session_id: str = "", state_dir: Optional[Path] = Non
                     _sessions[session_id] = sess
                     return sess
 
-        # Create new
+        # Create new — lazy: build the in-memory session only. The directory and
+        # session.json appear on the first real message (see persist()), so a
+        # "new chat" that is never used leaves nothing behind.
         sid = session_id or f"src-{secrets.token_hex(6)}"
         sess = SrcChatSession(session_id=sid)
         if state_dir:
             sess.state_dir = _session_dir(Path(state_dir), sid)
-            sess.state_dir.mkdir(parents=True, exist_ok=True)
             sess.blackboard_path = sess.state_dir / "src-blackboard.json"
             sess.test_log = SrcTestLog(sess.state_dir)
         _sessions[sid] = sess
-        sess.persist()
         return sess
 
 

@@ -83,8 +83,8 @@ export const pageNames: Record<string, string> = {
 // ---- 壳状态:主视图可在「对话台」与「SRC 挖掘」间切换,旧面板降入次级抽屉 ----
 export const activePage = ref('src-autopilot')
 export const panelsOpen = ref(false)
-// 主视图:src = LLM SRC 挖掘台(默认);chat = 原 Strix 对话台
-export const mainView = ref<'src' | 'chat'>('src')
+// 主视图:src = LLM SRC 挖掘台(默认);chat = 原 Strix 对话台;settings = 挖洞设置(模型/密钥)
+export const mainView = ref<'src' | 'chat' | 'settings'>('src')
 
 export const snapshot = ref<DashboardSnapshot | null>(null)
 export const authenticated = ref(false)

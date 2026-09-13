@@ -34,7 +34,7 @@ if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
 from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason
-from core.src_blackboard import SrcBlackboard
+from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
 
 # Auto-load .env config (API keys, etc.)
 try:
@@ -44,18 +44,40 @@ except Exception:
 
 
 def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
-    """Standalone LLM completion using OpenAI-compatible API.
+    """LLM completion through the shared provider pool.
 
-    Reads LLM_API_KEY/LLM_BASE_URL/LLM_MODEL or LLM_PROVIDERS from env.
-    Does NOT depend on core.capabilities (which may not be present).
+    Delegates to :func:`core.llm_pool.complete` so the provider pool, the
+    ``prefer``/``only`` tier routing (smart Reasoner vs cheap Explorer) and
+    cross-provider failover all actually apply. Falls back to a standalone
+    OpenAI-compatible call on the legacy env trio only if ``core.llm_pool``
+    cannot be imported, so this still works in a stripped-down checkout.
     """
+    timeout = kwargs.get("timeout", 60.0)
+    prefer = str(kwargs.get("prefer") or "")
+    only = bool(kwargs.get("only") or False)
+    try:
+        from core.llm_pool import complete as _pool_complete
+    except Exception:  # noqa: BLE001 - fall back to the standalone client below
+        _pool_complete = None
+    if _pool_complete is not None:
+        try:
+            return _pool_complete(system, user, timeout=timeout, prefer=prefer, only=only)
+        except TypeError:
+            # A partial pool module without the prefer/only kwargs.
+            try:
+                return _pool_complete(system, user, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # ---- standalone fallback: legacy single-key env, no pool, no failover ----
     import urllib.error
     import urllib.request as _req
 
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     base_url = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
     model = os.environ.get("LLM_MODEL", "deepseek-chat").strip()
-    timeout = kwargs.get("timeout", 60.0)
 
     if not api_key:
         return None
@@ -116,6 +138,10 @@ REASONER_SYSTEM = """\
 4. 只能被动分析（GET/HEAD），不能发 POST。
 5. 优先级：高 priority + 带参数的 API > 静态路径 > 纯资源文件。
 6. 每个选中的 intent 必须给出具体假设（如"res_id 参数可能存在 SQLi"）。
+7. 若发现某个 intent 必须先拿到另一个 intent 的结果才能验证（例如先取到 token 再测越权），
+   把它填进 depends_on —— 有未完成依赖的 intent 不会被提前执行，顺序由你决定。
+8. "## Recalled Experience" 是历史记忆：[已失效] 的事实已经给过结论，[死路] 的不要重复；
+   能复用历史结论就直接引用，别重新挖一遍。
 
 ## 输出（严格 JSON，无 markdown fence）
 {
@@ -125,7 +151,8 @@ REASONER_SYSTEM = """\
       "intent_id": "I-xxxx",
       "hypothesis": "具体漏洞假设",
       "check_description": "看响应中的什么来验证",
-      "expected_evidence": "什么样的响应能确认/否定"
+      "expected_evidence": "什么样的响应能确认/否定",
+      "depends_on": []
     }
   ],
   "should_stop": false,
@@ -273,10 +300,13 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
     if facts:
         lines.append("## Facts (observed candidates)")
         for f in facts:
+            # 时序事实:已失效(superseded)的候选仍保留,但必须标出来,否则 reasoner
+            # 会把死路过的目标当成新观察重新投入。
+            stale = " [已失效]" if f.get("valid_to") is not None else ""
             lines.append(
                 f"- {f.get('fact_id', '?')}: {f.get('kind', '?')} "
                 f"url={f.get('url', '?')} priority={f.get('priority', 0)} "
-                f"confidence={f.get('confidence', '?')} "
+                f"confidence={f.get('confidence', '?')}{stale} "
                 f"sources={','.join(f.get('sources') or []) or '-'}"
             )
     else:
@@ -288,10 +318,12 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
     if queued:
         lines.append(f"\n## Queued Intents ({len(queued)} available)")
         for i in queued:
+            deps = i.get("depends_on") or []
+            dep_note = f" deps={','.join(str(d) for d in deps)}" if deps else ""
             lines.append(
                 f"- {i.get('intent_id', '?')}: target={i.get('target', '?')} "
                 f"priority={i.get('priority', 0)} phase={i.get('phase', '?')} "
-                f"candidate_id={i.get('candidate_id', '?')}"
+                f"candidate_id={i.get('candidate_id', '?')}{dep_note}"
             )
     else:
         lines.append("\n## Queued Intents: (none)")
@@ -321,6 +353,18 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
                 f"- {h.get('hint_id', '?')}: intent={h.get('intent_id', '?')} "
                 f"hint={h.get('hint', '?')} source={h.get('source', '?')}"
             )
+
+    # 时间线:压缩头 + 最近条目,让 reasoner 看到历史又不让 prompt 无限膨胀。
+    head = snapshot.get("timeline_head") or {}
+    head_text = str(head.get("text") or "").strip() if isinstance(head, dict) else ""
+    if head_text:
+        lines.append("\n## Timeline (compressed history)")
+        lines.append(head_text)
+    recent = [item for item in (snapshot.get("timeline") or [])[-12:] if isinstance(item, dict)]
+    if recent:
+        lines.append(f"\n## Recent Timeline (last {len(recent)})")
+        for item in recent:
+            lines.append(f"- [{item.get('kind', '?')}] {item.get('summary') or item.get('intent_id') or ''}")
 
     return "\n".join(lines)
 
@@ -385,13 +429,23 @@ class AgentConfig:
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None
     llm_complete_fn: Optional[Callable[..., Optional[str]]] = None
     timeout: float = 60.0
+    # 记忆检索:新 intent 先查 facts_as_of / 历史死路与线索,复用经验(PentAGI 的检索层)。
+    enable_recall: bool = True
+    recall_limit: int = 5
+    # 时间线压缩:长跑时自动折叠旧条目进 head,控制 prompt 体积。
+    enable_timeline_compress: bool = True
+    timeline_keep: int = 40
+    timeline_max_chars: int = 1600
+    timeline_compress_ratio: int = 2
+    # 依赖边:让 reasoner 产出的 depends_on 真正写回黑板,驱动 DAG 顺序。
+    enable_dependencies: bool = True
 
 
 @dataclass
 class ExploreResult:
     """Outcome of exploring one intent."""
     intent_id: str
-    status: str  # fact_added | dead_end | needs_human | error
+    status: str  # fact_added | dead_end | needs_human | error | deferred
     findings: List[Dict[str, Any]] = field(default_factory=list)
     dead_end_reason: str = ""
     raw_llm_response: str = ""
@@ -442,11 +496,16 @@ class SrcAgentLoop:
 
         for cycle in range(self.config.max_cycles):
             cycles_run = cycle + 1
+
             try:
                 snapshot = self.blackboard.snapshot()
             except FileNotFoundError:
                 stop_reason = "blackboard_not_found"
                 break
+
+            # 时间线压缩:用本轮快照计数折叠旧条目,避免额外一次整文件读取。
+            # 压缩头下一轮才进 prompt(本轮仍能看到刚写入的原始条目)。
+            self._maybe_compress_timeline(snapshot)
 
             if cycle == 0:
                 # 工作记忆:记录本次挖掘目标(仅黑板已存在时写,不凭空建文件)。
@@ -493,15 +552,16 @@ class SrcAgentLoop:
             except Exception:  # noqa: BLE001
                 pass
 
-            # Explore phase
-            for intent_spec in selected[:self.config.max_explore_per_cycle]:
-                intent_id = str(intent_spec.get("intent_id", "")).strip()
-                hypothesis = str(intent_spec.get("hypothesis", "")).strip()
-                check = str(intent_spec.get("check_description", "")).strip()
-                if not intent_id:
-                    continue
+            # 依赖边:reasoner 现在会给出 depends_on,写回黑板后 DAG 才驱动执行顺序。
+            self._apply_dependencies(selected)
 
+            # Explore phase
+            for intent_id, hypothesis, check in self._plan_exploration(selected, snapshot):
                 result = self._explore(intent_id, hypothesis, check, snapshot)
+                if result.status == "deferred":
+                    # 依赖未就绪或已被别的 worker 领走 —— 不是错误,下轮再看。
+                    self._timeline("deferred", intent_id, result.dead_end_reason[:120] or "not_claimable")
+                    continue
                 total_explored += 1
                 if result.status == "dead_end":
                     total_dead_ends += 1
@@ -531,6 +591,164 @@ class SrcAgentLoop:
         except Exception:  # noqa: BLE001 - timeline is advisory
             pass
 
+    def _maybe_compress_timeline(self, snapshot: Optional[Mapping[str, Any]] = None) -> None:
+        """Fold old timeline entries into the compressed head once it grows long.
+
+        Keeps the reasoner prompt bounded on long runs (the folded text is still
+        surfaced via ``timeline_head``), without touching recent observations.
+        Pass the cycle snapshot to avoid a second full-state read.
+        """
+        if not self.config.enable_timeline_compress:
+            return
+        keep = max(1, int(self.config.timeline_keep))
+        try:
+            if snapshot is None:
+                snapshot = self.blackboard.snapshot()
+            total = len(snapshot.get("timeline") or [])
+            if total > keep * max(2, int(self.config.timeline_compress_ratio)):
+                self.blackboard.timeline_compress(keep=keep, max_chars=self.config.timeline_max_chars)
+        except Exception:  # noqa: BLE001 - timeline is advisory
+            pass
+
+    def _apply_dependencies(self, selected: Sequence[Mapping[str, Any]]) -> None:
+        """Persist the reasoner's dependency edges so the DAG gates execution."""
+        if not self.config.enable_dependencies:
+            return
+        for spec in selected[:self.config.max_explore_per_cycle]:
+            if not isinstance(spec, Mapping):
+                continue
+            intent_id = str(spec.get("intent_id", "")).strip()
+            raw = spec.get("depends_on")
+            if not intent_id or not isinstance(raw, list):
+                continue
+            deps = [str(item).strip() for item in raw if str(item).strip()]
+            if not deps:
+                continue
+            try:
+                intent = self.blackboard.set_dependencies(intent_id, deps)
+            except Exception:  # noqa: BLE001 - edges are advisory, never fatal
+                continue
+            applied = [str(dep) for dep in (intent.get("depends_on") or [])]
+            if applied:
+                self._timeline("dependency", intent_id, f"需先完成 {', '.join(applied)}")
+
+    @staticmethod
+    def _blocking_dep(snapshot: Mapping[str, Any], intent_id: str) -> str:
+        """First dependency of ``intent_id`` that is not in a satisfied state."""
+        intents = snapshot.get("intents") or []
+        intent = next((i for i in intents if i.get("intent_id") == intent_id), None)
+        if not isinstance(intent, Mapping):
+            return ""
+        statuses = {str(i.get("intent_id")): i.get("status") for i in intents if isinstance(i, Mapping)}
+        for dep in intent.get("depends_on") or []:
+            if statuses.get(str(dep)) not in _DEP_SATISFIED:
+                return str(dep)
+        return ""
+
+    def _plan_exploration(
+        self,
+        selected: Sequence[Mapping[str, Any]],
+        snapshot: Mapping[str, Any],
+    ) -> List[Tuple[str, str, str]]:
+        """Resolve selected intents into (intent_id, hypothesis, check) work items.
+
+        A selected intent whose dependency is still unmet is skipped in favour of
+        exploring the blocker itself, so the DAG makes forward progress instead of
+        stalling on a node that cannot be claimed yet.
+        """
+        planned: List[Tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for spec in selected[:self.config.max_explore_per_cycle]:
+            if not isinstance(spec, Mapping):
+                continue
+            intent_id = str(spec.get("intent_id", "")).strip()
+            if not intent_id or intent_id in seen:
+                continue
+            if self.config.enable_dependencies:
+                blocker = self._blocking_dep(snapshot, intent_id)
+                if blocker and blocker not in seen:
+                    seen.add(blocker)
+                    planned.append((
+                        blocker,
+                        f"解锁 {intent_id} 的前置依赖",
+                        "取得该依赖 intent 的结果,解除后续验证的阻塞",
+                    ))
+                    self._timeline("unblock", blocker, f"被 {intent_id} 依赖,优先执行")
+                    continue
+            seen.add(intent_id)
+            hypothesis = str(spec.get("hypothesis", "")).strip() or "general security analysis"
+            check = str(spec.get("check_description", "")).strip() or "look for security-relevant patterns"
+            planned.append((intent_id, hypothesis, check))
+        return planned[:self.config.max_explore_per_cycle]
+
+    def _recall_context(self, snapshot: Optional[Mapping[str, Any]] = None) -> str:
+        """Retrieve prior experience for the queued intents (memory reuse)."""
+        if not self.config.enable_recall:
+            return ""
+        if snapshot is None:
+            try:
+                snapshot = self.blackboard.snapshot()
+            except Exception:  # noqa: BLE001 - recall is advisory
+                return ""
+        targets = [
+            str(i.get("target", "")).strip()
+            for i in (snapshot.get("intents") or [])
+            if isinstance(i, Mapping) and i.get("status") == "queued" and str(i.get("target", "")).strip()
+        ]
+        if not targets:
+            return ""
+        window = self.config.max_explore_per_cycle
+        try:
+            matches = self.blackboard.recall(
+                targets[:window], limit=window, per_query=max(1, int(self.config.recall_limit)),
+            )
+        except Exception:  # noqa: BLE001 - recall is advisory
+            return ""
+        lines: List[str] = []
+        for match in matches:
+            facts = match.get("facts") or []
+            dead_ends = match.get("dead_ends") or []
+            hints = match.get("hints") or []
+            if not (facts or dead_ends or hints):
+                continue
+            lines.append(f"- 目标 {match.get('query', '?')}:")
+            for fact in facts:
+                tag = "有效" if fact.get("valid") else f"已失效:{fact.get('superseded_reason') or '已推翻'}"
+                lines.append(
+                    f"    fact {fact.get('fact_id')} [{tag}] url={fact.get('url')} "
+                    f"run={fact.get('run_id') or '-'}"
+                )
+            for dead_end in dead_ends:
+                lines.append(f"    死路: {dead_end.get('target') or dead_end.get('intent_id')} — {dead_end.get('reason')}")
+            for hint in hints:
+                lines.append(f"    线索: {hint.get('hint')} (source={hint.get('source')})")
+        if not lines:
+            return ""
+        return "## Recalled Experience (历史记忆:优先复用,别重复死路)\n" + "\n".join(lines[:24])
+
+    def _recall_for_target(self, target: str) -> str:
+        """Prior experience relevant to one explorer target (prompt addendum)."""
+        if not self.config.enable_recall or not target:
+            return ""
+        try:
+            matches = self.blackboard.recall([target], limit=1, per_query=max(1, int(self.config.recall_limit)))
+        except Exception:  # noqa: BLE001 - recall is advisory
+            return ""
+        if not matches:
+            return ""
+        match = matches[0]
+        lines: List[str] = []
+        for fact in match.get("facts") or []:
+            tag = "valid" if fact.get("valid") else "stale"
+            lines.append(f"  - fact[{tag}] {fact.get('url')} (run={fact.get('run_id') or '-'})")
+        for dead_end in match.get("dead_ends") or []:
+            lines.append(f"  - dead_end: {dead_end.get('target') or dead_end.get('intent_id')} — {dead_end.get('reason')}")
+        for hint in match.get("hints") or []:
+            lines.append(f"  - hint: {hint.get('hint')}")
+        if not lines:
+            return ""
+        return "Recalled prior experience for this target:\n" + "\n".join(lines[:10])
+
     def _open_todos(self) -> List[Dict[str, Any]]:
         """Unfinished working-memory todos (gates the finish checkpoint)."""
         try:
@@ -545,6 +763,9 @@ class SrcAgentLoop:
     def _reason(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Call LLM Reasoner to select intents and generate hypotheses."""
         context = _blackboard_to_context(snapshot)
+        recalled = self._recall_context(snapshot)
+        if recalled:
+            context = f"{context}\n\n{recalled}"
         user_msg = REASONER_USER_TEMPLATE.format(
             blackboard_context=context,
             max_explore=self.config.max_explore_per_cycle,
@@ -583,19 +804,20 @@ class SrcAgentLoop:
         if not target_url:
             return ExploreResult(intent_id, "error", dead_end_reason="no_target_url")
 
-        # Claim
+        # Claim the *intended* intent: a mismatch would pair this hypothesis with
+        # a different target. Unmet dependencies → deferred, not an error.
         try:
-            claim = self.blackboard.claim_next(
-                self._worker_id,
-                phases=[str(intent.get("phase", "A-passive-triage"))],
-            )
+            claim = self.blackboard.claim_intent(intent_id, self._worker_id)
         except Exception as exc:
             return ExploreResult(intent_id, "error", dead_end_reason=f"claim_failed:{exc}")
 
         if claim is None:
-            return ExploreResult(intent_id, "error", dead_end_reason="no_claimable_intent")
+            return ExploreResult(intent_id, "deferred", dead_end_reason="not_claimable")
 
-        claimed_intent_id = claim["intent"]["intent_id"]
+        # 以领取到的实时 intent 为准(调用方传进来的快照可能已过期)。
+        intent = claim["intent"]
+        claimed_intent_id = intent["intent_id"]
+        target_url = str(intent.get("target") or target_url).strip()
 
         # Fetch
         fetch_result = _fetch_for_analysis(
@@ -643,6 +865,9 @@ class SrcAgentLoop:
             hints_section = "Prior hints:\n" + "\n".join(
                 f"  - {h.get('hint', '')}" for h in hints_for_intent[:10]
             )
+        recalled = self._recall_for_target(target_url)
+        if recalled:
+            hints_section = f"{hints_section}\n{recalled}" if hints_section else recalled
 
         body_text = fetch_result["body"][:BODY_LIMIT]
         user_msg = EXPLORER_USER_TEMPLATE.format(
@@ -832,6 +1057,12 @@ def run_src_agent(
     fetcher: Optional[Callable] = None,
     llm_complete_fn: Optional[Callable] = None,
     timeout: float = 60.0,
+    enable_recall: bool = True,
+    recall_limit: int = 5,
+    enable_timeline_compress: bool = True,
+    timeline_keep: int = 40,
+    timeline_max_chars: int = 1600,
+    enable_dependencies: bool = True,
 ) -> Dict[str, Any]:
     """Run the SRC agent loop and return a summary."""
     config = AgentConfig(
@@ -845,6 +1076,12 @@ def run_src_agent(
         fetcher=fetcher,
         llm_complete_fn=llm_complete_fn,
         timeout=timeout,
+        enable_recall=enable_recall,
+        recall_limit=recall_limit,
+        enable_timeline_compress=enable_timeline_compress,
+        timeline_keep=timeline_keep,
+        timeline_max_chars=timeline_max_chars,
+        enable_dependencies=enable_dependencies,
     )
     agent = SrcAgentLoop(config)
     return agent.run()

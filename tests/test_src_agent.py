@@ -394,5 +394,207 @@ class TestSelfTest(unittest.TestCase):
         self.assertEqual(_self_test(), 0)
 
 
+class TestSrcAgentDagTimelineRecall(unittest.TestCase):
+    """reasoner-produced DAG edges, auto timeline compression, and memory reuse."""
+
+    def test_reasoner_dependencies_are_persisted_and_ordered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            scope = _make_scope()
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 2)
+            snap = bb.snapshot()
+            first_id = snap["intents"][0]["intent_id"]   # priority 80
+            second_id = snap["intents"][1]["intent_id"]  # priority 70
+
+            def reasoner_with_dep(system, user, **kw):
+                if "Reasoner" in system:
+                    return json.dumps({
+                        "reasoning": "B needs A's result first",
+                        "should_stop": False,
+                        "selected_intents": [{
+                            "intent_id": second_id,
+                            "hypothesis": "IDOR on B",
+                            "check_description": "check ids",
+                            "depends_on": [first_id],
+                        }],
+                    })
+                return json.dumps({
+                    "analysis": "ok",
+                    "findings": [{
+                        "type": "information_disclosure", "confidence": "medium",
+                        "evidence": "X-Debug header", "description": "debug mode",
+                    }],
+                    "conclusion": "confirmed",
+                })
+
+            summary = run_src_agent(
+                bb_path, scope,
+                max_cycles=4,
+                fetcher=lambda url, **kw: (200, '{"ok": true}', {"content-type": "application/json"}),
+                llm_complete_fn=reasoner_with_dep,
+                worker_id="test-w",
+            )
+
+            final = {i["intent_id"]: i for i in bb.snapshot()["intents"]}
+            # The edge the reasoner produced is now live on the blackboard.
+            self.assertEqual([first_id], final[second_id]["depends_on"])
+            # The dependent ran only after its blocker was resolved.
+            self.assertEqual("completed", final[first_id]["status"])
+            self.assertIn(final[second_id]["status"], ("completed", "blocked", "dead_end"))
+            self.assertGreaterEqual(summary["total_explored"], 2)
+
+    def test_blocking_dep_resolution(self):
+        snapshot = {"intents": [
+            {"intent_id": "A", "status": "queued", "depends_on": []},
+            {"intent_id": "B", "status": "queued", "depends_on": ["A"]},
+        ]}
+        self.assertEqual("A", SrcAgentLoop._blocking_dep(snapshot, "B"))
+        self.assertEqual("", SrcAgentLoop._blocking_dep(snapshot, "A"))
+        snapshot["intents"][0]["status"] = "completed"
+        self.assertEqual("", SrcAgentLoop._blocking_dep(snapshot, "B"))
+
+    def test_timeline_auto_compress_on_long_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            scope = _make_scope()
+            bb = SrcBlackboard(bb_path)
+            bb.ensure()
+            for i in range(6):
+                bb.timeline_append("fetch", summary=f"GET {i}")
+            agent = SrcAgentLoop(AgentConfig(
+                blackboard_path=bb_path, scope=scope,
+                timeline_keep=2, enable_timeline_compress=True,
+            ))
+            agent._maybe_compress_timeline()
+            snap = bb.snapshot()
+            self.assertGreaterEqual(snap["timeline_head"]["version"], 1)
+            self.assertLessEqual(len(snap["timeline"]), 2)
+            self.assertIn("fetch", snap["timeline_head"]["text"])
+
+    def test_timeline_compress_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            scope = _make_scope()
+            bb = SrcBlackboard(bb_path)
+            bb.ensure()
+            for i in range(6):
+                bb.timeline_append("fetch", summary=f"GET {i}")
+            agent = SrcAgentLoop(AgentConfig(
+                blackboard_path=bb_path, scope=scope,
+                timeline_keep=2, enable_timeline_compress=False,
+            ))
+            agent._maybe_compress_timeline()
+            snap = bb.snapshot()
+            self.assertEqual(0, snap["timeline_head"]["version"])
+            self.assertEqual(6, len(snap["timeline"]))
+
+    def test_recall_section_reaches_reasoner(self):
+        """A dead-ended target from a past run is recalled for a new same-host intent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            scope = _make_scope()
+            bb = SrcBlackboard(bb_path)
+            bb.sync_candidates([{
+                "candidate_id": "SC-past", "url": "https://example.com/api/endpoint0",
+                "priority": 80, "next_phase": "A-passive-triage",
+            }], run_id="past-run")
+            past_intent = bb.snapshot()["intents"][0]["intent_id"]
+            bb.claim_intent(past_intent, "w0")
+            bb.add_dead_end(past_intent, "no_finding_previous_run")
+            bb.sync_candidates([{
+                "candidate_id": "SC-new", "url": "https://example.com/api/endpoint1",
+                "priority": 80, "next_phase": "A-passive-triage",
+            }], run_id="new-run")
+
+            prompts: List[Tuple[str, str]] = []
+
+            def capture(system, user, **kw):
+                prompts.append((system, user))
+                if "Reasoner" in system:
+                    return json.dumps({
+                        "reasoning": "r", "should_stop": True,
+                        "stop_reason": "done", "selected_intents": [],
+                    })
+                return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end"})
+
+            run_src_agent(
+                bb_path, scope, max_cycles=1,
+                fetcher=lambda url, **kw: (200, "ok", {}),
+                llm_complete_fn=capture, worker_id="test-w",
+            )
+            reasoner_users = [user for system, user in prompts if "Reasoner" in system]
+            self.assertTrue(reasoner_users, prompts)
+            self.assertIn("Recalled Experience", reasoner_users[0])
+            self.assertIn("endpoint0", reasoner_users[0])
+            self.assertIn("已失效", reasoner_users[0])
+
+
+class TestTierRouting(unittest.TestCase):
+    """The provider pool must actually route Reasoner→smart, Explorer→cheap."""
+
+    _POOL = [
+        {"name": "cheap", "base_url": "https://cheap.test", "api_key": "k-cheap", "model": "mini"},
+        {"name": "smart", "base_url": "https://smart.test", "api_key": "k-smart", "model": "max"},
+    ]
+
+    def _patched_pool(self, hits: List[Tuple[str, str]]):
+        import core.llm_pool as pool
+
+        def fake_post(url, body, api_key, timeout):
+            hits.append((url.split("//")[1].split("/")[0], json.loads(body)["model"]))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        return pool, patch.object(pool, "provider_pool", lambda: list(self._POOL)), \
+            patch.object(pool, "_post", fake_post)
+
+    def test_reasoner_and_explorer_hit_different_providers(self):
+        hits: List[Tuple[str, str]] = []
+        pool, pool_patch, post_patch = self._patched_pool(hits)
+        with pool_patch, post_patch:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = AgentConfig(
+                    blackboard_path=Path(tmp) / "bb.json", scope=_make_scope(),
+                    reasoner_prefer="smart", explorer_prefer="cheap",
+                )
+                agent = SrcAgentLoop(cfg)
+                agent._complete("You are the Reasoner", "u", timeout=1,
+                                prefer=cfg.reasoner_prefer, only=cfg.reasoner_only)
+                agent._complete("You are the Explorer", "u", timeout=1,
+                                prefer=cfg.explorer_prefer, only=cfg.explorer_only)
+
+        self.assertEqual(["smart.test", "cheap.test"], [h[0] for h in hits])
+        self.assertEqual(["max", "mini"], [h[1] for h in hits])
+
+    def test_prefer_falls_back_to_other_providers_on_failure(self):
+        """prefer only reorders; a dead preferred provider still fails over."""
+        hits: List[Tuple[str, str]] = []
+        pool, pool_patch, post_patch = self._patched_pool(hits)
+
+        def flaky_post(url, body, api_key, timeout):
+            hits.append((url.split("//")[1].split("/")[0], json.loads(body)["model"]))
+            if "smart.test" in url:
+                raise OSError("boom")
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with pool_patch, patch.object(pool, "_post", flaky_post):
+            text = pool.complete("s", "u", timeout=1, prefer="smart")
+
+        self.assertEqual("ok", text)
+        self.assertEqual(["smart.test", "cheap.test"], [h[0] for h in hits])
+
+    def test_only_restricts_to_the_matched_provider(self):
+        hits: List[Tuple[str, str]] = []
+        pool, pool_patch, post_patch = self._patched_pool(hits)
+        with pool_patch, post_patch:
+            self.assertIsNone(pool.complete("s", "u", timeout=1, prefer="no-such-model", only=True))
+        self.assertEqual([], hits)
+
+    def test_empty_pool_returns_none(self):
+        import core.llm_pool as pool
+        with patch.object(pool, "provider_pool", lambda: []):
+            self.assertIsNone(pool.complete("s", "u", timeout=1))
+
+
 if __name__ == "__main__":
     unittest.main()

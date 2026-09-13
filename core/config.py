@@ -48,3 +48,12 @@ def load_dotenv(path: str | Path | None = None) -> int:
 
 # Auto-load on import
 _loaded = load_dotenv()
+
+# Then fill any remaining LLM_* gaps from the local Console-managed settings file.
+# Runs after load_dotenv on purpose: a real env var (or .env) always wins.
+try:
+    from core.llm_settings import load_llm_settings as _load_llm_settings
+
+    _llm_settings_loaded = _load_llm_settings()
+except Exception:  # noqa: BLE001 - settings are advisory at startup
+    _llm_settings_loaded = 0

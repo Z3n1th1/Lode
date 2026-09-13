@@ -66,6 +66,28 @@ def _priority(value: Any) -> int:
         return 0
 
 
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+# URL 里的通用 token 对"相似"没有区分度,排除掉,否则所有 URL 都互相命中。
+_GENERIC_TOKENS = frozenset({"https", "http", "www", "com", "net", "org", "html", "index", "json", "php"})
+
+
+def _match_score(query: str, blob: str) -> int:
+    """Cheap keyword/entity similarity: substring hit + shared word tokens.
+
+    Deterministic on purpose — the retrieval layer must not need a model or a
+    network call, and identical state must always rank identically.
+    """
+    if not query or not blob:
+        return 0
+    blob = blob.lower()
+    score = 4 if query in blob else 0
+    query_tokens = {token for token in _TOKEN_SPLIT.split(query) if len(token) >= 3}
+    blob_tokens = {token for token in _TOKEN_SPLIT.split(blob) if len(token) >= 3}
+    if query_tokens and blob_tokens:
+        score += len((query_tokens & blob_tokens) - _GENERIC_TOKENS)
+    return score
+
+
 def _digest(*parts: Any) -> str:
     value = "\x1f".join(_text(part, 2_000) for part in parts)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
@@ -261,15 +283,69 @@ class SrcBlackboard:
             if row is None:
                 self._save_unlocked(state)
                 return None
-            token = "C-" + _digest(row.get("intent_id"), worker_id, now, os.getpid())
-            row["status"] = "claimed"
-            row["updated_at"] = now
-            claim = {"claim_id": token, "intent_id": row["intent_id"], "worker_id": worker_id, "claimed_at": now, "heartbeat_at": now, "lease_expires_at": now + lease}
-            state["claims"] = [item for item in state["claims"] if item.get("intent_id") != row["intent_id"]]
-            state["claims"].append(claim)
+            claim = self._grant_claim(state, row, worker_id, lease, now)
             self._event(state, "intent_claimed", {"intent_id": row["intent_id"], "worker_id": worker_id})
             self._save_unlocked(state)
             return {"intent": dict(row), "claim": claim}
+
+    def claim_intent(
+        self,
+        intent_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Claim one *specific* intent, honouring its DAG dependencies.
+
+        ``claim_next`` hands back whatever is ready; the agent loop instead knows
+        the intent it reasoned about and must not be given a different one (that
+        would pair a hypothesis with the wrong target). Returns ``None`` when the
+        intent is not queued, not retry-ready, or still has unmet ``depends_on``.
+        """
+        intent_id = _text(intent_id, 80)
+        worker_id = _text(worker_id, 120)
+        if not intent_id:
+            raise ValueError("intent_id_required")
+        if not worker_id:
+            raise ValueError("worker_id_required")
+        lease = self.default_lease_seconds if lease_seconds is None else int(lease_seconds)
+        if not 1 <= lease <= MAX_LEASE_SECONDS:
+            raise ValueError("lease_seconds_out_of_range")
+        now = self._now()
+        with AdvisoryFileLock(self.lock_path):
+            state = self._load_unlocked(create=True)
+            self._reclaim_expired(state, now)
+            row = self._intent(state, intent_id)
+            if (
+                row is None
+                or row.get("status") != "queued"
+                or not self._retry_ready(row, now)
+                or not self._deps_satisfied(state, row)
+            ):
+                return None
+            claim = self._grant_claim(state, row, worker_id, lease, now)
+            self._event(state, "intent_claimed", {"intent_id": row["intent_id"], "worker_id": worker_id})
+            self._save_unlocked(state)
+            return {"intent": dict(row), "claim": claim}
+
+    @staticmethod
+    def _grant_claim(
+        state: Dict[str, Any], row: Dict[str, Any], worker_id: str, lease: int, now: float
+    ) -> Dict[str, Any]:
+        """Mark ``row`` claimed (replacing any prior claim) and return the lease."""
+        row["status"] = "claimed"
+        row["updated_at"] = now
+        claim = {
+            "claim_id": "C-" + _digest(row.get("intent_id"), worker_id, now, os.getpid()),
+            "intent_id": row["intent_id"],
+            "worker_id": worker_id,
+            "claimed_at": now,
+            "heartbeat_at": now,
+            "lease_expires_at": now + lease,
+        }
+        state["claims"] = [item for item in state["claims"] if item.get("intent_id") != row["intent_id"]]
+        state["claims"].append(claim)
+        return claim
 
     def heartbeat(self, intent_id: str, worker_id: str, *, lease_seconds: Optional[int] = None) -> Dict[str, Any]:
         lease = self.default_lease_seconds if lease_seconds is None else int(lease_seconds)
@@ -381,11 +457,40 @@ class SrcBlackboard:
             intent = self._intent(state, intent_id)
             if intent is None:
                 raise ValueError("intent_not_found")
-            intent["depends_on"] = [dep for dep in deps if dep != intent_id]
+            # 只保留可满足的边:指向不存在 intent 的边会让本节点永远不可 claim,
+            # 会成环的边会让两边互相等待 —— 两者都直接丢弃,避免 DAG 死锁。
+            dropped = 0
+            clean: List[str] = []
+            for dep in deps:
+                if dep == intent_id or self._intent(state, dep) is None or self._creates_cycle(state, intent_id, dep):
+                    dropped += 1
+                else:
+                    clean.append(dep)
+            if sorted(intent.get("depends_on") or []) == clean:
+                return dict(intent)  # 边没变就不写盘(agent 每轮都会调一次)
+            intent["depends_on"] = clean
             intent["updated_at"] = self._now()
-            self._event(state, "intent_dependencies_set", {"intent_id": intent_id, "count": len(intent["depends_on"])})
+            self._event(state, "intent_dependencies_set", {"intent_id": intent_id, "count": len(clean), "dropped": dropped})
             self._save_unlocked(state)
             return dict(intent)
+
+    @classmethod
+    def _creates_cycle(cls, state: Dict[str, Any], intent_id: str, dep: str) -> bool:
+        """True if ``dep`` already (transitively) depends on ``intent_id``."""
+        by_id = {str(item.get("intent_id")): item for item in state["intents"]}
+        seen: set[str] = set()
+        stack = [dep]
+        while stack:
+            current = stack.pop()
+            if current == intent_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            node = by_id.get(current)
+            if node:
+                stack.extend(str(item) for item in (node.get("depends_on") or []))
+        return False
 
     # ---------- 时间线(yaklang Timeline 的轻量版:追加 + 分桶 + 压缩头)----------
 
@@ -489,23 +594,118 @@ class SrcBlackboard:
         at = self._now() if ts is None else float(ts)
         with AdvisoryFileLock(self.lock_path, create=False):
             state = self._load_unlocked(create=False)
-        out: List[Dict[str, Any]] = []
-        for fact in state["facts"]:
-            start_raw = fact.get("valid_from")
-            if start_raw is None:
-                start_raw = fact.get("created_at")
-            try:
-                start = float(start_raw or 0)
-            except (TypeError, ValueError):
-                start = 0.0
-            end_raw = fact.get("valid_to")
-            try:
-                end = float(end_raw) if end_raw is not None else None
-            except (TypeError, ValueError):
-                end = None
-            if start <= at and (end is None or end > at):
-                out.append(fact)
-        return out
+        return [fact for fact in state["facts"] if self._fact_valid_at(fact, at)]
+
+    @staticmethod
+    def _fact_valid_at(fact: Mapping[str, Any], at: float) -> bool:
+        start_raw = fact.get("valid_from")
+        if start_raw is None:
+            start_raw = fact.get("created_at")
+        try:
+            start = float(start_raw or 0)
+        except (TypeError, ValueError):
+            start = 0.0
+        end_raw = fact.get("valid_to")
+        try:
+            end = float(end_raw) if end_raw is not None else None
+        except (TypeError, ValueError):
+            end = None
+        return start <= at and (end is None or end > at)
+
+    def recall(
+        self,
+        queries: "str | Sequence[str]",
+        *,
+        limit: int = 5,
+        per_query: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve similar past knowledge for each query (memory reuse).
+
+        The keyword/entity stand-in for a vector store: for a new intent's target
+        this surfaces earlier facts (valid *and* superseded), dead-ends and hints
+        that point at the same host/path, so the agent reuses experience instead
+        of rediscovering the same surface. Superseded facts keep their validity
+        window from ``facts_as_of`` and come back with ``valid=False``.
+        """
+        if isinstance(queries, str):
+            queries = [queries]
+        normalized = [_text(item, 300).lower() for item in (queries or []) if _text(item, 300)]
+        if not normalized:
+            return []
+        at = self._now()
+        per_query = max(1, int(per_query))
+        with AdvisoryFileLock(self.lock_path, create=False):
+            state = self._load_unlocked(create=False)
+        targets = {
+            str(item.get("intent_id")): _text(item.get("target"), 300)
+            for item in state["intents"] if item.get("intent_id")
+        }
+        results: List[Dict[str, Any]] = []
+        for query in normalized[:max(1, int(limit))]:
+            facts = []
+            for fact in state["facts"]:
+                if not isinstance(fact, dict):
+                    continue
+                score = _match_score(query, " ".join([
+                    str(fact.get("candidate_id") or ""),
+                    str(fact.get("url") or ""),
+                    " ".join(str(item) for item in (fact.get("sources") or [])),
+                ]))
+                if score <= 0:
+                    continue
+                facts.append({
+                    "fact_id": _text(fact.get("fact_id"), 80),
+                    "url": _text(fact.get("url"), 300),
+                    "candidate_id": _text(fact.get("candidate_id"), 80),
+                    "priority": _priority(fact.get("priority")),
+                    "run_id": _text(fact.get("run_id"), 80),
+                    "valid": self._fact_valid_at(fact, at),
+                    "superseded_reason": _text(fact.get("superseded_reason"), 120),
+                    "score": score,
+                })
+            facts.sort(key=lambda row: (-row["score"], -row["priority"]))
+
+            dead_ends = []
+            for row in state["dead_ends"]:
+                if not isinstance(row, dict):
+                    continue
+                target = targets.get(str(row.get("intent_id")), "")
+                score = _match_score(query, f"{target} {row.get('reason') or ''} {row.get('detail') or ''}")
+                if score <= 0:
+                    continue
+                dead_ends.append({
+                    "intent_id": _text(row.get("intent_id"), 80),
+                    "target": target,
+                    "reason": _text(row.get("reason"), 120),
+                    "created_at": row.get("created_at"),
+                    "score": score,
+                })
+            dead_ends.sort(key=lambda row: -row["score"])
+
+            hints = []
+            for row in state["hints"]:
+                if not isinstance(row, dict):
+                    continue
+                target = targets.get(str(row.get("intent_id")), "")
+                score = _match_score(query, f"{target} {row.get('hint') or ''}")
+                if score <= 0:
+                    continue
+                hints.append({
+                    "intent_id": _text(row.get("intent_id"), 80),
+                    "target": target,
+                    "hint": _safe_text(row.get("hint"), 300),
+                    "source": _text(row.get("source"), 64),
+                    "score": score,
+                })
+            hints.sort(key=lambda row: -row["score"])
+
+            results.append({
+                "query": query,
+                "facts": facts[:per_query],
+                "dead_ends": dead_ends[:per_query],
+                "hints": hints[:per_query],
+            })
+        return results
 
     @staticmethod
     def _supersede_fact_unlocked(

@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, status
@@ -85,6 +85,16 @@ try:                                   # F1 对话台芯:读 Strix agents.db 真
     from core import strix_conversation  # type: ignore
 except Exception:                      # noqa: BLE001
     strix_conversation = None          # type: ignore
+
+try:                                   # LLM 供应商设置(界面配置 key/分层模型)
+    from core import llm_settings      # type: ignore
+except Exception:                      # noqa: BLE001
+    llm_settings = None                # type: ignore
+
+try:                                   # LLM provider 池(连通性测试 + 分层路由)
+    from core import llm_pool          # type: ignore
+except Exception:                      # noqa: BLE001
+    llm_pool = None                    # type: ignore
 
 
 MAX_STATE_FILE_BYTES = 2 * 1024 * 1024
@@ -215,6 +225,175 @@ def _valid_public_target(raw: str) -> str:
     return s[:300]
 
 
+# ---- H1 接入：抓公开页面 + LLM 抽取 scope（公开页面不是打目标，授权门不适用，但 SSRF 门必须留）----
+
+INTAKE_TEXT_MAX = 200_000
+INTAKE_PROMPT_CHARS = 30_000
+INTAKE_BODY_MAX_BYTES = 1_000_000
+INTAKE_MAX_REDIRECTS = 3
+INTAKE_MAX_ITEMS = 20
+_DOMAIN_NAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+INTAKE_SYSTEM = """\
+你在读一个漏洞赏金项目（如 HackerOne program）的页面或文本，目标是把资产范围抽成结构化 JSON。
+
+只输出严格 JSON，不要 markdown fence，不要解释：
+{
+  "program": "项目名/组织名",
+  "in_scope": {"domains": ["example.com"], "hosts": ["api.example.com"], "urls": ["https://api.example.com"]},
+  "out_of_scope": ["不在此范围的域名或说明"],
+  "candidate_targets": ["https://api.example.com"],
+  "notes": "范围要点/限制(可选)"
+}
+
+规则：
+1. 只抽取页面里**明确列出**的域名/主机/URL，不要脑补、不要扩充。
+2. 通配符（如 *.example.com）只保留根域名 example.com，不要保留 *。
+3. 不是域名的条目（邮箱、人名、奖项、货币金额）一律丢掉。
+4. candidate_targets 只放真正适合先做被动探测的 URL（带参数的 API 优先，静态资源不要）。
+5. 页面里没有的信息就留空数组，不要编造。"""
+
+INTAKE_USER_TEMPLATE = """\
+来源：{source}
+
+页面/文本内容：
+{content}
+
+按系统提示输出严格 JSON。"""
+
+
+def _normalize_domain(value: Any) -> str:
+    """Accept only a public-ish DNS name; drop IP literals and wildcards."""
+    name = _text(value, limit=253).lower().lstrip("*.").rstrip(".")
+    if not name or not _DOMAIN_NAME_RE.match(name):
+        return ""
+    try:
+        ipaddress.ip_address(name)
+        return ""                                  # IP 字面量不作为域名范围
+    except ValueError:
+        return name
+
+
+def _normalize_domain_list(values: Any) -> List[str]:
+    out: List[str] = []
+    for item in (values or [])[:INTAKE_MAX_ITEMS * 2]:
+        name = _normalize_domain(item)
+        if name and name not in out:
+            out.append(name)
+    return out[:INTAKE_MAX_ITEMS]
+
+
+def _url_inside_scope(raw: Any, accepted: Iterable[str]) -> str:
+    """Keep only a valid public URL whose host sits inside the accepted scope."""
+    target = _valid_public_target(str(raw or ""))
+    if not target:
+        return ""
+    host = (urlparse(target).hostname or "").lower()
+    if not host:
+        return ""
+    for base in accepted:
+        if host == base or host.endswith("." + base):
+            return target[:300]
+    return ""
+
+
+def _normalize_url_list(values: Any, accepted: Iterable[str]) -> List[str]:
+    allowed = [str(item) for item in accepted if item]
+    out: List[str] = []
+    for item in (values or [])[:INTAKE_MAX_ITEMS * 2]:
+        url = _url_inside_scope(item, allowed)
+        if url and url not in out:
+            out.append(url)
+    return out[:INTAKE_MAX_ITEMS]
+
+
+def _normalize_scope(raw: Any) -> Dict[str, Any]:
+    """Sanitize LLM extraction output. The model's answer is untrusted input."""
+    data = raw if isinstance(raw, dict) else {}
+    in_scope = data.get("in_scope") if isinstance(data.get("in_scope"), dict) else {}
+    domains = _normalize_domain_list(in_scope.get("domains"))
+    hosts = _normalize_domain_list(in_scope.get("hosts"))
+    accepted = domains + hosts
+    return {
+        "program": _text(data.get("program"), limit=120),
+        "in_scope": {
+            "domains": domains,
+            "hosts": hosts,
+            "urls": _normalize_url_list(in_scope.get("urls"), accepted),
+        },
+        "out_of_scope": [
+            _text(item, limit=200) for item in (data.get("out_of_scope") or [])[:INTAKE_MAX_ITEMS]
+            if _text(item, limit=200)
+        ],
+        "candidate_targets": _normalize_url_list(data.get("candidate_targets"), accepted),
+        "notes": _text(data.get("notes"), limit=500),
+    }
+
+
+def _http_get_once(url: str, timeout: float) -> Tuple[int, Dict[str, str], bytes]:
+    with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+        resp = client.get(url, headers={"User-Agent": "Lode-Console/1.0"})
+        return resp.status_code, {k.lower(): v for k, v in resp.headers.items()}, resp.content
+
+
+def _fetch_public_page(
+    url: str,
+    *,
+    timeout: float = 10.0,
+    transport: Optional[Callable[[str, float], Tuple[int, Dict[str, str], bytes]]] = None,
+) -> Dict[str, Any]:
+    """Fetch a public page for intake, re-validating SSRF rules on every hop."""
+    get = transport or _http_get_once
+    current = _valid_public_target(url)
+    if not current:
+        return {"ok": False, "url": url[:300], "text": "", "error": "invalid_target"}
+    for _ in range(INTAKE_MAX_REDIRECTS + 1):
+        request_url = current if "://" in current else "http://" + current
+        if not _valid_public_target(request_url):
+            return {"ok": False, "url": request_url[:300], "text": "", "error": "invalid_target"}
+        try:
+            code, headers, body = get(request_url, timeout)
+        except Exception as exc:  # noqa: BLE001 - surface a short reason only
+            return {"ok": False, "url": request_url[:300], "text": "", "error": f"fetch_failed:{type(exc).__name__}"}
+        if code in (301, 302, 303, 307, 308):
+            location = str(headers.get("location") or "").strip()
+            if not location:
+                return {"ok": False, "url": request_url[:300], "text": "", "error": "redirect_without_location"}
+            current = urljoin(request_url, location)
+            continue
+        if code >= 400:
+            return {"ok": False, "url": request_url[:300], "text": "", "error": f"http_{code}"}
+        content_type = str(headers.get("content-type") or "").lower()
+        if content_type and not (content_type.startswith("text/") or content_type.startswith("application/json")):
+            return {"ok": False, "url": request_url[:300], "text": "", "error": "unsupported_content_type"}
+        text = body[:INTAKE_BODY_MAX_BYTES].decode("utf-8", errors="replace")
+        return {"ok": True, "url": request_url[:300], "text": text, "error": ""}
+    return {"ok": False, "url": current[:300], "text": "", "error": "too_many_redirects"}
+
+
+def _extract_scope(content: str, *, source: str, timeout: float = 45.0) -> Dict[str, Any]:
+    """Ask the Reasoner-tier model to turn a page/text into a scope draft."""
+    if llm_pool is None:
+        return {"ok": False, "extracted": None, "error": "llm_pool_unavailable"}
+    prompt = INTAKE_USER_TEMPLATE.format(source=source[:200], content=content[:INTAKE_PROMPT_CHARS])
+    prefer = os.environ.get("SRC_REASONER_PREFER", "").strip()
+    try:
+        raw = llm_pool.complete(INTAKE_SYSTEM, prompt, timeout=timeout, prefer=prefer)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "extracted": None, "error": f"llm_failed:{type(exc).__name__}"}
+    if not raw:
+        return {"ok": False, "extracted": None, "error": "llm_unavailable"}
+    from agents.src_agent import _parse_json_response
+
+    parsed = _parse_json_response(raw)
+    if parsed is None:
+        return {"ok": False, "extracted": None, "error": "extraction_unparseable"}
+    extracted = _normalize_scope(parsed)
+    if not (extracted["in_scope"]["domains"] or extracted["in_scope"]["hosts"]):
+        return {"ok": False, "extracted": extracted, "error": "no_scope_found"}
+    return {"ok": True, "extracted": extracted, "error": ""}
+
+
 def _valid_profile(pid: str) -> str:
     valid = set()
     for key, prof in list_profiles().items():
@@ -333,6 +512,38 @@ class ModelActiveRequest(BaseModel):
     name: str
 
 
+class LlmProviderInput(BaseModel):
+    """One provider row submitted from the settings panel.
+
+    ``api_key`` is empty when the UI round-trips an already-saved provider (the
+    API never returns keys); the stored key is then carried over by name unless
+    ``clear_key`` is set.
+    """
+    name: str
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-chat"
+    api_key: str = ""
+    clear_key: bool = False
+
+
+class LlmSettingsRequest(BaseModel):
+    providers: List[LlmProviderInput] = []
+    # role -> provider name substring ("" = let the pool fail over)
+    tiers: Dict[str, str] = {}
+
+
+class LlmTestRequest(BaseModel):
+    """Test connectivity for a stored provider or an unsaved draft row."""
+    name: str = ""
+    provider: LlmProviderInput | None = None
+
+
+class SrcIntakeRequest(BaseModel):
+    """Read a HackerOne program page (URL) or pasted text into a scope draft."""
+    url: str = ""
+    text: str = ""
+
+
 class EgressAllowRequest(BaseModel):
     host: str
     reason: str | None = None
@@ -358,15 +569,23 @@ class SrcAgentStartRequest(BaseModel):
     target_url: str
     authorization: str = ""
     allowed_domains: List[str] = []
+    allowed_hosts: List[str] = []
     max_cycles: int = 20
     max_explore: int = 3
-    reasoner_prefer: str = "deepseek"
+    reasoner_prefer: str = ""
+    explorer_prefer: str = ""
 
 
 class SrcAgentChatRequest(BaseModel):
     """Send a message to the SRC agent chat."""
     message: str
     session_id: str = ""
+
+
+class SrcSessionPatchRequest(BaseModel):
+    """Rename and/or pin a stored session."""
+    title: str = ""
+    pinned: Optional[bool] = None
 
 
 class ReadOnlyControlPlane:
@@ -1613,9 +1832,10 @@ def create_app(
     _src_agent_lock = threading.Lock()
 
     def _run_src_agent_background(target_url: str, authorization: str,
-                                  allowed_domains: List[str], state_dir_path: Path,
+                                  allowed_domains: List[str], allowed_hosts: List[str],
+                                  state_dir_path: Path,
                                   max_cycles: int, max_explore: int,
-                                  reasoner_prefer: str) -> None:
+                                  reasoner_prefer: str, explorer_prefer: str) -> None:
         """Background thread: run autopilot → src_agent pipeline."""
         import traceback as _tb
         run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
@@ -1639,8 +1859,9 @@ def create_app(
 
             parsed = urlparse(target_url)
             host = (parsed.hostname or "").lower()
-            domains = list(allowed_domains) if allowed_domains else []
-            if host and host not in domains:
+            domains = [str(item).strip() for item in (allowed_domains or []) if str(item).strip()]
+            hosts = [str(item).strip().lower() for item in (allowed_hosts or []) if str(item).strip()]
+            if host and host not in domains and host not in hosts:
                 # Auto-add the target's domain
                 parts = host.split(".")
                 if len(parts) >= 2:
@@ -1648,12 +1869,35 @@ def create_app(
                 else:
                     domains.append(host)
 
+            # 分层路由：显式参数优先，其次取设置文件投影的 env 默认（空了就按池故障转移）。
+            reasoner = (reasoner_prefer or "").strip() or os.environ.get("SRC_REASONER_PREFER", "").strip()
+            explorer = (explorer_prefer or "").strip() or os.environ.get("SRC_EXPLORER_PREFER", "").strip()
+
             scope = SurfaceScope(
                 program=f"console-{run_id}",
                 authorization=authorization or f"Console operator authorized scan of {target_url}",
                 allowed_domains=tuple(domains),
+                allowed_hosts=tuple(hosts),
                 delay_seconds=0.5,
             )
+            # 存档本轮的授权范围，便于复盘"当时到底授权了什么"。
+            try:
+                scope_doc = {
+                    "schema": "SrcRunScope/v1",
+                    "run_id": run_id,
+                    "program": scope.program,
+                    "authorization": scope.authorization,
+                    "allowed_domains": domains,
+                    "allowed_hosts": hosts,
+                    "reasoner_prefer": reasoner,
+                    "explorer_prefer": explorer,
+                    "created_at": time.time(),
+                }
+                staged = out_dir / ".scope.json.tmp"
+                staged.write_text(json.dumps(scope_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(staged, out_dir / "scope.json")
+            except OSError:
+                pass
 
             # Phase 1: Surface discovery + autopilot
             autopilot = SrcAutopilot(
@@ -1668,7 +1912,8 @@ def create_app(
                 bb_path, scope,
                 max_cycles=max_cycles,
                 max_explore_per_cycle=max_explore,
-                reasoner_prefer=reasoner_prefer,
+                reasoner_prefer=reasoner,
+                explorer_prefer=explorer,
                 worker_id=f"console-{run_id}",
             )
 
@@ -1695,9 +1940,9 @@ def create_app(
         state_dir_path = Path(state_dir)
         t = threading.Thread(
             target=_run_src_agent_background,
-            args=(target, payload.authorization, payload.allowed_domains,
+            args=(target, payload.authorization, payload.allowed_domains, payload.allowed_hosts,
                   state_dir_path, payload.max_cycles, payload.max_explore,
-                  payload.reasoner_prefer),
+                  payload.reasoner_prefer, payload.explorer_prefer),
             daemon=True,
         )
         t.start()
@@ -1753,6 +1998,10 @@ def create_app(
             chat as _src_chat,
             _get_or_create_session as _src_get_session,
             list_sessions as _src_list_sessions,
+            rename_session as _src_rename_session,
+            set_session_pinned as _src_pin_session,
+            delete_session as _src_delete_session,
+            prune_empty_sessions as _src_prune_sessions,
         )
         _src_chat_available = True
     except Exception:
@@ -1760,15 +2009,60 @@ def create_app(
 
     @app.get("/api/v1/src-agent/sessions")
     def src_agent_sessions(request: Request) -> JSONResponse:
-        """List all persisted SRC agent sessions (survives restart)."""
+        """List persisted SRC agent sessions (pinned first, then newest)."""
         _require_session(request)
         if not _src_chat_available:
-            return JSONResponse(content={"sessions": []}, headers=_NOSTORE)
+            return JSONResponse(content={"sessions": [], "total": 0, "empty_count": 0}, headers=_NOSTORE)
         try:
             sessions = _src_list_sessions(Path(state_dir))
         except Exception:
             sessions = []
-        return JSONResponse(content={"sessions": sessions}, headers=_NOSTORE)
+        return JSONResponse(content={
+            "sessions": sessions,
+            "total": len(sessions),
+            "empty_count": len([s for s in sessions if s.get("empty")]),
+        }, headers=_NOSTORE)
+
+    @app.patch("/api/v1/src-agent/sessions/{session_id}")
+    def src_agent_session_patch(session_id: str, payload: SrcSessionPatchRequest,
+                                request: Request) -> JSONResponse:
+        """Rename and/or pin a session."""
+        _require_session(request)
+        if not _src_chat_available:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="src_chat_module_unavailable")
+        result: Optional[Dict[str, Any]] = None
+        if payload.pinned is not None:
+            result = _src_pin_session(session_id, bool(payload.pinned), state_dir=Path(state_dir))
+            if result is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+        if payload.title.strip():
+            result = _src_rename_session(session_id, payload.title, state_dir=Path(state_dir))
+            if result is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+        if result is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="nothing_to_update")
+        return JSONResponse(content={"ok": True, **result}, headers=_NOSTORE)
+
+    @app.delete("/api/v1/src-agent/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def src_agent_session_delete(session_id: str, request: Request) -> Response:
+        """Delete one session workspace (transcript + blackboard + run artifacts)."""
+        _require_session(request)
+        if not _src_chat_available:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="src_chat_module_unavailable")
+        if not _src_delete_session(session_id, state_dir=Path(state_dir)):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post("/api/v1/src-agent/sessions/prune")
+    def src_agent_sessions_prune(request: Request) -> JSONResponse:
+        """Delete sessions with no conversation and no scan work."""
+        _require_session(request)
+        if not _src_chat_available:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="src_chat_module_unavailable")
+        return JSONResponse(content={"ok": True, **_src_prune_sessions(Path(state_dir))}, headers=_NOSTORE)
 
     @app.get("/api/v1/src-agent/history")
     def src_agent_history(request: Request, session_id: str = "") -> JSONResponse:
@@ -1811,7 +2105,8 @@ def create_app(
     def src_agent_events(request: Request, session_id: str = "", since: float = 0) -> JSONResponse:
         """Get recent events from an SRC chat session (for real-time UI updates)."""
         _require_session(request)
-        if not _src_chat_available:
+        if not _src_chat_available or not session_id.strip():
+            # No session id must NOT create one — that is how empty sessions appeared.
             return JSONResponse(content={"events": []}, headers=_NOSTORE)
         session = _src_get_session(session_id, state_dir=Path(state_dir))
         events = [e for e in session.events if e.get("ts", 0) > since]
@@ -1919,6 +2214,126 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                                 detail=str(result.get("error", "invalid")))
         return JSONResponse(content=result, headers=_NOSTORE)
+
+    # ---- LLM 供应商设置（界面配 key + 分层模型）。响应只回掩码，绝不回 api_key。----
+
+    @app.get("/api/v1/llm/settings")
+    def llm_settings_read(request: Request) -> JSONResponse:
+        _require_session(request)
+        if llm_settings is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="llm_settings_unavailable")
+        path = llm_settings.settings_path(state_dir)
+        content = llm_settings.mask_settings(llm_settings.read_settings(path))
+        content["effective"] = {
+            "providers_env_override": bool(os.environ.get("LLM_PROVIDERS", "").strip()),
+            "legacy_env_override": bool(os.environ.get("LLM_API_KEY", "").strip()),
+            "reasoner_prefer": os.environ.get("SRC_REASONER_PREFER", ""),
+            "explorer_prefer": os.environ.get("SRC_EXPLORER_PREFER", ""),
+        }
+        content["settings_path"] = str(path)
+        return JSONResponse(content=content, headers=_NOSTORE)
+
+    @app.put("/api/v1/llm/settings")
+    def llm_settings_write(payload: LlmSettingsRequest, request: Request) -> JSONResponse:
+        _require_session(request)
+        if llm_settings is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="llm_settings_unavailable")
+        path = llm_settings.settings_path(state_dir)
+        stored = llm_settings.read_settings(path)
+        try:
+            doc = llm_settings.write_settings(
+                [p.model_dump() for p in payload.providers],
+                payload.tiers,
+                path=path,
+                stored=stored,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"invalid_settings:{str(exc)[:200]}")
+        # 写盘后立即投影到 env，本轮起的 SRC run 就用新配置（无需重启 Console）。
+        applied = llm_settings.apply_to_environ(doc, state_dir=Path(state_dir), force=True)
+        content = llm_settings.mask_settings(doc)
+        content["ok"] = True
+        content["applied_env"] = applied
+        return JSONResponse(content=content, headers=_NOSTORE)
+
+    @app.post("/api/v1/llm/test")
+    def llm_provider_test(payload: LlmTestRequest, request: Request) -> JSONResponse:
+        """Probe provider connectivity. A failure is 200 + ok=false, not a 5xx."""
+        _require_session(request)
+        if llm_pool is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="llm_pool_unavailable")
+        if payload.provider is not None:
+            provider = payload.provider.model_dump()
+            if not str(provider.get("api_key") or "").strip() and llm_settings is not None:
+                # A keyless draft row: fall back to the stored key of the same name.
+                stored = llm_settings.read_settings(llm_settings.settings_path(state_dir))
+                keep = next((p for p in stored["providers"] if p["name"] == provider["name"]), None)
+                if keep:
+                    provider["api_key"] = keep.get("api_key", "")
+        else:
+            name = _text(payload.name, limit=64)
+            if not name:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="name_required")
+            provider = next((p for p in llm_pool.parse_providers() if p.get("name") == name), None)
+            if provider is None and llm_settings is not None:
+                stored = llm_settings.read_settings(llm_settings.settings_path(state_dir))
+                provider = next((p for p in stored["providers"] if p["name"] == name), None)
+            if provider is None:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="provider_not_found")
+        if not str(provider.get("api_key") or "").strip():
+            return JSONResponse(content={"ok": False, "name": provider.get("name", ""),
+                                         "model": provider.get("model", ""), "latency_ms": 0,
+                                         "error": "missing_base_url_or_api_key"}, headers=_NOSTORE)
+        return JSONResponse(content=llm_pool.probe_provider(provider), headers=_NOSTORE)
+
+    # ---- H1 接入：粘贴整页 / 给 URL → LLM 抽 scope（只抽取，不开跑；开跑走 /src-agent/start）----
+
+    @app.post("/api/v1/src-agent/intake")
+    def src_intake(payload: SrcIntakeRequest, request: Request) -> JSONResponse:
+        _require_session(request)
+        warnings: List[str] = []
+        text = _text(payload.text, limit=INTAKE_TEXT_MAX).replace("\x00", "")
+        url = _text(payload.url, limit=300)
+        if text and url:
+            warnings.append("both_text_and_url_text_wins")
+        source = "pasted_text"
+        content = text
+        if not content and url:
+            fetched = _fetch_public_page(url)
+            if not fetched["ok"]:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=fetched["error"] or "fetch_failed")
+            content = fetched["text"]
+            source = fetched["url"]
+        if not content.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="empty_intake")
+        if len(content) > INTAKE_PROMPT_CHARS:
+            warnings.append(f"truncated_to_{INTAKE_PROMPT_CHARS}_chars")
+        result = _extract_scope(content, source=source)
+        if not result["ok"]:
+            unavailable = result["error"] in ("llm_unavailable", "llm_pool_unavailable")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE if unavailable else status.HTTP_502_BAD_GATEWAY,
+                detail=result["error"],
+            )
+        extracted = result["extracted"]
+        record_id = f"LI-{int(time.time())}-{secrets.token_hex(3)}"
+        out_dir = Path(state_dir) / "llm-intake"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            doc = {"schema": "LlmIntake/v1", "id": record_id, "source": source[:300],
+                   "created_at": time.time(), "extracted": extracted}
+            staged = out_dir / f".{record_id}.tmp"
+            staged.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(staged, out_dir / f"{record_id}.json")
+        except OSError:
+            warnings.append("audit_write_failed")
+        return JSONResponse(content={"ok": True, "id": record_id, "source": source[:300],
+                                     "extracted": extracted, "warnings": warnings}, headers=_NOSTORE)
 
     @app.get("/api/v1/proxy")
     def proxy(request: Request) -> JSONResponse:

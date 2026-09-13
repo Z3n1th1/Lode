@@ -2,7 +2,9 @@
 param(
     [string]$StateDir = (Join-Path $PSScriptRoot 'lode-state'),
     [ValidateRange(1, 65535)]
-    [int]$Port = 8088
+    [int]$Port = 8088,
+    # Override the interpreter; defaults to PA_PYTHON (from .env) then a 3.10+ probe.
+    [string]$Python = ''
 )
 
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -30,8 +32,9 @@ if (Test-Path -LiteralPath $envFile) {
 $pythonExe = $null
 $pythonPrefix = @()
 $pythonCandidates = @()
-if ($env:PA_PYTHON) {
-    $pythonCandidates += [pscustomobject]@{ Exe = $env:PA_PYTHON; Prefix = @() }
+if (-not $Python) { $Python = $env:PA_PYTHON }
+if ($Python) {
+    $pythonCandidates += [pscustomobject]@{ Exe = $Python; Prefix = @() }
 } else {
     $pyLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
     if ($pyLauncher) { $pythonCandidates += [pscustomobject]@{ Exe = $pyLauncher.Source; Prefix = @('-3') } }
@@ -53,6 +56,7 @@ foreach ($candidate in $pythonCandidates) {
 if (-not $pythonExe) {
     throw 'Python 3.10+ runtime not found. Install Python or set PA_PYTHON to its executable.'
 }
+Write-Host "Lode Console using $pythonExe" -ForegroundColor DarkGray
 
 if (-not $env:LODE_ADMIN_PASSWORD) {
     throw 'LODE_ADMIN_PASSWORD is required and must be at least 12 characters.'

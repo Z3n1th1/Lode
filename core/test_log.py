@@ -39,13 +39,21 @@ class SrcTestLog:
 
     def __init__(self, state_dir: str | Path) -> None:
         self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.state_dir / "src-test-log.jsonl"
         self.summary_path = self.state_dir / "src-test-summary.json"
+
+    def _ensure_dir(self) -> None:
+        """Create the directory lazily — constructing a log must not materialize
+        a workspace, or merely opening a session would leave an empty dir behind."""
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     def log(self, event: TestEvent) -> None:
         """Append one event to the log."""
         line = json.dumps({"schema": SCHEMA, **asdict(event)}, ensure_ascii=False)
+        self._ensure_dir()
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
@@ -53,6 +61,7 @@ class SrcTestLog:
         """Append a raw dict event."""
         data.setdefault("schema", SCHEMA)
         data.setdefault("ts", time.time())
+        self._ensure_dir()
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
@@ -162,6 +171,7 @@ class SrcTestLog:
 
         # Write summary to file
         try:
+            self._ensure_dir()
             self.summary_path.write_text(
                 json.dumps(result, ensure_ascii=False, indent=2),
                 encoding="utf-8",

@@ -2,7 +2,7 @@
 // F6 壳顶栏:品牌 + R2 模型切换下拉 + 次级面板抽屉入口 + 刷新/退出。对话台为主视图,旧 17 面板收进抽屉。
 import { computed, onMounted, ref } from 'vue'
 import { NAvatar, NButton, NSelect, NTooltip, useMessage } from 'naive-ui'
-import { Bot, Crosshair, LayoutGrid, LogOut, MessageSquare, RefreshCw } from '@lucide/vue'
+import { Bot, Crosshair, LayoutGrid, LogOut, MessageSquare, RefreshCw, Settings } from '@lucide/vue'
 import { refreshing, refreshDashboard, signOut, panelsOpen, mainView } from '../store'
 import { loadModelPool, setActiveModel, type ModelPool } from '../api'
 
@@ -70,6 +70,11 @@ onMounted(reloadPool)
           role="tab" :aria-selected="mainView === 'chat'"
           @click="mainView = 'chat'"
         ><MessageSquare :size="14" /> 对话台</button>
+        <button
+          class="view-tab" :class="{ active: mainView === 'settings' }"
+          role="tab" :aria-selected="mainView === 'settings'"
+          @click="mainView = 'settings'"
+        ><Settings :size="14" /> 挖洞设置</button>
       </div>
       <n-tooltip trigger="hover">
         <template #trigger>
@@ -88,6 +93,14 @@ onMounted(reloadPool)
         活跃模型:{{ activeName || '未知' }} {{ activeModel ? `· ${activeModel}` : '' }}(切换后下一次对话即生效)
       </n-tooltip>
       <span class="environment-pill"><span class="status-dot success"></span>LOCAL</span>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button quaternary circle aria-label="挖洞设置" @click="mainView = 'settings'">
+            <Settings :size="17" />
+          </n-button>
+        </template>
+        挖洞设置(模型 / 密钥)
+      </n-tooltip>
       <n-tooltip trigger="hover">
         <template #trigger>
           <n-button quaternary circle aria-label="控制面板" @click="panelsOpen = true">

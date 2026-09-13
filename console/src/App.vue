@@ -9,6 +9,7 @@ import AppHeader from './components/AppHeader.vue'
 import PanelsDrawer from './components/PanelsDrawer.vue'
 import ConsoleChat from './components/ConsoleChat.vue'
 import SrcAgentPanel from './components/panels/SrcAgentPanel.vue'
+import SettingsPanel from './components/panels/SettingsPanel.vue'
 import DetailModal from './components/modals/DetailModal.vue'
 import KeyUnlockModal from './components/modals/KeyUnlockModal.vue'
 import NewProjectModal from './components/modals/NewProjectModal.vue'
@@ -43,10 +44,11 @@ onBeforeUnmount(stopPolling)
       <div v-else class="shell">
         <AppHeader />
         <main class="console-main">
-          <!-- 主视图切换:SRC 挖掘台(默认) / Strix 对话台。
-               ConsoleChat 常驻(v-show)以保留在途 SSE 流;SRC 面板按需挂载。 -->
+          <!-- 主视图切换:SRC 挖掘台(默认) / Strix 对话台 / 挖洞设置。
+               ConsoleChat 常驻(v-show)以保留在途 SSE 流;其余面板按需挂载。 -->
           <ConsoleChat v-show="mainView === 'chat'" />
           <SrcAgentPanel v-if="mainView === 'src'" />
+          <SettingsPanel v-if="mainView === 'settings'" />
         </main>
         <PanelsDrawer />
         <DetailModal />
