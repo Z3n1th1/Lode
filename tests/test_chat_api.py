@@ -206,7 +206,9 @@ class EscalationTests(_ChatCase):
         # the envelope kind stays "subtask_started" so the renderer can dispatch
         self.assertEqual("src_loop", announce["job_kind"])
         self.assertEqual("http://example.com", announce["target"])
-        self.assertEqual("SRC 黑盒", announce["title"])
+        # the announcement carries the mode's own title (core/modes.py), so a
+        # rename there shows up here on purpose
+        self.assertEqual("黑盒漏洞挖掘", announce["title"])
         self.assertEqual(loop["job_id"], announce["job_id"])
         # the subtask shares the turn's turn_id, so it renders inside that turn
         self.assertEqual(events[0]["turn_id"], announce["turn_id"])

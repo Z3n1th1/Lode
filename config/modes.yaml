@@ -4,7 +4,7 @@
 # language ("进入 CTF 模式").
 modes:
   chat:
-    title: 闲聊
+    title: 对话
     skill: chat
     tier: explorer
     autonomy: none
@@ -18,7 +18,7 @@ modes:
     tools: [shell, fetch, decode, submit_flag]
     system_fragment: "CTF 模式：工程化构造攻击链，先侦察再逐点利用，优先给出可直接运行的 payload/exploit。"
   src_blackbox:
-    title: SRC 黑盒
+    title: 黑盒漏洞挖掘
     skill: src-blackbox
     tier: reasoner
     autonomy: ask

@@ -61,12 +61,17 @@
   /* 阴影只给浮层 */
   --pa-shadow-pop: 0 16px 40px rgb(0 0 0 / 46%);
 
-  /* 字:UI 一套(平台原生,刻意选 Segoe UI Variable),数据一套(Cascadia
-     —— Windows Terminal 的字体,和控制台这个题材同源) */
-  --pa-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC",
-           "Noto Sans SC", system-ui, sans-serif;
-  --pa-display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
-  --pa-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, "Microsoft YaHei Mono", monospace;
+  /* 字:拉丁字母走 JetBrains Mono(等宽 —— 这个题材本来就是终端),中文走腾讯体。
+     腾讯体的 family 名是 "TencentSans"(W3/W7 是它的两个字重:300/700),
+     CSS 必须写这个名字 —— 写中文名或者 "TencentSans W3" 都匹配不上,Chrome 会
+     静默回落成 Noto Sans SC。装不到这台机器的地方顺着栈落到雅黑。
+     数据/代码走 NFM 变体,末尾补一个中文字体,否则中文会掉到 NSimSun(点阵宋体)。 */
+  --pa-ui: "JetBrainsMono NF", "JetBrains Mono", "TencentSans", "腾讯体",
+           "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --pa-display: "JetBrainsMono NF", "JetBrains Mono", "TencentSans", "腾讯体",
+                "Microsoft YaHei UI", system-ui, sans-serif;
+  --pa-mono: "JetBrainsMono NFM", "JetBrains Mono", "Cascadia Mono", ui-monospace, Consolas,
+             "TencentSans", "腾讯体", "Microsoft YaHei UI", monospace;
 
   --pa-fs-xs: 11.5px;
   --pa-fs-sm: 12.5px;
@@ -134,6 +139,11 @@
 html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
 
 body { min-height: 100vh; }
+
+/* naive-ui 会往 head 里塞一条 `body{font-family:v-sans,…}`,注在我们的样式表之后,
+   于是它渲染的组件(它们自己不再声明字体,全靠继承)会用系统字体。这里升一级特异性
+   把它压回去 —— 全站的字体栈只有 --pa-ui 这一处定义。 */
+html body { font-family: var(--pa-ui); }
 
 button, input { font: inherit; }
 
@@ -208,22 +218,25 @@ body { font-variant-numeric: tabular-nums; }
 .n-button { font-size: var(--pa-fs-base) !important; }
 .n-data-table .n-button { min-height: 26px; padding: 0 10px !important; }
 
-/* ===== 登录 ===== */
+/* ===== 登录 =====
+   刻意不做一张居中卡片:左边是门,右边写这道门守什么。两栏之间只有一根 1px 竖线,
+   不进卡片、不加阴影 —— 阴影是留给真浮层的。 */
 .login-canvas {
   min-height: 100vh;
   display: grid;
-  place-items: center;
-  padding: 24px;
+  grid-template-columns: minmax(0, 384px) minmax(0, 1fr);
+  align-content: center;
+  align-items: stretch;
+  gap: clamp(36px, 6vw, 84px);
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 24px;
   background: var(--pa-bg);
 }
 
-.login-panel {
-  width: min(100%, 384px);
-  padding: 30px 30px 26px;
-  border: 1px solid var(--pa-border);
-  border-radius: var(--pa-radius-pop);
-  background: var(--pa-surface);
-}
+.login-panel { min-width: 0; }
+
+.login-head { display: flex; align-items: center; gap: 12px; }
 
 .login-mark, .brand-mark {
   display: grid;
@@ -233,7 +246,7 @@ body { font-variant-numeric: tabular-nums; }
   background: var(--pa-brand-grad);
 }
 
-.login-mark { width: 40px; height: 40px; border-radius: 11px; margin-bottom: 20px; }
+.login-mark { width: 40px; height: 40px; border-radius: 11px; }
 
 .login-panel h1, .page-heading h1, .data-panel h2 {
   margin: 6px 0 0;
@@ -242,23 +255,43 @@ body { font-variant-numeric: tabular-nums; }
   letter-spacing: -.01em;
 }
 
-.login-panel h1 { font-size: 27px; line-height: 1.2; }
-.login-subtitle { margin: 10px 0 24px; color: var(--pa-text-2); font-size: var(--pa-fs-md); line-height: 1.6; }
+.login-head h1 { margin: 0; font-size: 25px; line-height: 1.2; }
 
-.login-form { display: grid; gap: 11px; }
+.login-form { display: grid; gap: 11px; margin-top: 28px; max-width: 384px; }
 .login-form label { color: var(--pa-text-2); font-size: var(--pa-fs-base); font-weight: 600; }
+/* 主按钮不做满宽的色块:它是这一步的动作,不是这一页的主角。 */
+.login-form .n-button { justify-self: start; min-width: 108px; }
 .form-error { margin: 0; color: var(--pa-danger); font-size: var(--pa-fs-base); }
 
 .login-status {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 22px;
-  padding-top: 14px;
-  border-top: 1px solid var(--pa-border-soft);
+  margin-top: 26px;
   color: var(--pa-text-3);
   font-size: var(--pa-fs-sm);
 }
+
+.login-aside {
+  min-width: 0;
+  /* 这一下是让右栏第一行对到左边 h1 的基线:h1 被 40px 的标记在行里压低了 6px */
+  padding-top: 6px;
+  padding-left: clamp(28px, 5vw, 64px);
+  border-left: 1px solid var(--pa-border);
+}
+
+.aside-lead {
+  margin: 0 0 20px;
+  color: var(--pa-text);
+  font-family: var(--pa-display);
+  font-size: var(--pa-fs-xl);
+  line-height: 1.35;
+}
+
+.aside-rules { display: grid; gap: 12px; margin: 0; }
+.aside-rules > div { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 16px; align-items: baseline; }
+.aside-rules dt { color: var(--pa-text); font-family: var(--pa-mono); font-size: var(--pa-fs-sm); }
+.aside-rules dd { margin: 0; color: var(--pa-text-2); font-size: var(--pa-fs-base); line-height: 1.55; }
 
 /* ===== 壳 ===== */
 .shell { height: 100vh; display: flex; flex-direction: column; background: var(--pa-bg); }
@@ -438,6 +471,8 @@ body { font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) {
   .app-header { height: 50px; padding: 0 12px; }
   .brand-copy span, .environment-pill { display: none; }
+  .login-canvas { grid-template-columns: minmax(0, 1fr); gap: 30px; padding: 30px 20px; }
+  .login-aside { padding-left: 0; padding-top: 24px; border-left: 0; border-top: 1px solid var(--pa-border); }
   .pd { flex-direction: column; }
   .pd-nav { display: none; }
   .pd-nav-mobile { display: block; }
@@ -452,5 +487,5 @@ body { font-variant-numeric: tabular-nums; }
 
 @media (max-width: 430px) {
   .metric-grid { grid-template-columns: 1fr 1fr; }
-  .login-panel { padding: 24px 20px; }
+  .login-canvas { padding: 24px 18px; }
 }

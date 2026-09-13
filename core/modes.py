@@ -16,12 +16,12 @@ MODES_PATH = Path(__file__).resolve().parents[1] / "config" / "modes.yaml"
 DEFAULT_MODE = "chat"
 
 _FALLBACK: Dict[str, Dict[str, Any]] = {
-    "chat": {"title": "闲聊", "skill": "chat", "tier": "explorer", "autonomy": "none",
+    "chat": {"title": "对话", "skill": "chat", "tier": "explorer", "autonomy": "none",
              "tools": [], "system_fragment": "纯对话模式：只讨论与推理，不主动发起任何扫描或请求。"},
     "ctf": {"title": "CTF", "skill": "ctf", "tier": "reasoner", "autonomy": "auto",
             "tools": ["shell", "fetch", "decode", "submit_flag"],
             "system_fragment": "CTF 模式：工程化构造攻击链，先侦察再逐点利用。"},
-    "src_blackbox": {"title": "SRC 黑盒", "skill": "src-blackbox", "tier": "reasoner", "autonomy": "ask",
+    "src_blackbox": {"title": "黑盒漏洞挖掘", "skill": "src-blackbox", "tier": "reasoner", "autonomy": "ask",
                      "tools": ["scan_target", "run_agent_analysis", "fetch_url", "show_blackboard",
                                "add_candidates", "show_progress", "auto_scan"],
                      "system_fragment": "SRC 黑盒模式：严格限定在授权范围内做只读侦察与漏洞验证。"},

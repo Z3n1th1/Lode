@@ -197,7 +197,7 @@ onMounted(async () => {
       <div v-else-if="!events.length" class="opening">
         <h1 class="opening-title">先说清目标,再动手</h1>
         <p class="opening-lede">
-          这里是只读的。<strong>SRC 黑盒</strong>模式下,一句带目标和动作词的话会被自动升级成一个
+          这里是只读的。<strong>黑盒漏洞挖掘</strong>模式下,一句带目标和动作词的话会被自动升级成一个
           子任务,过程和发现都落在下面这条日志里。
         </p>
         <ul class="starters">
