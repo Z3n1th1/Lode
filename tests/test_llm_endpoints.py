@@ -15,7 +15,9 @@ sys.path.insert(0, str(_PROJECT_ROOT / "core"))
 
 from fastapi.testclient import TestClient
 
+from console.routers import intake as cp_intake
 from console import control_plane as cp
+from console import deps as cp_deps
 from console.control_plane import create_app
 
 PASSWORD = "strong-local-password"
@@ -224,7 +226,7 @@ class H1IntakeEndpointTests(_ConsoleTestCase):
         self.login()
         draft = {"program": "Acme", "in_scope": {"domains": ["acme.com"], "hosts": [], "urls": []},
                  "out_of_scope": [], "candidate_targets": ["https://acme.com/x"], "notes": ""}
-        with patch.object(cp, "_extract_scope", return_value={"ok": True, "extracted": draft, "error": ""}):
+        with patch.object(cp_intake, "_extract_scope", return_value={"ok": True, "extracted": draft, "error": ""}):
             resp = self.client.post("/api/v1/src-agent/intake", json={"text": "Acme program: acme.com"})
         self.assertEqual(200, resp.status_code)
         body = resp.json()
@@ -237,8 +239,8 @@ class H1IntakeEndpointTests(_ConsoleTestCase):
         draft = {"program": "Acme", "in_scope": {"domains": ["acme.com"], "hosts": [], "urls": []},
                  "out_of_scope": [], "candidate_targets": ["https://acme.com/x"], "notes": ""}
         pages = {"https://acme.com/program": (200, {"content-type": "text/html"}, b"<html>acme.com</html>")}
-        with patch.object(cp, "_http_get_once", side_effect=lambda url, timeout: pages[url]), \
-                patch.object(cp, "_extract_scope", return_value={"ok": True, "extracted": draft, "error": ""}):
+        with patch.object(cp_deps, "_http_get_once", side_effect=lambda url, timeout: pages[url]), \
+                patch.object(cp_intake, "_extract_scope", return_value={"ok": True, "extracted": draft, "error": ""}):
             resp = self.client.post("/api/v1/src-agent/intake", json={"url": "https://acme.com/program"})
         self.assertEqual(200, resp.status_code)
         self.assertEqual("https://acme.com/program", resp.json()["source"])
@@ -246,21 +248,21 @@ class H1IntakeEndpointTests(_ConsoleTestCase):
     def test_redirect_into_a_private_host_is_refused(self) -> None:
         self.login()
         pages = {"https://acme.com/go": (302, {"location": "http://127.0.0.1/secret"}, b"")}
-        with patch.object(cp, "_http_get_once", side_effect=lambda url, timeout: pages[url]):
+        with patch.object(cp_deps, "_http_get_once", side_effect=lambda url, timeout: pages[url]):
             resp = self.client.post("/api/v1/src-agent/intake", json={"url": "https://acme.com/go"})
         self.assertEqual(400, resp.status_code)
         self.assertEqual("invalid_target", resp.json()["detail"])
 
     def test_llm_unavailable_is_503(self) -> None:
         self.login()
-        with patch.object(cp, "_extract_scope", return_value={"ok": False, "extracted": None, "error": "llm_unavailable"}):
+        with patch.object(cp_intake, "_extract_scope", return_value={"ok": False, "extracted": None, "error": "llm_unavailable"}):
             resp = self.client.post("/api/v1/src-agent/intake", json={"text": "x"})
         self.assertEqual(503, resp.status_code)
         self.assertEqual("llm_unavailable", resp.json()["detail"])
 
     def test_unparseable_extraction_is_502(self) -> None:
         self.login()
-        with patch.object(cp, "_extract_scope", return_value={"ok": False, "extracted": None, "error": "extraction_unparseable"}):
+        with patch.object(cp_intake, "_extract_scope", return_value={"ok": False, "extracted": None, "error": "extraction_unparseable"}):
             resp = self.client.post("/api/v1/src-agent/intake", json={"text": "x"})
         self.assertEqual(502, resp.status_code)
 
