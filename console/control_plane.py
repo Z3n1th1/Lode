@@ -1157,7 +1157,7 @@ class ReadOnlyControlPlane:
 
     def set_active_model(self, name: str) -> Dict[str, Any]:
         """R2: 切换活跃 provider。只写 model_active_provider.json(原子替换);
-        model_client._providers() 每次调用时读取该文件并把活跃 provider 提到 failover 队首。
+        core.llm_pool 每次调用时读取该文件并把活跃 provider 提到 failover 队首。
         name 必须命中 model_pool_status.json 里已知 provider(不引入 console 侧不可见的新凭据)。"""
         name = (name or "").strip()
         if not name or len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
@@ -2207,7 +2207,7 @@ def create_app(
 
     @app.post("/api/v1/model/active")
     def model_active(payload: ModelActiveRequest, request: Request) -> JSONResponse:
-        """R2: 切换活跃 LLM provider(写运行时状态文件;model_client 下次调用即生效,无需重启)。"""
+        """R2: 切换活跃 LLM provider(写运行时状态文件;core.llm_pool 下次调用即生效,无需重启)。"""
         _require_session(request)
         result = control_plane.set_active_model(str(payload.name or ""))
         if not result.get("ok"):

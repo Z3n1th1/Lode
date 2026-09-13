@@ -57,7 +57,7 @@ python lode.py console
 ```
 lode.py             统一入口（三平台）
 agents/                     src_agent(LLM循环) / src_chat(对话+工具) / surface_discovery / src_autopilot
-core/                       config / src_blackboard / test_log / model_client / guardrails
+core/                       config / src_blackboard / test_log / llm_pool / llm_client
 references/                 src-pentest-skill.md + knowledge-base/（49 个漏洞类型模块）
 projects/<program>/         每个 H1 项目一个文件夹（project.json + <site>.md + runs/）
 deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）

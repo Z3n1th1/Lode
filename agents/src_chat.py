@@ -35,6 +35,7 @@ from agents.src_agent import (
 )
 from agents.surface_discovery import SurfaceScope, discover_surface, surface_to_dict
 from agents.src_autopilot import SrcAutopilot
+from core import llm_client
 from core.src_blackboard import SrcBlackboard
 from core.test_log import SrcTestLog, TestEvent
 
@@ -791,183 +792,30 @@ _TOOL_DISPATCH["auto_scan"] = _exec_auto_scan
 # Chat function (standalone, no core.capabilities dependency)
 # ---------------------------------------------------------------------------
 
-_LAST_LLM_ERROR = {"error": ""}
-
-
 def _llm_call(messages: List[Dict[str, Any]], *, tools: Optional[List] = None,
               timeout: float = 90.0) -> Optional[Dict[str, Any]]:
-    """Call LLM with messages and optional tools. Returns assistant message dict.
+    """Completion seam over :mod:`core.llm_client` (the single LLM client).
 
-    Uses httpx (robust on Windows) with retry/backoff for transient network
-    errors (WinError 10053/10054, timeouts, 5xx). Sets _LAST_LLM_ERROR on
-    final failure so the caller can surface the real reason.
+    Kept as a module-level name so tests can monkeypatch it. Delegates transport,
+    tier routing (``SRC_REASONER_PREFER``) and cross-provider failover to
+    ``core.llm_client.complete_messages``.
     """
-    api_key = os.environ.get("LLM_API_KEY", "").strip()
-    base_url = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = os.environ.get("LLM_MODEL", "deepseek-chat").strip()
+    from core.llm_client import complete_messages
 
-    if not api_key:
-        _LAST_LLM_ERROR["error"] = "LLM_API_KEY not set"
-        return None
-
-    body: Dict[str, Any] = {
-        "model": model,
-        "temperature": 0.3,
-        "max_tokens": 4096,
-        "messages": messages,
-    }
-    if tools:
-        body["tools"] = tools
-
-    # Try httpx first (best Windows behavior); fall back to urllib.
-    try:
-        import httpx
-        return _llm_call_httpx(httpx, base_url, api_key, body, timeout)
-    except ImportError:
-        pass
-    return _llm_call_urllib(base_url, api_key, body, timeout)
+    prefer = os.environ.get("SRC_REASONER_PREFER", "").strip()
+    return complete_messages(messages, tools=tools, timeout=timeout, prefer=prefer)
 
 
-def _llm_call_httpx(httpx: Any, base_url: str, api_key: str, body: Dict[str, Any],
-                    timeout: float) -> Optional[Dict[str, Any]]:
-    """httpx path: connection pooling + automatic retry on transient errors."""
-    import time as _time
-
-    last_error = ""
-    paths = ("/v1/chat/completions", "/chat/completions")
-    # httpx doesn't auto-retry; do it manually for transient failures.
-    for attempt in range(3):
-        for path in paths:
-            try:
-                with httpx.Client(timeout=timeout, verify=True) as client:
-                    resp = client.post(
-                        base_url + path,
-                        headers={"Content-Type": "application/json",
-                                 "Authorization": f"Bearer {api_key}"},
-                        json=body,
-                    )
-                if resp.status_code == 200:
-                    msg = (resp.json().get("choices") or [{}])[0].get("message", {})
-                    if msg:
-                        _LAST_LLM_ERROR["error"] = ""
-                        return msg
-                    last_error = f"empty response: {resp.text[:200]}"
-                    break
-                if resp.status_code in (401, 404) and path != paths[-1]:
-                    continue
-                if tools_present(body) and resp.status_code in (400, 422):
-                    body.pop("tools", None)
-                    continue
-                if resp.status_code >= 500:
-                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    break  # retry
-                last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
-                _LAST_LLM_ERROR["error"] = last_error
-                return None
-            except Exception as exc:  # noqa: BLE001 - retry transient network errors
-                last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
-                break  # retry
-        if attempt < 2:
-            _time.sleep(1.5 * (attempt + 1))
-    _LAST_LLM_ERROR["error"] = last_error or "unknown"
-    return None
-
-
-def tools_present(body: Dict[str, Any]) -> bool:
-    return bool(body.get("tools"))
-
-
-def _llm_call_urllib(base_url: str, api_key: str, body: Dict[str, Any],
-                     timeout: float) -> Optional[Dict[str, Any]]:
-    """urllib fallback (original implementation, with error detail captured)."""
-    import urllib.error
-    import urllib.request as _req
-
-    payload = json.dumps(body).encode("utf-8")
-    last_error = ""
-    paths = ("/v1/chat/completions", "/chat/completions")
-    for path in paths:
-        request = _req.Request(base_url + path, data=payload, headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }, method="POST")
-        try:
-            with _req.urlopen(request, timeout=timeout) as resp:
-                result = json.loads(resp.read(512_000))
-                msg = (result.get("choices") or [{}])[0].get("message", {})
-                if msg:
-                    _LAST_LLM_ERROR["error"] = ""
-                    return msg
-                last_error = "empty response"
-                break
-        except urllib.error.HTTPError as exc:
-            try:
-                err_body = exc.read(500).decode("utf-8", "replace")
-            except Exception:
-                err_body = ""
-            last_error = f"HTTP {exc.code}: {err_body[:300]}"
-            if exc.code in (401, 404) and path != paths[-1]:
-                continue
-            if body.get("tools") and exc.code in (400, 422):
-                body.pop("tools", None)
-                payload = json.dumps(body).encode("utf-8")
-                continue
-            break
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
-            break
-    _LAST_LLM_ERROR["error"] = last_error or "unknown"
-    return None
-
-
-MAX_TOOL_ROUNDS = 6
+MAX_TOOL_ROUNDS = llm_client.MAX_TOOL_ROUNDS
 # Each tool_call in the assistant message MUST get a matching `tool` response,
 # otherwise the next request fails with 400 ("must be followed by tool messages
 # responding to each tool_call_id"). We therefore cap the number of calls we
 # advertise in the assistant message to what we are willing to answer.
-MAX_TOOL_CALLS_PER_ROUND = 8
+MAX_TOOL_CALLS_PER_ROUND = llm_client.MAX_TOOL_CALLS_PER_ROUND
 
-
-def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Drop protocol-invalid tool messages so the request always validates.
-
-    OpenAI-style providers require that every assistant message with
-    `tool_calls` is immediately followed by one `tool` message per call id.
-    Corrupted history (a truncated round, a process kill mid-round, or an old
-    session written before this guard existed) would otherwise poison every
-    subsequent turn. This rebuilds a valid sequence: an assistant tool_calls
-    message with incomplete responses is downgraded to plain text, and orphan
-    `tool` messages are dropped.
-    """
-    out: List[Dict[str, Any]] = []
-    i, n = 0, len(messages)
-    while i < n:
-        m = messages[i]
-        role = m.get("role")
-        if role == "assistant" and m.get("tool_calls"):
-            needed = [str(c.get("id", "")) for c in m["tool_calls"]]
-            j = i + 1
-            following: List[Dict[str, Any]] = []
-            while j < n and messages[j].get("role") == "tool":
-                following.append(messages[j])
-                j += 1
-            got = {str(t.get("tool_call_id", "")) for t in following}
-            if all(cid in got for cid in needed):
-                out.append(m)
-                out.extend(following)
-            else:
-                text = str(m.get("content") or "").strip()
-                if text:
-                    out.append({"role": "assistant", "content": text})
-            i = j
-            continue
-        if role == "tool":
-            # Orphan tool message with no preceding tool_calls message.
-            i += 1
-            continue
-        out.append(m)
-        i += 1
-    return out
+# Protocol guard (see core.llm_client.sanitize_messages). Re-exported under the
+# historical name so existing tests / callers keep working.
+_sanitize_messages = llm_client.sanitize_messages
 
 
 
@@ -981,60 +829,37 @@ def chat(session: SrcChatSession, user_message: str, *, timeout: float = 90.0) -
     # tool_calls / orphan tool messages, which the provider rejects with 400).
     messages = [{"role": "system", "content": SRC_SYSTEM_PROMPT}] + _sanitize_messages(session.messages[-40:])
 
-    for _round in range(MAX_TOOL_ROUNDS):
-        msg = _llm_call(messages, tools=SRC_TOOLS, timeout=timeout)
-        if msg is None:
-            err = _LAST_LLM_ERROR.get("error", "unknown")
-            hint = ""
-            if "429" in err or "rate" in err.lower():
-                hint = "（DeepSeek 限流，等几秒重试）"
-            elif "timeout" in err.lower() or "Timeout" in err:
-                hint = "（请求超时，可减少单次工具调用数量重试）"
-            reply = f"LLM 调用失败{hint}\n\n错误详情: {err}"
-            session.messages.append({"role": "assistant", "content": reply})
-            session.persist()
-            return reply
+    def _dispatch(name: str, args: Dict[str, Any]) -> str:
+        handler = _TOOL_DISPATCH.get(name)
+        if handler:
+            return handler(session, args)
+        return json.dumps({"error": f"unknown tool: {name}"})
 
-        tool_calls = msg.get("tool_calls") or []
-        content = (msg.get("content") or "").strip()
+    def _on_tool_call(name: str, args: Dict[str, Any]) -> None:
+        _push_event(session, "tool_call", {"tool": name, "args_preview": str(args)[:200]})
 
-        if not tool_calls:
-            # Final text response
-            session.messages.append({"role": "assistant", "content": content})
-            session.persist()
-            return content
+    result = llm_client.run_tool_loop(
+        messages,
+        tools=SRC_TOOLS,
+        dispatch=_dispatch,
+        max_rounds=MAX_TOOL_ROUNDS,
+        max_calls_per_round=MAX_TOOL_CALLS_PER_ROUND,
+        timeout=timeout,
+        complete_fn=_llm_call,
+        on_tool_call=_on_tool_call,
+    )
 
-        # Execute tool calls. Trim first so the assistant message only declares
-        # calls we will actually answer — otherwise the extra calls are orphaned
-        # and the next request 400s.
-        calls = tool_calls[:MAX_TOOL_CALLS_PER_ROUND]
-        messages.append({"role": "assistant", "content": content, "tool_calls": calls})
+    if result["error"] and not result["text"]:
+        err = result["error"]
+        hint = ""
+        if "429" in err or "rate" in err.lower():
+            hint = "（DeepSeek 限流，等几秒重试）"
+        elif "timeout" in err.lower() or "Timeout" in err:
+            hint = "（请求超时，可减少单次工具调用数量重试）"
+        reply = f"LLM 调用失败{hint}\n\n错误详情: {err}"
+    else:
+        reply = result["text"]
 
-        for call in calls:
-            fn = call.get("function") or {}
-            name = str(fn.get("name", ""))
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-
-            handler = _TOOL_DISPATCH.get(name)
-            if handler:
-                _push_event(session, "tool_call", {"tool": name, "args_preview": str(args)[:200]})
-                result = handler(session, args)
-            else:
-                result = json.dumps({"error": f"unknown tool: {name}"})
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": str(call.get("id", "")),
-                "content": result[:8000],
-            })
-
-    # Tool round exhausted — get final summary
-    messages.append({"role": "user", "content": "Summarize what you found so far."})
-    msg = _llm_call(messages, timeout=timeout)
-    final = (msg.get("content", "") if msg else "Tool execution limit reached.").strip()
-    session.messages.append({"role": "assistant", "content": final})
+    session.messages.append({"role": "assistant", "content": reply})
     session.persist()
-    return final
+    return reply

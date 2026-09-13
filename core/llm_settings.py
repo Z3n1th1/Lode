@@ -2,8 +2,9 @@
 
 Stores the operator's own provider list (``name | base_url | api_key | model``)
 plus the reasoner/explorer tier selection in a local JSON file, and projects
-them into the environment variables that :mod:`core.model_client` already
-understands — so the Console can configure models without editing ``.env``.
+them into the environment variables that :mod:`core.llm_pool` (and
+:mod:`core.llm_client`) understand — so the Console can configure models
+without editing ``.env``.
 
 Credential discipline: keys exist only in this local file (under the
 git-ignored ``lode-state/`` directory) and in process memory. They are never
@@ -28,7 +29,7 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 TIER_ROLES = ("reasoner", "explorer")
 
-# 这些 env var 由本模块负责投影(供 core.model_client / agents 消费)。
+# 这些 env var 由本模块负责投影(供 core.llm_pool / core.llm_client / agents 消费)。
 PROVIDERS_ENV = "LLM_PROVIDERS"
 LEGACY_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
 PREFER_ENV = {"reasoner": "SRC_REASONER_PREFER", "explorer": "SRC_EXPLORER_PREFER"}

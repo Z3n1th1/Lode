@@ -2,7 +2,7 @@
 
 Borrows Cairn's 3-phase OODA (Bootstrap/Reason/Explore) and Muteki's
 cheap-planner / expensive-executor split.  Uses the existing blackboard,
-scope checker, surface fetcher, and model_client provider pool.
+scope checker, surface fetcher, and the shared LLM client (core.llm_client).
 
 The agent NEVER performs POST, form submission, or state mutation on the
 target.  All HTTP traffic is GET-only through the scope-checked fetcher
@@ -44,74 +44,31 @@ except Exception:
 
 
 def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
-    """LLM completion through the shared provider pool.
+    """LLM completion through the single shared client.
 
-    Delegates to :func:`core.llm_pool.complete` so the provider pool, the
-    ``prefer``/``only`` tier routing (smart Reasoner vs cheap Explorer) and
-    cross-provider failover all actually apply. Falls back to a standalone
-    OpenAI-compatible call on the legacy env trio only if ``core.llm_pool``
-    cannot be imported, so this still works in a stripped-down checkout.
+    Delegates to :func:`core.llm_client.complete_messages` so the provider pool,
+    the ``prefer``/``only`` tier routing (smart Reasoner vs cheap Explorer) and
+    cross-provider failover all actually apply — one transport for the whole
+    product. Returns ``None`` when the pool is empty or every provider failed.
     """
     timeout = kwargs.get("timeout", 60.0)
     prefer = str(kwargs.get("prefer") or "")
     only = bool(kwargs.get("only") or False)
     try:
-        from core.llm_pool import complete as _pool_complete
-    except Exception:  # noqa: BLE001 - fall back to the standalone client below
-        _pool_complete = None
-    if _pool_complete is not None:
-        try:
-            return _pool_complete(system, user, timeout=timeout, prefer=prefer, only=only)
-        except TypeError:
-            # A partial pool module without the prefer/only kwargs.
-            try:
-                return _pool_complete(system, user, timeout=timeout)
-            except Exception:  # noqa: BLE001
-                return None
-        except Exception:  # noqa: BLE001
-            return None
-
-    # ---- standalone fallback: legacy single-key env, no pool, no failover ----
-    import urllib.error
-    import urllib.request as _req
-
-    api_key = os.environ.get("LLM_API_KEY", "").strip()
-    base_url = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = os.environ.get("LLM_MODEL", "deepseek-chat").strip()
-
-    if not api_key:
+        from core.llm_client import complete_messages
+    except Exception:  # noqa: BLE001
         return None
-
-    body = json.dumps({
-        "model": model,
-        "temperature": 0.2,
-        "max_tokens": 2048,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }).encode("utf-8")
-
-    for path in ("/v1/chat/completions", "/chat/completions"):
-        url = base_url + path
-        request = _req.Request(url, data=body, headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }, method="POST")
-        try:
-            with _req.urlopen(request, timeout=timeout) as resp:
-                payload = json.loads(resp.read(512_000))
-                text = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "")
-                if text and text.strip():
-                    return text.strip()
-                return None
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 404) and path != "/chat/completions":
-                continue
-            return None
-        except Exception:
-            return None
-    return None
+    try:
+        message = complete_messages(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            timeout=timeout, prefer=prefer, only=only, max_tokens=2048, temperature=0.2,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not message:
+        return None
+    text = str(message.get("content") or "").strip()
+    return text or None
 
 
 # ---------------------------------------------------------------------------

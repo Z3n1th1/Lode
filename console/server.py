@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 - settings are advisory
             pass
     # Keep the header's active-model switch and the agent's provider pool on the
-    # same file (model_client otherwise defaults to a non-existent /opt path).
+    # same file (core.llm_pool otherwise defaults to a non-existent /opt path).
     os.environ.setdefault("LLM_ACTIVE_PROVIDER_FILE", str(state_dir / "model_active_provider.json"))
 
     password = os.environ.get("LODE_ADMIN_PASSWORD", "")

@@ -545,13 +545,19 @@ class TestTierRouting(unittest.TestCase):
             hits.append((url.split("//")[1].split("/")[0], json.loads(body)["model"]))
             return {"choices": [{"message": {"content": "ok"}}]}
 
-        return pool, patch.object(pool, "provider_pool", lambda: list(self._POOL)), \
-            patch.object(pool, "_post", fake_post)
+        # The agent routes through core.llm_client, which prefers httpx. Blanking
+        # the httpx module forces the urllib transport — i.e. the pool._post seam
+        # this test mocks. (The httpx transport has its own tests in
+        # tests/test_llm_client.py.) Routing is what these tests assert.
+        return (pool,
+                patch.object(pool, "provider_pool", lambda: list(self._POOL)),
+                patch.object(pool, "_post", fake_post),
+                patch.dict(sys.modules, {"httpx": None}))
 
     def test_reasoner_and_explorer_hit_different_providers(self):
         hits: List[Tuple[str, str]] = []
-        pool, pool_patch, post_patch = self._patched_pool(hits)
-        with pool_patch, post_patch:
+        pool, pool_patch, post_patch, httpx_patch = self._patched_pool(hits)
+        with pool_patch, post_patch, httpx_patch:
             with tempfile.TemporaryDirectory() as tmp:
                 cfg = AgentConfig(
                     blackboard_path=Path(tmp) / "bb.json", scope=_make_scope(),
@@ -569,7 +575,7 @@ class TestTierRouting(unittest.TestCase):
     def test_prefer_falls_back_to_other_providers_on_failure(self):
         """prefer only reorders; a dead preferred provider still fails over."""
         hits: List[Tuple[str, str]] = []
-        pool, pool_patch, post_patch = self._patched_pool(hits)
+        pool, pool_patch, post_patch, httpx_patch = self._patched_pool(hits)
 
         def flaky_post(url, body, api_key, timeout):
             hits.append((url.split("//")[1].split("/")[0], json.loads(body)["model"]))
@@ -577,7 +583,7 @@ class TestTierRouting(unittest.TestCase):
                 raise OSError("boom")
             return {"choices": [{"message": {"content": "ok"}}]}
 
-        with pool_patch, patch.object(pool, "_post", flaky_post):
+        with pool_patch, patch.object(pool, "_post", flaky_post), httpx_patch:
             text = pool.complete("s", "u", timeout=1, prefer="smart")
 
         self.assertEqual("ok", text)
@@ -585,8 +591,8 @@ class TestTierRouting(unittest.TestCase):
 
     def test_only_restricts_to_the_matched_provider(self):
         hits: List[Tuple[str, str]] = []
-        pool, pool_patch, post_patch = self._patched_pool(hits)
-        with pool_patch, post_patch:
+        pool, pool_patch, post_patch, httpx_patch = self._patched_pool(hits)
+        with pool_patch, post_patch, httpx_patch:
             self.assertIsNone(pool.complete("s", "u", timeout=1, prefer="no-such-model", only=True))
         self.assertEqual([], hits)
 

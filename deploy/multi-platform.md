@@ -211,7 +211,6 @@ launchctl load ~/Library/LaunchAgents/com.lode.console.plist
 
 代码层面对平台差异做了抽象：
 - `core/config.py` 自动加载 `.env`（三平台一致）
-- `core/model_client.py` 的 `exec_workdir()` 区分 `os.name == "nt"`
 - `lode.py` 统一入口（三平台一致）
 
 ---

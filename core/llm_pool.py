@@ -1,8 +1,8 @@
 """Self-contained LLM provider pool (stdlib only).
 
-:mod:`core.model_client` implements the same idea but cannot be imported in this
-checkout — it requires ``core/capabilities.py``, which is not part of this repo —
-and nothing imports it. This is the pool the SRC agent actually consumes:
+This module owns provider parsing and routing. It is the single source of the
+provider pool, tier routing and failover used by the SRC agent and (through
+:mod:`core.llm_client`) by the interactive chat:
 
 * providers come from ``LLM_PROVIDERS="name|base_url|api_key|model,..."`` or the
   legacy single-key trio ``LLM_API_KEY``/``LLM_BASE_URL``/``LLM_MODEL``;
@@ -125,6 +125,22 @@ def provider_pool() -> List[Dict[str, str]]:
     return providers
 
 
+def ordered_pool(prefer: str = "", only: bool = False) -> List[Dict[str, str]]:
+    """The pool ordered for one call: active provider first, tier matches next.
+
+    ``prefer`` is a case-insensitive substring matched against ``name + model``;
+    matches are promoted to the front. ``only=True`` restricts the result to the
+    matches (no failover to a different model). Shared by :func:`complete` and
+    :func:`complete_messages`, and by :mod:`core.llm_client`.
+    """
+    pool = provider_pool()
+    if not pool or not prefer:
+        return pool
+    needle = prefer.lower()
+    match = [p for p in pool if needle in (str(p.get("name")) + str(p.get("model"))).lower()]
+    return match if only else (match + [p for p in pool if p not in match])
+
+
 def _endpoint_paths(base_url: str) -> List[str]:
     """Some gateways expose /chat/completions, others only /v1/chat/completions."""
     return ["/chat/completions"] if base_url.endswith("/v1") else [
@@ -173,6 +189,77 @@ def _try_provider(provider: Dict[str, str], body_for: Any, timeout: float) -> Op
     return None
 
 
+def messages_payload(model: str, messages: List[Dict[str, Any]], tools: Any = None, *,
+                     max_tokens: int = 4096, temperature: float = 0.3) -> bytes:
+    """OpenAI-compatible chat body for a full message list (+ optional tools)."""
+    body: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    if tools:
+        body["tools"] = tools
+    return json.dumps(body).encode("utf-8")
+
+
+def _try_provider_message(provider: Dict[str, str], messages: List[Dict[str, Any]],
+                          tools: Any, timeout: float, max_tokens: int,
+                          temperature: float) -> Optional[Dict[str, Any]]:
+    """One provider for a message list, with endpoint fallback + tools-strip.
+
+    Some providers reject a ``tools`` payload with 400/422 (unsupported feature);
+    retrying once without tools keeps a tool-capable request viable on them.
+    """
+    base = str(provider.get("base_url") or "").rstrip("/")
+    key = str(provider.get("api_key") or "").strip()
+    model = str(provider.get("model") or "").strip() or DEFAULT_MODEL
+    if not base or not key:
+        return None
+    paths = _endpoint_paths(base)
+    active_tools = tools
+    for index, path in enumerate(paths):
+        body = messages_payload(model, messages, active_tools,
+                                max_tokens=max_tokens, temperature=temperature)
+        try:
+            payload = _post(base + path, body, key, timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 404) and index != len(paths) - 1:
+                continue
+            if active_tools and exc.code in (400, 422):
+                active_tools = None  # provider can't do tools; retry plain
+                continue
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+        message = ((payload.get("choices") or [{}])[0].get("message") or {})
+        if message:
+            return message
+        return None
+    return None
+
+
+def complete_messages(messages: List[Dict[str, Any]], *, tools: Any = None,
+                      timeout: float = 90.0, prefer: str = "", only: bool = False,
+                      max_tokens: int = 4096, temperature: float = 0.3,
+                      ) -> Optional[Dict[str, Any]]:
+    """Message-list completion with tier routing, failover and tool support.
+
+    Returns the raw assistant message dict (``{role, content, tool_calls?}``) or
+    ``None`` when the pool is empty / every provider failed. This is the
+    stdlib-only sibling of :func:`complete`; :mod:`core.llm_client` prefers an
+    httpx transport and falls back to this.
+    """
+    pool = ordered_pool(prefer, only)
+    if not pool:
+        return None
+    for provider in pool:
+        message = _try_provider_message(provider, messages, tools, timeout, max_tokens, temperature)
+        if message is not None:
+            return message
+    return None
+
+
 def complete(system: str, user: str, *, timeout: float = 60.0, prefer: str = "",
              only: bool = False) -> Optional[str]:
     """One-shot completion with tier routing and cross-provider failover.
@@ -182,13 +269,7 @@ def complete(system: str, user: str, *, timeout: float = 60.0, prefer: str = "",
     matches (no failover to a different model). Returns ``None`` when the pool is
     empty or every provider failed.
     """
-    pool = provider_pool()
-    if not pool:
-        return None
-    if prefer:
-        needle = prefer.lower()
-        match = [p for p in pool if needle in (str(p.get("name")) + str(p.get("model"))).lower()]
-        pool = match if only else (match + [p for p in pool if p not in match])
+    pool = ordered_pool(prefer, only)
     if not pool:
         return None
     for provider in pool:
@@ -254,9 +335,12 @@ __all__ = [
     "legacy_config",
     "parse_providers",
     "provider_pool",
+    "ordered_pool",
     "active_provider_file",
     "get_active_provider_name",
     "set_active_provider",
+    "messages_payload",
     "complete",
+    "complete_messages",
     "probe_provider",
 ]
