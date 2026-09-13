@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,60 +26,7 @@ from core.file_lock import AdvisoryFileLock
 from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
-try:                                   # 加密密钥库(可选):有则支持密码解锁明文查看
-    from core import key_vault         # type: ignore
-except Exception:                      # noqa: BLE001
-    key_vault = None                   # type: ignore
 
-try:                                   # #76 情报数据源管理(可选;control_plane 以 root 跑,可直写 sources.json)
-    from core import intel_sources     # type: ignore
-except Exception:                      # noqa: BLE001
-    intel_sources = None               # type: ignore
-
-try:                                   # #53 指纹自修正卡片(可选;console admin=人工门,可 propose/approve/reject)
-    from core import fingerprint_corrections as fp_corr  # type: ignore
-except Exception:                      # noqa: BLE001
-    fp_corr = None                     # type: ignore
-
-try:                                   # #77 attack-graph 联动黑板(只读投影候选链)
-    from core import attack_graph      # type: ignore
-except Exception:                      # noqa: BLE001
-    attack_graph = None                # type: ignore
-
-try:                                   # #77 PTT 活树(只读投影层级任务树)
-    from core import ptt_tree          # type: ignore
-except Exception:                      # noqa: BLE001
-    ptt_tree = None                    # type: ignore
-
-try:                                   # #79 sink 签名库(代码审计护城河;console admin=人工门 approve/reject)
-    from core import sink_kb           # type: ignore
-except Exception:                      # noqa: BLE001
-    sink_kb = None                     # type: ignore
-
-try:                                   # #80 PoC 审批(搬进 Vue,退役 pa-poc-admin;console admin=人工门)
-    from core import poc_sync          # type: ignore
-except Exception:                      # noqa: BLE001
-    poc_sync = None                    # type: ignore
-
-try:                                   # #70 免费 socks 池(验活入池 + 手动添加)
-    from core import socks_pool        # type: ignore
-except Exception:                      # noqa: BLE001
-    socks_pool = None                  # type: ignore
-
-try:                                   # #74 出站 egress 门(被拦列表 + 放行 allowlist + mihomo 规则)
-    from core import egress_gate       # type: ignore
-except Exception:                      # noqa: BLE001
-    egress_gate = None                 # type: ignore
-
-try:                                   # #60 自进化反思卡(console admin=人工门 approve/reject)
-    from core import self_evolve       # type: ignore
-except Exception:                      # noqa: BLE001
-    self_evolve = None                 # type: ignore
-
-try:                                   # #21 代理订阅入口 + socks 入池 mihomo 片段
-    from core import proxy_subscriptions  # type: ignore
-except Exception:                      # noqa: BLE001
-    proxy_subscriptions = None         # type: ignore
 
 try:                                   # F1 对话台芯:读 Strix agents.db 真实多智能体对话
     from core import strix_conversation  # type: ignore
@@ -119,22 +66,6 @@ ALLOWED_BLOCK_REASONS = frozenset(
         "tool_runner_blocked",
     }
 )
-
-
-_KEY_UNLOCKS: Dict[str, Tuple[str, float]] = {}   # token -> (vault_password, expires);服务端保存,绝不入 cookie
-_KEY_UNLOCK_TTL = 2 * 60 * 60                      # 解锁 2h 后自动回掩
-
-
-def _unlock_prune(now: float) -> None:
-    for t in [t for t, (_, exp) in _KEY_UNLOCKS.items() if exp <= now]:
-        _KEY_UNLOCKS.pop(t, None)
-
-
-def _unlock_pw_for(token: str) -> Optional[str]:
-    now = time.time()
-    _unlock_prune(now)
-    ent = _KEY_UNLOCKS.get(token or "")
-    return ent[0] if ent and ent[1] > now else None
 
 
 class LoginRequest(BaseModel):
@@ -460,52 +391,10 @@ class ProjectIntakeRequest(BaseModel):
     toggles: Dict[str, Any] = {}
 
 
-class IntelSourceAddRequest(BaseModel):
-    kind: str = "page_watch"
-    name: str = ""
-    url: str = ""
-    extract_hint: str = ""
-    query: str = ""
-    interval_sec: int = 1800
-
-
-class IntelSourceToggleRequest(BaseModel):
-    id: str
-    enabled: bool
-
-
 class SessionGuidanceRequest(BaseModel):
     session_id: str
     target: str
     guidance: str
-
-
-class FingerprintCorrectionProposeRequest(BaseModel):
-    kind: str
-    name: str
-    evidence: str
-    proposed: Dict[str, Any] | None = None
-    target: str | None = None
-
-
-class FingerprintCorrectionDecisionRequest(BaseModel):
-    id: str
-    decision: str
-    reason: str | None = None
-
-
-class SinkKbDecisionRequest(BaseModel):
-    id: str
-    decision: str
-
-
-class PocConfirmRequest(BaseModel):
-    id: str
-    approve: bool
-
-
-class SocksAddRequest(BaseModel):
-    addr: str
 
 
 class ModelActiveRequest(BaseModel):
@@ -542,26 +431,6 @@ class SrcIntakeRequest(BaseModel):
     """Read a HackerOne program page (URL) or pasted text into a scope draft."""
     url: str = ""
     text: str = ""
-
-
-class EgressAllowRequest(BaseModel):
-    host: str
-    reason: str | None = None
-
-
-class EvolveDecisionRequest(BaseModel):
-    id: str
-    decision: str
-
-
-class ProxySubAddRequest(BaseModel):
-    url: str
-    name: str | None = None
-
-
-class ProxySubToggleRequest(BaseModel):
-    id: str
-    enabled: bool
 
 
 class SrcAgentStartRequest(BaseModel):
@@ -981,37 +850,6 @@ class ReadOnlyControlPlane:
         except Exception:  # noqa: BLE001
             return None
 
-    def intel(self, limit: int = 60) -> List[Dict[str, Any]]:
-        rows = self._read_jsonl_plain(self.state_dir / "intel_feed.jsonl", limit=limit)
-        # The decoupled radar collector stores immutable run artifacts under
-        # ``<data_dir>/runs/<run_id>/candidates.jsonl``.  Project its latest
-        # candidates into the legacy table shape without copying raw evidence.
-        if not rows:
-            radar_dir = Path(os.environ.get("PA_INTEL_DATA_DIR", str(self.state_dir / "intel")))
-            try:
-                run_files = sorted(
-                    (p for p in radar_dir.glob("runs/*/candidates.jsonl") if p.is_file() and not p.is_symlink()),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-                if run_files:
-                    rows = self._read_jsonl_plain(run_files[0], limit=limit)
-            except OSError:
-                rows = []
-        rows.reverse()
-        return [{
-            "ts": r.get("ts"), "cve": _text(r.get("cve", ""), limit=40),
-            "date": _text(r.get("date", ""), limit=12),  # 首次出现(NVD披露日)
-            "update_reason": _text(r.get("update_reason", ""), limit=40),  # 状态变化原因(空=首次)
-            "severity": _text(r.get("severity", ""), limit=16), "cvss": _text(r.get("cvss", ""), limit=90),
-            "title": _text(r.get("title", ""), limit=220), "summary": _text(r.get("summary", ""), limit=320),
-            "value": _text(r.get("value", ""), limit=300), "kind": _text(r.get("kind", ""), limit=32),
-            "source": _text(r.get("source", ""), limit=120), "tags": [_text(x, limit=32) for x in (r.get("tags") or [])[:8]],
-            "score": _number(r.get("score"), 0.0), "has_poc": bool(r.get("has_poc")),
-            "poc_source": _text(r.get("poc_source", ""), limit=40), "in_the_wild": bool(r.get("in_the_wild")),
-            "refs": [_text(x, limit=220) for x in (r.get("refs") or [])[:3] if x],
-        } for r in rows]
-
     def findings(self, limit: int = 200) -> List[Dict[str, Any]]:
         rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
         # 热修(来源可读):task → target 映射,每条发现带出目标与 sarif 落盘时间
@@ -1040,35 +878,6 @@ class ReadOnlyControlPlane:
                 continue
         out.sort(key=lambda f: rank.get(str(f.get("severity")).lower(), 0), reverse=True)
         return out[:limit]
-
-    def keys(self, unlock_pw: Optional[str] = None) -> List[Dict[str, Any]]:
-        rows = self._read_jsonl_plain(self._data_dir() / "keyleak" / "seen_keys.jsonl")
-        rows = [k for k in rows if not k.get("dropped")]   # 滤掉 DeepSeek 误报丢弃行(否则空 repo 幽灵行混入面板)
-        rows.reverse()
-        out: List[Dict[str, Any]] = []
-        for k in rows[:300]:
-            enc = str(k.get("enc") or "")
-            rec = {
-                "service": _text(k.get("service") or k.get("type_id") or "?", limit=40),
-                "repo": _text(k.get("repo", ""), limit=120),
-                "path": _text(k.get("path", ""), limit=200),                # 源头文件路径
-                "source_url": _text(k.get("url", ""), limit=300),           # GitHub 出处(仅展示外链,绝不 fetch)
-                "usable": k.get("usable"),
-                "status": _text(k.get("status", ""), limit=12),             # live/dead(回收站)/retry/none
-                "tail": _text(k.get("tail", ""), limit=8),
-                "detail": _text(k.get("detail", ""), limit=160),            # 只读验活详情
-                "assoc_url": _text(k.get("assoc_url", ""), limit=200),   # LLM 从片段推断的关联端点(仅展示,未探测)
-                "assoc_kind": _text(k.get("assoc_kind", ""), limit=24),
-                "has_enc": bool(enc),                                       # 是否有加密封存的全 key
-                "key": "",                                                  # 明文仅在密码解锁窗口内填充
-                "ts": k.get("ts"),
-            }
-            if unlock_pw and enc and key_vault is not None:                 # 解锁窗口:解出明文
-                pt = key_vault.unseal(enc, unlock_pw)
-                if pt:
-                    rec["key"] = pt
-            out.append(rec)
-        return out
 
     def profiles_detail(self) -> List[Dict[str, Any]]:
         """7 档 EngagementProfile 明细(镜像 canonical operation_profile 注册表),给 Profiles 页。"""
@@ -1412,39 +1221,6 @@ class ReadOnlyControlPlane:
             })
         return out[:MAX_VISIBLE_ITEMS]
 
-    def fingerprint_corrections(self, status: str = "") -> List[Dict[str, Any]]:
-        """#53:列指纹自修正卡(只读投影;可按 status 过滤)。直接读文件,不触发 apply。"""
-        d = self.state_dir / "fingerprint_corrections"
-        out: List[Dict[str, Any]] = []
-        try:
-            files = sorted(d.glob("FC-*.json"), key=lambda p: p.name, reverse=True)
-        except OSError:
-            return out
-        for p in files[:MAX_VISIBLE_ITEMS * 3]:
-            j = self._read_json_file(p)
-            if not isinstance(j, dict) or j.get("schema") != "FingerprintCorrectionCard/v1":
-                continue
-            st = _text(j.get("status"), limit=16) or "pending"
-            if status and st != status:
-                continue
-            prop = j.get("proposed") if isinstance(j.get("proposed"), dict) else {}
-            out.append({
-                "id": _text(j.get("id"), limit=64),
-                "kind": _text(j.get("kind"), limit=24),
-                "name": _text(j.get("name"), limit=64),
-                "evidence": _text(j.get("evidence"), limit=600),
-                "target": _text(j.get("target"), limit=200),
-                "source": _text(j.get("source"), limit=40),
-                "status": st,
-                "poc_tags": [_text(x, limit=32) for x in (prop.get("poc_tags") or [])][:12],
-                "risk": _text(prop.get("risk"), limit=16),
-                "created_at": _number(j.get("created_at")),
-                "decided_at": _number(j.get("decided_at")),
-                "applied_at": _number(j.get("applied_at")),
-            })
-        out.sort(key=lambda c: c.get("created_at", 0), reverse=True)
-        return out[:MAX_VISIBLE_ITEMS * 2]
-
     def _has_report(self, task_id: str) -> bool:
         d = self._task_dirs().get(task_id)
         if not d:
@@ -1471,114 +1247,10 @@ class ReadOnlyControlPlane:
             if s in sev:
                 sev[s] += 1
         reports = [{"task_id": tid} for tid in sorted(task_ids) if self._has_report(tid)]
-        ag: Dict[str, Any] = {}
-        if attack_graph is not None:
-            try:  # #77 联动候选链(只读投影;闭合危险链的深利用仍走人工门)
-                ag = attack_graph.blackboard_summary(self.state_dir, det.get("target", ""))
-            except Exception:  # noqa: BLE001
-                ag = {}
-        ptt: Dict[str, Any] = {}
-        if ptt_tree is not None:
-            try:  # #77 PTT 活树投影(层级任务树 + 高价值未完成叶子)
-                _t = ptt_tree.PTTree.load(self.state_dir, det.get("target", ""))
-                if _t.nodes:
-                    ptt = _t.summary()
-            except Exception:  # noqa: BLE001
-                ptt = {}
         return {
             "project_id": project_id, "target": det.get("target", ""),
             "session_count": len(det.get("sessions", [])),
             "severity": sev, "findings": proj_findings[:200], "reports": reports,
-            "attack_graph": ag, "ptt": ptt,
-        }
-
-    def fleet(self) -> Dict[str, Any]:
-        """P5-c 舰队:跨项目当前在跑的 agent(task)+ 各自最新一步轨迹(在干嘛)。并发上限=1 时通常 0-1 条。"""
-        running_states = {"reserved", "running", "recovery_pending"}
-        running = [t for t in self._task_snapshots() if t.get("status") in running_states]
-        out: List[Dict[str, Any]] = []
-        for t in running[:MAX_VISIBLE_ITEMS]:
-            sid = t.get("goal_id") or t.get("task_id") or ""
-            last_summary, last_kind = "", ""
-            try:
-                traj = self.session_trajectory(sid)
-                if traj:
-                    last_summary = _text(traj[-1].get("summary"), limit=200)
-                    last_kind = _text(traj[-1].get("kind"), limit=48)
-            except Exception:  # noqa: BLE001
-                pass
-            out.append({
-                "task_id": t.get("task_id", ""), "project_id": self._project_slug(t.get("target", "")),
-                "target": t.get("target", ""), "status": t.get("status", ""),
-                "run_id": t.get("run_id", ""), "created_at": t.get("created_at"),
-                "last_kind": last_kind, "last_event": last_summary,
-            })
-        return {"count": len(running), "running": out}
-
-    def asset_changes(self, limit: int = 60) -> List[Dict[str, Any]]:
-        """#75 资产 hash 变化事件(agent 侧写的 asset_change_feed.jsonl;只读投影,新→旧)。"""
-        rows = self._read_jsonl_plain(self.state_dir / "asset_change_feed.jsonl", limit=limit)
-        rows.reverse()
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            if not isinstance(r, dict) or r.get("schema") != "AssetChangeEvent/v1":
-                continue
-            out.append({
-                "ts": r.get("ts"),
-                "target": _text(r.get("target"), limit=200),
-                "summary": _text(r.get("summary"), limit=200),
-                "new_endpoints": [_text(x, limit=160) for x in (r.get("new_endpoints") or [])[:20]],
-                "changed_artifacts": [_text(x, limit=200) for x in (r.get("changed_artifacts") or [])[:20]],
-                "new_artifacts": [_text(x, limit=200) for x in (r.get("new_artifacts") or [])[:20]],
-                "aggregate_after": _text(r.get("aggregate_after"), limit=64),
-            })
-        return out
-
-    def list_intel_sources(self) -> List[Dict[str, Any]]:
-        """#76 情报数据源列表(读 sources.json;缺则 seed builtin+feeds 投影)。"""
-        if intel_sources is None:
-            return []
-        try:
-            srcs = intel_sources.load_sources(self.state_dir)
-        except Exception:  # noqa: BLE001
-            return []
-        out: List[Dict[str, Any]] = []
-        for s in (srcs or [])[:100]:
-            if not isinstance(s, dict):
-                continue
-            out.append({
-                "id": _text(s.get("id"), limit=64), "kind": _text(s.get("kind"), limit=24),
-                "name": _text(s.get("name"), limit=80), "url": _text(s.get("url"), limit=300),
-                "enabled": bool(s.get("enabled")), "trusted": bool(s.get("trusted")),
-                "tags": [_text(t, limit=24) for t in (s.get("tags") or [])[:6]],
-                "status": _text(s.get("last_status") or "untested", limit=24),
-                "last_run": _text(s.get("last_run"), limit=32),
-                "last_error": _text(s.get("last_error"), limit=300),
-                "item_count": int(_number(s.get("item_count"), 0.0)),
-                "query": _text(s.get("query"), limit=256),
-            })
-        return out
-
-    def intel_watch(self) -> Dict[str, Any]:
-        """Read-only status for the independent passive-intel watch worker."""
-        data_dir = Path(os.environ.get("PA_INTEL_DATA_DIR", str(self.state_dir / "intel")))
-        path = data_dir / "watch-state.json"
-        value = self._read_json_file(path) or {}
-        if not isinstance(value, dict):
-            return {"schema": "IntelWatchState/v1", "status": "unknown"}
-        return {
-            "schema": _text(value.get("schema") or "IntelWatchState/v1", limit=40),
-            "status": _text(value.get("status") or "unknown", limit=24),
-            "program": _text(value.get("program"), limit=120),
-            "started_at": _text(value.get("started_at"), limit=32),
-            "last_run_at": _text(value.get("last_run_at"), limit=32),
-            "stopped_at": _text(value.get("stopped_at"), limit=32),
-            "runs_completed": max(0, int(_number(value.get("runs_completed"), 0))),
-            "last_run_id": _text(value.get("last_run_id"), limit=80),
-            "consecutive_errors": max(0, int(_number(value.get("consecutive_errors"), 0))),
-            "last_error": _text(value.get("last_error"), limit=500),
-            "recovered_previous": bool(value.get("recovered_previous")),
-            "interval_sec": max(0.0, _number(value.get("interval_sec"), 0.0)),
         }
 
     def src_autopilot(self) -> Dict[str, Any]:
@@ -1764,8 +1436,6 @@ def create_app(
     password: str,
     session_secret: str,
     static_dir: Path | str | None = None,
-    dsh_upstream: str | None = None,
-    arl_upstream: str | None = None,
 ) -> FastAPI:
     """Create the same-origin local dashboard service without a public listener."""
     if len(password) < MIN_PASSWORD_LENGTH:
@@ -1807,11 +1477,6 @@ def create_app(
         return JSONResponse(content=control_plane.snapshot(), headers={"Cache-Control": "no-store"})
 
     _NOSTORE = {"Cache-Control": "no-store"}
-
-    @app.get("/api/v1/intel")
-    def intel(request: Request, limit: int = 60) -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.intel(limit=max(1, min(200, limit))), headers=_NOSTORE)
 
     @app.get("/api/v1/src-autopilot")
     def src_autopilot(request: Request) -> JSONResponse:
@@ -2168,33 +1833,6 @@ def create_app(
         _require_session(request)
         return JSONResponse(content=control_plane.findings(), headers=_NOSTORE)
 
-    @app.get("/api/v1/keys")
-    def keys(request: Request) -> JSONResponse:
-        _require_session(request)
-        pw = _unlock_pw_for(request.session.get("keys_unlock_token", ""))
-        return JSONResponse(content=control_plane.keys(unlock_pw=pw), headers=_NOSTORE)
-
-    @app.post("/api/v1/keys/unlock")
-    def keys_unlock(payload: LoginRequest, request: Request) -> JSONResponse:
-        _require_session(request)
-        if key_vault is None or not key_vault.available():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="vault_unavailable")
-        if not key_vault.verify_password(payload.password):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_vault_password")
-        now = time.time()
-        _unlock_prune(now)
-        token = secrets.token_urlsafe(24)
-        _KEY_UNLOCKS[token] = (payload.password, now + _KEY_UNLOCK_TTL)
-        request.session["keys_unlock_token"] = token
-        return JSONResponse(content={"ok": True, "unlocked_until": now + _KEY_UNLOCK_TTL}, headers=_NOSTORE)
-
-    @app.post("/api/v1/keys/lock", status_code=status.HTTP_204_NO_CONTENT)
-    def keys_lock(request: Request) -> Response:
-        _require_session(request)
-        _KEY_UNLOCKS.pop(request.session.get("keys_unlock_token", ""), None)
-        request.session.pop("keys_unlock_token", None)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
     @app.get("/api/v1/system")
     def system(request: Request) -> JSONResponse:
         _require_session(request)
@@ -2378,35 +2016,13 @@ def create_app(
         return JSONResponse(content=control_plane.conversation(id, limit=limit), headers=_NOSTORE)
 
     def _pending_approvals() -> List[Dict[str, str]]:
-        """F5 一等事件:聚合 PoC(#80)/指纹(#53)/反思(#60)待人工确认项,best-effort。"""
-        out: List[Dict[str, str]] = []
-        try:
-            if poc_sync is not None:
-                for p in poc_sync.list_pending():
-                    pid = _text(p.get("id"), limit=64)
-                    if pid:
-                        out.append({"approval_id": "poc:" + pid, "gate": "poc",
-                                    "summary": _text(f"{p.get('title') or pid} {p.get('cve') or ''}", limit=200)})
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            for c in control_plane.fingerprint_corrections("pending"):
-                cid = _text(c.get("id"), limit=64)
-                if cid:
-                    out.append({"approval_id": "fp:" + cid, "gate": "fingerprint",
-                                "summary": _text(f"{c.get('kind') or ''} {c.get('name') or cid}", limit=200)})
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            if self_evolve is not None:
-                for c in self_evolve.list_cards(status="pending"):
-                    cid = _text(c.get("id"), limit=64)
-                    if cid:
-                        out.append({"approval_id": "ev:" + cid, "gate": "evolve",
-                                    "summary": _text(c.get("text"), limit=120)})
-        except Exception:  # noqa: BLE001
-            pass
-        return out[:MAX_VISIBLE_ITEMS * 3]
+        """Human-gate items surfaced as first-class events.
+
+        No gate has a backing module in this checkout (the poc / fingerprint /
+        evolve modules were removed with their routes), so this stays empty until
+        a real gate is wired to the blackboard human-review flag.
+        """
+        return []
 
     @app.get("/api/v1/conversation/stream")
     async def conversation_stream(request: Request, id: str = "") -> StreamingResponse:
@@ -2529,490 +2145,6 @@ def create_app(
     def project_results(request: Request, id: str = "") -> JSONResponse:
         _require_session(request)
         return JSONResponse(content=control_plane.project_results(id), headers=_NOSTORE)
-
-    @app.get("/api/v1/fleet")
-    def fleet(request: Request) -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.fleet(), headers=_NOSTORE)
-
-    @app.get("/api/v1/asset-changes")
-    def asset_changes(request: Request, limit: int = 60) -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.asset_changes(limit=max(1, min(200, limit))), headers=_NOSTORE)
-
-    @app.get("/api/v1/intel/sources")
-    def intel_sources_list(request: Request) -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.list_intel_sources(), headers=_NOSTORE)
-
-    @app.get("/api/v1/intel/watch")
-    def intel_watch_status(request: Request) -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.intel_watch(), headers=_NOSTORE)
-
-    @app.post("/api/v1/intel/sources")
-    def intel_sources_add(payload: IntelSourceAddRequest, request: Request) -> JSONResponse:
-        """#76 受控写:新增 rss/page_watch 源(校验公网 http(s)+新源默认不可信;直写 sources.json)。"""
-        _require_session(request)
-        if intel_sources is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="intel_sources_unavailable")
-        ok, msg = intel_sources.add_source({
-            "kind": payload.kind, "name": payload.name, "url": payload.url,
-            "interval_sec": payload.interval_sec, "query": payload.query,
-            "watch": {"mode": "auto", "extract_hint": payload.extract_hint},
-        }, control_plane.state_dir)
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
-        return JSONResponse(content={"ok": True, "id": msg}, headers=_NOSTORE)
-
-    @app.post("/api/v1/intel/sources/toggle", status_code=status.HTTP_204_NO_CONTENT)
-    def intel_sources_toggle(payload: IntelSourceToggleRequest, request: Request) -> Response:
-        _require_session(request)
-        if intel_sources is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="intel_sources_unavailable")
-        if not intel_sources.set_enabled(payload.id, payload.enabled, control_plane.state_dir):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.delete("/api/v1/intel/sources", status_code=status.HTTP_204_NO_CONTENT)
-    def intel_sources_remove(request: Request, id: str = "") -> Response:
-        _require_session(request)
-        if intel_sources is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="intel_sources_unavailable")
-        if not intel_sources.remove_source(id, control_plane.state_dir):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.get("/api/v1/fingerprint/corrections")
-    def fingerprint_corrections_list(request: Request, status: str = "") -> JSONResponse:
-        _require_session(request)
-        return JSONResponse(content=control_plane.fingerprint_corrections(status=status), headers=_NOSTORE)
-
-    @app.post("/api/v1/fingerprint/correction")
-    def fingerprint_correction_propose(payload: FingerprintCorrectionProposeRequest, request: Request) -> JSONResponse:
-        """#53 受控写:提交一张指纹修正卡(pending)。**不生效**——需 admin approve 后由 scheduler 合并进 overlay。"""
-        _require_session(request)
-        if fp_corr is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="fp_corr_unavailable")
-        ok, msg = fp_corr.propose_correction(
-            control_plane.state_dir, payload.kind, payload.name, payload.evidence,
-            proposed=payload.proposed or {}, target=payload.target or "", source="control_plane")
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
-        return JSONResponse(content={"ok": True, "id": msg, "status": "pending",
-                                     "note": "已提交,approve 后由 scheduler 合并进 overlay(学习层,可逆)"},
-                            headers=_NOSTORE)
-
-    @app.post("/api/v1/fingerprint/correction/decision")
-    def fingerprint_correction_decision(payload: FingerprintCorrectionDecisionRequest, request: Request) -> JSONResponse:
-        """#53 人工门:admin approve/reject 一张 pending 卡。approve 只置状态,应用由 scheduler 单写。"""
-        _require_session(request)
-        if fp_corr is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="fp_corr_unavailable")
-        ok, msg = fp_corr.set_status(control_plane.state_dir, payload.id, payload.decision, reason=payload.reason or "")
-        if not ok:
-            code = status.HTTP_404_NOT_FOUND if msg == "not_found" else status.HTTP_400_BAD_REQUEST
-            raise HTTPException(status_code=code, detail=msg)
-        return JSONResponse(content={"ok": True, "id": payload.id, "status": msg}, headers=_NOSTORE)
-
-    @app.get("/api/v1/sink-kb")
-    def sink_kb_list(request: Request, status: str = "") -> JSONResponse:
-        """#79 sink 签名库(代码审计护城河):stats + 卡片(可按 status 过滤;默认全部)。"""
-        _require_session(request)
-        if sink_kb is None:
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-        try:
-            rows = sink_kb.load_all(only_approved=False)
-            if status:
-                rows = [r for r in rows if r.get("status") == status]
-            rows = [{
-                "id": _text(r.get("id"), limit=32), "vuln_class": _text(r.get("vuln_class"), limit=32),
-                "language": _text(r.get("language"), limit=16), "sink_symbol": _text(r.get("sink_symbol"), limit=160),
-                "source": _text(r.get("source"), limit=120), "sanitizer_missing": _text(r.get("sanitizer_missing"), limit=160),
-                "cwe": _text(r.get("cwe"), limit=32), "status": _text(r.get("status"), limit=16) or "pending",
-                "confidence": _text(r.get("confidence"), limit=16),
-                "example_ref": _text(r.get("example_ref"), limit=200),
-            } for r in rows[:MAX_VISIBLE_ITEMS * 4]]
-            return JSONResponse(content={"stats": sink_kb.stats(), "rows": rows}, headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-
-    @app.post("/api/v1/sink-kb/decision")
-    def sink_kb_decision(payload: SinkKbDecisionRequest, request: Request) -> JSONResponse:
-        """#79 人工门:admin approve/reject 一张 sink 签名(approve 才进生效库,query 默认只返 approved)。"""
-        _require_session(request)
-        if sink_kb is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="sink_kb_unavailable")
-        if payload.decision not in ("approve", "reject"):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="bad_decision")
-        ok = sink_kb.approve(payload.id) if payload.decision == "approve" else sink_kb.reject(payload.id)
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return JSONResponse(content={"ok": True, "id": payload.id,
-                                     "status": "approved" if payload.decision == "approve" else "rejected"},
-                            headers=_NOSTORE)
-
-    @app.get("/api/v1/poc/pending")
-    def poc_pending(request: Request) -> JSONResponse:
-        """#80 PoC 审批(替代 pa-poc-admin):待确认 PoC + 同步流水日志。"""
-        _require_session(request)
-        if poc_sync is None:
-            return JSONResponse(content={"pending": [], "log": []}, headers=_NOSTORE)
-        try:
-            return JSONResponse(content={"pending": poc_sync.list_pending(),
-                                         "log": poc_sync.sync_log(100)}, headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"pending": [], "log": []}, headers=_NOSTORE)
-
-    @app.post("/api/v1/poc/confirm")
-    def poc_confirm(payload: PocConfirmRequest, request: Request) -> JSONResponse:
-        """#80 人工门:admin approve→PoC 入库 / reject→丢弃(写事件+审计流水,与 pa-poc-admin 同逻辑)。"""
-        _require_session(request)
-        if poc_sync is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="poc_sync_unavailable")
-        if not str(payload.id or "").strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing_id")
-        try:
-            res = poc_sync.confirm_pending(str(payload.id), approve=bool(payload.approve))
-        except Exception:  # noqa: BLE001
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="confirm_failed")
-        return JSONResponse(content=res, headers=_NOSTORE)
-
-    @app.get("/api/v1/socks")
-    def socks_list(request: Request) -> JSONResponse:
-        """#70 免费 socks 池:stats + 全部条目(alive 优先、按延迟排)。"""
-        _require_session(request)
-        if socks_pool is None:
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-        try:
-            rows = [{
-                "addr": _text(r.get("addr"), limit=80), "status": _text(r.get("status"), limit=8),
-                "latency_ms": _number(r.get("latency_ms")), "added_by": _text(r.get("added_by"), limit=16),
-                "last_error": _text(r.get("last_error"), limit=40), "last_check": _number(r.get("last_check")),
-            } for r in socks_pool.list_all()[:MAX_VISIBLE_ITEMS * 4]]
-            return JSONResponse(content={"stats": socks_pool.stats(), "rows": rows}, headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-
-    @app.post("/api/v1/socks/add")
-    def socks_add(payload: SocksAddRequest, request: Request) -> JSONResponse:
-        """#70 手动添加一个 socks(立即验活入池)。返回 alive/dead。"""
-        _require_session(request)
-        if socks_pool is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="socks_pool_unavailable")
-        ok, msg = socks_pool.add_proxy(str(payload.addr or ""), added_by="console")
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
-        return JSONResponse(content={"ok": True, "addr": str(payload.addr), "result": msg}, headers=_NOSTORE)
-
-    @app.delete("/api/v1/socks", status_code=status.HTTP_204_NO_CONTENT)
-    def socks_remove(request: Request, addr: str = "") -> Response:
-        _require_session(request)
-        if socks_pool is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="socks_pool_unavailable")
-        if not socks_pool.remove_proxy(addr):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.get("/api/v1/egress")
-    def egress_view(request: Request) -> JSONResponse:
-        """#74 出站 egress:被拦列表(已自动剔除放行) + 放行 allowlist + 从所有项目 scope 生成的 mihomo 规则。"""
-        _require_session(request)
-        if egress_gate is None:
-            return JSONResponse(content={"blocked": [], "allowlist": [], "mihomo_rules": [], "enforced": False},
-                                headers=_NOSTORE)
-        try:
-            targets = [p.get("target", "") for p in control_plane.projects() if p.get("target")]
-        except Exception:  # noqa: BLE001
-            targets = []
-        try:
-            scope = {"targets": targets, "allow_subdomains": True}
-            return JSONResponse(content={
-                "blocked": egress_gate.list_blocked(limit=100),
-                "allowlist": egress_gate.list_allow(),
-                "mihomo_rules": egress_gate.mihomo_allowlist_rules(scope),
-                "enforced": False,  # mihomo 默认不激活;规则供启用时应用
-            }, headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"blocked": [], "allowlist": [], "mihomo_rules": [], "enforced": False},
-                                headers=_NOSTORE)
-
-    @app.post("/api/v1/egress/allow")
-    def egress_allow(payload: EgressAllowRequest, request: Request) -> JSONResponse:
-        """#74 放行:admin 把误报 host 加入 allowlist(后续放行 + 从被拦列表自动回顾)。"""
-        _require_session(request)
-        if egress_gate is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="egress_gate_unavailable")
-        ok, msg = egress_gate.add_allow(str(payload.host or ""), added_by="console", reason=payload.reason or "")
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
-        return JSONResponse(content={"ok": True, "host": str(payload.host), "result": msg}, headers=_NOSTORE)
-
-    @app.delete("/api/v1/egress/allow", status_code=status.HTTP_204_NO_CONTENT)
-    def egress_allow_remove(request: Request, host: str = "") -> Response:
-        _require_session(request)
-        if egress_gate is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="egress_gate_unavailable")
-        if not egress_gate.remove_allow(host):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.get("/api/v1/evolve")
-    def evolve_list(request: Request, status: str = "") -> JSONResponse:
-        """#60 自进化:反思卡 stats + 列表(可按 status 过滤)。"""
-        _require_session(request)
-        if self_evolve is None:
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-        try:
-            cards = self_evolve.list_cards(status=status or None)
-            rows = [{
-                "id": _text(c.get("id"), limit=40), "kind": _text(c.get("kind"), limit=24),
-                "text": _text(c.get("text"), limit=800), "category": _text(c.get("category"), limit=40),
-                "source": _text(c.get("source"), limit=60), "status": _text(c.get("status"), limit=16) or "pending",
-                "created_at": _number(c.get("created_at")),
-            } for c in cards[:MAX_VISIBLE_ITEMS * 3]]
-            return JSONResponse(content={"stats": self_evolve.stats(), "rows": rows}, headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"stats": {}, "rows": []}, headers=_NOSTORE)
-
-    @app.post("/api/v1/evolve/decision")
-    def evolve_decision(payload: EvolveDecisionRequest, request: Request) -> JSONResponse:
-        """#60 人工门:approve→进生效教训库(下次跑注入)/reject→丢弃。"""
-        _require_session(request)
-        if self_evolve is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="self_evolve_unavailable")
-        ok, msg = self_evolve.set_status(str(payload.id or ""), payload.decision)
-        if not ok:
-            code = status.HTTP_404_NOT_FOUND if msg == "not_found" else status.HTTP_400_BAD_REQUEST
-            raise HTTPException(status_code=code, detail=msg)
-        return JSONResponse(content={"ok": True, "id": payload.id, "status": msg}, headers=_NOSTORE)
-
-    @app.get("/api/v1/proxy/subscriptions")
-    def proxy_subs_list(request: Request) -> JSONResponse:
-        """#21 代理订阅 + mihomo 片段(订阅 proxy-providers + #70 存活 socks proxies)。"""
-        _require_session(request)
-        if proxy_subscriptions is None:
-            return JSONResponse(content={"subs": [], "mihomo_snippet": ""}, headers=_NOSTORE)
-        try:
-            return JSONResponse(content={"subs": proxy_subscriptions.list_subscriptions(),
-                                         "mihomo_snippet": proxy_subscriptions.mihomo_snippet(include_socks=True)},
-                                headers=_NOSTORE)
-        except Exception:  # noqa: BLE001
-            return JSONResponse(content={"subs": [], "mihomo_snippet": ""}, headers=_NOSTORE)
-
-    @app.post("/api/v1/proxy/subscriptions")
-    def proxy_subs_add(payload: ProxySubAddRequest, request: Request) -> JSONResponse:
-        """#21 受控写:加机场订阅(公网 http(s))。生成的 mihomo 片段由用户显式应用,不自动改主配。"""
-        _require_session(request)
-        if proxy_subscriptions is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="proxy_subs_unavailable")
-        ok, msg = proxy_subscriptions.add_subscription(str(payload.url or ""), payload.name or "")
-        if not ok:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
-        return JSONResponse(content={"ok": True, "id": msg}, headers=_NOSTORE)
-
-    @app.post("/api/v1/proxy/subscriptions/toggle", status_code=status.HTTP_204_NO_CONTENT)
-    def proxy_subs_toggle(payload: ProxySubToggleRequest, request: Request) -> Response:
-        _require_session(request)
-        if proxy_subscriptions is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="proxy_subs_unavailable")
-        if not proxy_subscriptions.set_enabled(payload.id, payload.enabled):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.delete("/api/v1/proxy/subscriptions", status_code=status.HTTP_204_NO_CONTENT)
-    def proxy_subs_remove(request: Request, id: str = "") -> Response:
-        _require_session(request)
-        if proxy_subscriptions is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="proxy_subs_unavailable")
-        if not proxy_subscriptions.remove_subscription(id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    # ---- /dsh/ reverse proxy to the co-located DeepSeek Harness (127.0.0.1:3080) ----
-    # dsh serves a SPA with absolute paths (/assets, /plugins, /api incl. a mux
-    # WebSocket). We strip the /dsh prefix upstream-side and rewrite absolute
-    # references in HTML/JS/CSS bodies so the whole app works same-origin under
-    # /dsh/ — no second SSH tunnel needed.
-    dsh_base = (dsh_upstream or os.environ.get("PA_DSH_UPSTREAM") or "http://127.0.0.1:3080").rstrip("/")
-    dsh_ws_base = "ws" + dsh_base[4:] if dsh_base.startswith("http") else dsh_base
-    _DSH_HOP_BY_HOP = {
-        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-        "te", "trailers", "transfer-encoding", "upgrade", "host",
-    }
-    _DSH_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-
-    def _dsh_rewrite_body(content_type: str, body: bytes) -> bytes:
-        ctype = content_type.lower()
-        if "text/html" in ctype:
-            text = body.decode("utf-8", "replace")
-            # src="/assets/...", href="/manifest..." and boot-manifest "url":"/plugins/..."
-            text = text.replace('="/', '="/dsh/').replace('":"/', '":"/dsh/')
-            return text.encode("utf-8")
-        if "javascript" in ctype:
-            text = body.decode("utf-8", "replace")
-            for quote in ('"', "'", "`"):
-                text = text.replace(f"{quote}/api", f"{quote}/dsh/api")
-                text = text.replace(f"{quote}/plugins/", f"{quote}/dsh/plugins/")
-            return text.encode("utf-8")
-        if "text/css" in ctype:
-            return body.decode("utf-8", "replace").replace("url(/", "url(/dsh/").encode("utf-8")
-        return body
-
-    @app.api_route("/dsh", methods=_DSH_METHODS, include_in_schema=False)
-    @app.api_route("/dsh/{path:path}", methods=_DSH_METHODS, include_in_schema=False)
-    async def dsh_reverse_proxy(request: Request, path: str = "") -> Response:
-        _require_session(request)
-        upstream_url = f"{dsh_base}/{path}"
-        if request.url.query:
-            upstream_url += f"?{request.url.query}"
-        fwd_headers = {
-            k: v for k, v in request.headers.items() if k.lower() not in _DSH_HOP_BY_HOP
-        }
-        fwd_headers["host"] = urlparse(dsh_base).netloc
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
-                upstream = await client.request(
-                    request.method,
-                    upstream_url,
-                    headers=fwd_headers,
-                    content=await request.body(),
-                    follow_redirects=False,
-                )
-        except httpx.HTTPError:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="dsh_upstream_unreachable")
-        resp_headers: Dict[str, str] = {}
-        for key, value in upstream.headers.items():
-            lk = key.lower()
-            # httpx already decoded the body; stale content-length/encoding must not leak
-            if lk in _DSH_HOP_BY_HOP or lk in ("content-length", "content-encoding"):
-                continue
-            if lk == "location" and value.startswith("/"):
-                value = "/dsh" + value
-            resp_headers[key] = value
-        payload = _dsh_rewrite_body(upstream.headers.get("content-type", ""), upstream.content)
-        return Response(content=payload, status_code=upstream.status_code, headers=resp_headers)
-
-    @app.websocket("/dsh/{path:path}")
-    async def dsh_websocket_proxy(websocket: WebSocket, path: str) -> None:
-        if websocket.scope.get("session", {}).get("control_plane_authenticated") is not True:
-            await websocket.close(code=4401)
-            return
-        import asyncio
-
-        import websockets
-
-        query = websocket.scope.get("query_string", b"").decode()
-        target = f"{dsh_ws_base}/{path}" + (f"?{query}" if query else "")
-        offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
-        accepted_subprotocol: Optional[str] = None
-        try:
-            # dsh 校验 WS Origin 必须匹配自身 host;浏览器 Origin 是控制台 origin,必须重写
-            async with websockets.connect(
-                target, subprotocols=offered or None, max_size=None, origin=dsh_base
-            ) as upstream:
-                accepted_subprotocol = upstream.subprotocol
-                await websocket.accept(subprotocol=accepted_subprotocol)
-
-                async def client_to_upstream() -> None:
-                    while True:
-                        message = await websocket.receive()
-                        if message.get("type") == "websocket.disconnect":
-                            return
-                        if message.get("bytes") is not None:
-                            await upstream.send(message["bytes"])
-                        elif message.get("text") is not None:
-                            await upstream.send(message["text"])
-
-                async def upstream_to_client() -> None:
-                    async for data in upstream:
-                        if isinstance(data, bytes):
-                            await websocket.send_bytes(data)
-                        else:
-                            await websocket.send_text(data)
-
-                tasks = [asyncio.ensure_future(client_to_upstream()), asyncio.ensure_future(upstream_to_client())]
-                _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-        except Exception:
-            if websocket.client_state.name == "CONNECTING":
-                # upstream refused/errored before accept: reject the handshake
-                try:
-                    await websocket.close(code=1011)
-                except Exception:
-                    pass
-                return
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-
-    # ---- /arl/ reverse proxy to the co-located ARL-Next frontend (127.0.0.1:5173) ----
-    # Same pattern as /dsh/ above, with two ARL-specific twists: the container
-    # nginx speaks HTTPS with a self-signed cert (loopback only → verify off),
-    # and it gates static assets behind its own basic auth. The upstream
-    # credentials come from env PA_ARL_BASIC_AUTH ("user:pass", never committed);
-    # the console session remains the outer gate. No WebSocket: ARL frontend polls.
-    arl_base = (arl_upstream or os.environ.get("PA_ARL_UPSTREAM") or "https://127.0.0.1:5173").rstrip("/")
-    _arl_auth = os.environ.get("PA_ARL_BASIC_AUTH", "").strip()
-    _ARL_AUTH_HEADER = ""
-    if _arl_auth:
-        import base64 as _b64
-
-        _ARL_AUTH_HEADER = "Basic " + _b64.b64encode(_arl_auth.encode("utf-8")).decode("ascii")
-
-    def _arl_rewrite_body(content_type: str, body: bytes) -> bytes:
-        ctype = content_type.lower()
-        if "text/html" in ctype:
-            text = body.decode("utf-8", "replace")
-            return text.replace('="/', '="/arl/').replace('":"/', '":"/arl/').encode("utf-8")
-        if "javascript" in ctype:
-            text = body.decode("utf-8", "replace")
-            for quote in ('"', "'", "`"):
-                text = text.replace(f"{quote}/api", f"{quote}/arl/api")
-                text = text.replace(f"{quote}/assets", f"{quote}/arl/assets")
-            return text.encode("utf-8")
-        if "text/css" in ctype:
-            return body.decode("utf-8", "replace").replace("url(/", "url(/arl/").encode("utf-8")
-        return body
-
-    @app.api_route("/arl", methods=_DSH_METHODS, include_in_schema=False)
-    @app.api_route("/arl/{path:path}", methods=_DSH_METHODS, include_in_schema=False)
-    async def arl_reverse_proxy(request: Request, path: str = "") -> Response:
-        _require_session(request)
-        upstream_url = f"{arl_base}/{path}"
-        if request.url.query:
-            upstream_url += f"?{request.url.query}"
-        fwd_headers = {
-            k: v for k, v in request.headers.items() if k.lower() not in _DSH_HOP_BY_HOP
-        }
-        fwd_headers["host"] = urlparse(arl_base).netloc
-        if _ARL_AUTH_HEADER and "authorization" not in {k.lower() for k in fwd_headers}:
-            fwd_headers["Authorization"] = _ARL_AUTH_HEADER
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, read=300.0), verify=not arl_base.startswith("https")
-            ) as client:
-                upstream = await client.request(
-                    request.method,
-                    upstream_url,
-                    headers=fwd_headers,
-                    content=await request.body(),
-                    follow_redirects=False,
-                )
-        except httpx.HTTPError:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="arl_upstream_unreachable")
-        resp_headers: Dict[str, str] = {}
-        for key, value in upstream.headers.items():
-            lk = key.lower()
-            if lk in _DSH_HOP_BY_HOP or lk in ("content-length", "content-encoding"):
-                continue
-            if lk == "location" and value.startswith("/"):
-                value = "/arl" + value
-            resp_headers[key] = value
-        payload = _arl_rewrite_body(upstream.headers.get("content-type", ""), upstream.content)
-        return Response(content=payload, status_code=upstream.status_code, headers=resp_headers)
 
     resolved_static_dir = Path(static_dir) if static_dir is not None else None
 

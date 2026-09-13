@@ -27,24 +27,6 @@ def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
 
 
 class ReadOnlyControlPlaneTests(unittest.TestCase):
-    def test_intel_projects_latest_radar_run_into_console_rows(self) -> None:
-        from console.control_plane import ReadOnlyControlPlane
-
-        with tempfile.TemporaryDirectory() as tmp:
-            state = Path(tmp) / "state"
-            run = state / "intel" / "runs" / "demo-run"
-            run.mkdir(parents=True)
-            (run / "candidates.jsonl").write_text(json.dumps({
-                "kind": "article", "source": "demo-ai", "title": "AI update",
-                "summary": "public summary", "value": "https://example.com/a",
-                "score": 60, "tags": ["ai", "developer"],
-            }) + "\n", encoding="utf-8")
-            rows = ReadOnlyControlPlane(state).intel()
-            self.assertEqual(1, len(rows))
-            self.assertEqual("demo-ai", rows[0]["source"])
-            self.assertEqual("public summary", rows[0]["summary"])
-            self.assertEqual("article", rows[0]["kind"])
-
     def test_intake_toggle_sanitizer_hard_disables_bruteforce(self) -> None:
         from console.control_plane import _sanitize_toggles
 
@@ -398,97 +380,6 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual("p-two", listing["active"])
                 self.assertEqual("m-two", listing["active_model"])
                 self.assertEqual(2, len(listing["providers"]))
-    def test_dsh_reverse_proxy_strips_prefix_and_rewrites_absolute_refs(self) -> None:
-        """/dsh/ 反代:剥前缀转发、HTML/JS/CSS 绝对路径重写、Location 重写、会话鉴权。"""
-        import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-        from console.control_plane import create_app
-
-        class FakeDsh(BaseHTTPRequestHandler):
-            def log_message(self, *args: object) -> None:
-                pass
-
-            def _handle(self) -> None:
-                length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
-                if self.path == "/":
-                    payload = (
-                        b'<html><script type="module" crossorigin src="/assets/index.js"></script>'
-                        b'<script>window.__DSH_BOOT__={"entries":[{"url":"/plugins/x/client.js"}]}</script>'
-                        b'<link rel="manifest" href="/manifest.webmanifest" /></html>'
-                    )
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
-                elif self.path == "/assets/app.js":
-                    payload = b'fetch("/api/respond"); import(`/plugins/y/client.js`); const c = "/compact";'
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/javascript")
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
-                elif self.path == "/go":
-                    self.send_response(302)
-                    self.send_header("Location", "/home")
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                else:
-                    payload = json.dumps(
-                        {"method": self.command, "path": self.path, "body": body.decode("utf-8", "replace")}
-                    ).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
-
-            do_GET = _handle
-            do_POST = _handle
-
-        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeDsh)
-        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
-        thread.start()
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                app = create_app(
-                    state_dir=Path(tmp) / "state",
-                    password="strong-local-password",
-                    session_secret="session-secret-for-test-0123456789",
-                    dsh_upstream=f"http://127.0.0.1:{upstream.server_port}",
-                )
-                with TestClient(app) as client:
-                    self.assertEqual(401, client.get("/dsh/").status_code)
-                    client.post("/api/v1/session", json={"password": "strong-local-password"})
-
-                    html = client.get("/dsh/")
-                    self.assertEqual(200, html.status_code)
-                    self.assertIn('src="/dsh/assets/index.js"', html.text)
-                    self.assertIn('"url":"/dsh/plugins/x/client.js"', html.text)
-                    self.assertIn('href="/dsh/manifest.webmanifest"', html.text)
-
-                    js = client.get("/dsh/assets/app.js")
-                    self.assertIn('fetch("/dsh/api/respond")', js.text)
-                    self.assertIn("import(`/dsh/plugins/y/client.js`)", js.text)
-                    # 聊天斜杠命令等非 URL 字面量不得被重写
-                    self.assertIn('"/compact"', js.text)
-
-                    echo = client.post("/dsh/api/chat?q=1", content=b'{"hi":1}')
-                    self.assertEqual(200, echo.status_code)
-                    doc = echo.json()
-                    self.assertEqual("POST", doc["method"])
-                    self.assertEqual("/api/chat?q=1", doc["path"])
-                    self.assertEqual('{"hi":1}', doc["body"])
-
-                    redirect = client.get("/dsh/go", follow_redirects=False)
-                    self.assertEqual(302, redirect.status_code)
-                    self.assertEqual("/dsh/home", redirect.headers["location"])
-        finally:
-            upstream.shutdown()
-            upstream.server_close()
-            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

@@ -23,10 +23,10 @@ from console.control_plane import create_app  # noqa: E402
 PASSWORD = "strong-local-password"
 SESSION_SECRET = "session-secret-for-test-0123456789"
 
-# Frozen (method, path) set produced by create_app() at HEAD ba4fa73.
-# P2 intentionally removes the phantom-module routes (/fingerprint, /sink-kb,
-# /poc, /socks, /egress, /evolve, /proxy/subscriptions), the /dsh + /arl proxies
-# and the intel routes; that phase must update this set deliberately.
+# Frozen (method, path) set produced by create_app().
+# P2 removed the phantom-module routes (/keys*, /fingerprint, /sink-kb, /poc,
+# /socks, /egress, /evolve, /proxy/subscriptions), the /dsh + /arl proxies and
+# the intel routes. Deliberately 42 entries now (was 101 at P0).
 ROUTE_CONTRACT = frozenset({
     ("*", "/assets"),
     ("GET", "/"),
@@ -59,11 +59,8 @@ ROUTE_CONTRACT = frozenset({
     ("GET", "/api/v1/src-agent/history"),
     ("POST", "/api/v1/src-agent/chat"),
     ("GET", "/api/v1/src-agent/events"),
-    # findings / keys
+    # findings / report
     ("GET", "/api/v1/findings"),
-    ("GET", "/api/v1/keys"),
-    ("POST", "/api/v1/keys/unlock"),
-    ("POST", "/api/v1/keys/lock"),
     ("GET", "/api/v1/report"),
     # projects / tasks / conversation
     ("GET", "/api/v1/proxy"),
@@ -79,44 +76,6 @@ ROUTE_CONTRACT = frozenset({
     ("POST", "/api/v1/project/intake"),
     ("GET", "/api/v1/project/intakes"),
     ("GET", "/api/v1/project/results"),
-    # intel (deleted in P2)
-    ("GET", "/api/v1/intel"),
-    ("GET", "/api/v1/fleet"),
-    ("GET", "/api/v1/asset-changes"),
-    ("GET", "/api/v1/intel/sources"),
-    ("GET", "/api/v1/intel/watch"),
-    ("POST", "/api/v1/intel/sources"),
-    ("POST", "/api/v1/intel/sources/toggle"),
-    ("DELETE", "/api/v1/intel/sources"),
-    # phantom-module routes (deleted in P2)
-    ("GET", "/api/v1/fingerprint/corrections"),
-    ("POST", "/api/v1/fingerprint/correction"),
-    ("POST", "/api/v1/fingerprint/correction/decision"),
-    ("GET", "/api/v1/sink-kb"),
-    ("POST", "/api/v1/sink-kb/decision"),
-    ("GET", "/api/v1/poc/pending"),
-    ("POST", "/api/v1/poc/confirm"),
-    ("GET", "/api/v1/socks"),
-    ("POST", "/api/v1/socks/add"),
-    ("DELETE", "/api/v1/socks"),
-    ("GET", "/api/v1/egress"),
-    ("POST", "/api/v1/egress/allow"),
-    ("DELETE", "/api/v1/egress/allow"),
-    ("GET", "/api/v1/evolve"),
-    ("POST", "/api/v1/evolve/decision"),
-    ("GET", "/api/v1/proxy/subscriptions"),
-    ("POST", "/api/v1/proxy/subscriptions"),
-    ("POST", "/api/v1/proxy/subscriptions/toggle"),
-    ("DELETE", "/api/v1/proxy/subscriptions"),
-    # embedded third-party UIs (deleted in P2)
-    *{("GET", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("POST", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("PUT", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("PATCH", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("DELETE", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("HEAD", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    *{("OPTIONS", p) for p in ("/dsh", "/dsh/{path:path}", "/arl", "/arl/{path:path}")},
-    ("*", "/dsh/{path:path}"),
 })
 
 
