@@ -27,11 +27,6 @@ from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
 try:
-    from core import strix_conversation  # type: ignore
-except Exception:  # noqa: BLE001
-    strix_conversation = None  # type: ignore
-
-try:
     from core import llm_settings  # type: ignore
 except Exception:  # noqa: BLE001
     llm_settings = None  # type: ignore

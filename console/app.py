@@ -10,7 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from console.deps import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH
 from console.projections import ConsoleStaticFiles, ReadOnlyControlPlane
-from console.routers import chat, dashboard, intake, jobs, llm, meta, projects, src_agent
+from console.routers import chat, dashboard, jobs, llm, meta, projects
 from console.routers.base import Ctx
 
 def create_app(
@@ -63,7 +63,7 @@ def create_app(
         same_site="strict",
         https_only=False,
     )
-    for module in (meta, src_agent, dashboard, llm, intake, projects, jobs, chat):
+    for module in (meta, dashboard, llm, projects, jobs, chat):
         app.include_router(module.build(ctx))
 
     resolved_static_dir = Path(static_dir) if static_dir is not None else None

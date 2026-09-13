@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from console import jobs as console_jobs  # noqa: E402
 from console.control_plane import create_app  # noqa: E402
+from agents import src_chat as agents_src_chat  # noqa: E402
 
 PASSWORD = "strong-local-password"
 SECRET = "session-secret-for-test-0123456789"
@@ -34,7 +35,7 @@ def _wait(cond, timeout=5.0):
     return False
 
 
-class ChatApiTests(unittest.TestCase):
+class _ChatCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
@@ -60,6 +61,8 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(204, client.post("/api/v1/session", json={"password": PASSWORD}).status_code)
         return client
 
+
+class ChatApiTests(_ChatCase):
     def test_modes_endpoint(self) -> None:
         client = self.start_client()
         body = client.get("/api/v1/modes").json()
@@ -87,12 +90,15 @@ class ChatApiTests(unittest.TestCase):
         self.assertTrue(turn["turn_id"].startswith("T-"))
 
         self.assertTrue(_wait(lambda: client.get(
-            f"/api/v1/chat/sessions/{session_id}/events").json()["max_seq"] >= 2))
+            f"/api/v1/chat/sessions/{session_id}/events").json()["max_seq"] >= 3))
         events = client.get(f"/api/v1/chat/sessions/{session_id}/events").json()["events"]
         kinds = [e["kind"] for e in events]
-        # the turn's own events come first; the runner then appends subtask_finished
-        self.assertEqual(["user_message", "assistant_message"], kinds[:2])
-        self.assertEqual([1, 2], [e["seq"] for e in events][:2])
+        # 1) the runner announces the subtask, 2/3) the turn's own events stream in
+        self.assertEqual(["subtask_started", "user_message", "assistant_message"], kinds[:3])
+        self.assertEqual([1, 2, 3], [e["seq"] for e in events][:3])
+        # the announcement carries the job kind in its own field — the envelope
+        # `kind` must stay "subtask_started" for the renderer to dispatch on
+        self.assertEqual("chat_turn", events[0]["job_kind"])
 
         # the turn shows up as a completed job on the session
         jobs = client.get(f"/api/v1/jobs?session_id={session_id}").json()["jobs"]
@@ -140,6 +146,96 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(401, client.get("/api/v1/modes").status_code)
         self.assertEqual(401, client.post("/api/v1/chat/sessions", json={}).status_code)
         self.assertEqual(401, client.post("/api/v1/chat/sessions/src-x1/messages", json={"text": "a"}).status_code)
+
+
+class EscalationTests(_ChatCase):
+    """The core mechanism: a turn in an action mode launches a real subtask.
+
+    These run the *real* ``chat_turn`` handler so the intent-router →
+    job-registry → event-log path is exercised end to end. Only the ``src_loop``
+    handler is stubbed, so nothing touches the network.
+    """
+
+    SESSION = "src-esc1234567"
+
+    def _client_with_stubbed_loop(self, seen: list):
+        def fake_src_loop(job, ctx):
+            seen.append(job.target)
+            ctx.emit("subtask_progress", phase="recon")
+            return {"summary_ref": "loop-done"}
+
+        with patch.object(agents_src_chat, "chat", lambda session, text, **kw: "已收到"):
+            return self.start_client({"src_loop": fake_src_loop})
+
+    def test_target_plus_verb_launches_a_subtask_and_streams_it(self) -> None:
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "扫描一下 http://example.com", "mode": "src_blackbox"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        turn_job = resp.json()["job_id"]
+
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual(["http://example.com"], seen)
+
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        kinds = sorted(j["kind"] for j in jobs)
+        self.assertEqual(["chat_turn", "src_loop"], kinds)
+        loop = next(j for j in jobs if j["kind"] == "src_loop")
+        self.assertEqual("completed", loop["status"])
+        self.assertEqual("loop-done", loop["summary_ref"])
+        self.assertEqual(turn_job, next(j for j in jobs if j["kind"] == "chat_turn")["job_id"])
+
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        kinds = [e["kind"] for e in events]
+
+        # the turn itself is announced first, then its own user message arrives
+        self.assertEqual(["subtask_started", "user_message"], kinds[:2])
+        started = [e for e in events if e["kind"] == "subtask_started"]
+        self.assertEqual(["chat_turn", "src_loop"], [e["job_kind"] for e in started])
+        # exactly one announcement per job: the runner owns it, the handler must
+        # not emit a second copy
+        self.assertEqual(2, len(started))
+
+        announce = next(e for e in started if e["job_kind"] == "src_loop")
+        # the envelope kind stays "subtask_started" so the renderer can dispatch
+        self.assertEqual("src_loop", announce["job_kind"])
+        self.assertEqual("http://example.com", announce["target"])
+        self.assertEqual("SRC 黑盒", announce["title"])
+        self.assertEqual(loop["job_id"], announce["job_id"])
+        # the subtask shares the turn's turn_id, so it renders inside that turn
+        self.assertEqual(events[0]["turn_id"], announce["turn_id"])
+
+        phases = [e["phase"] for e in events if e["kind"] == "subtask_progress"]
+        self.assertIn("recon", phases)
+        self.assertIn("assistant_message", kinds)
+        # one terminal event per job, and both finished cleanly
+        finished = [e for e in events if e["kind"] == "subtask_finished"]
+        self.assertEqual(2, len(finished))
+        self.assertEqual({"completed"}, {e["status"] for e in finished})
+
+    def test_chat_mode_with_a_target_does_not_escalate(self) -> None:
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "扫描一下 http://example.com", "mode": "chat"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual([], seen)
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        self.assertEqual(["chat_turn"], [j["kind"] for j in jobs])
+
+    def test_mode_command_switches_the_mode_and_says_so(self) -> None:
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                    json={"text": "进入 CTF 模式", "mode": "chat"})
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        changed = next(e for e in events if e["kind"] == "mode_changed")
+        self.assertEqual("ctf", changed["mode"])
+        # a mode switch alone must not launch anything
+        self.assertEqual([], seen)
 
 
 if __name__ == "__main__":

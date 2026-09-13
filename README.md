@@ -35,10 +35,13 @@ python lode.py console
 | 端点 | 作用 |
 |------|------|
 | `POST /api/v1/session` | 登录 |
-| `POST /api/v1/src-agent/chat` | 与 agent 对话（主入口） |
-| `GET /api/v1/src-agent/events` | 实时事件流 |
-| `GET /api/v1/src-agent/progress` | 测试进度 |
-| `POST /api/v1/src-agent/start` | 后台一键跑 |
+| `GET /api/v1/modes` | 对话模式（闲聊 / CTF / SRC 黑盒 / 代码审计） |
+| `POST /api/v1/chat/sessions` | 新建会话 |
+| `POST /api/v1/chat/sessions/{id}/messages` | 发一轮对话（202，作为持久化任务执行） |
+| `GET /api/v1/chat/sessions/{id}/stream` | 事件流（SSE，`since` 游标续传） |
+| `GET /api/v1/chat/sessions/{id}/events` | 回放事件（首屏渲染） |
+| `POST /api/v1/chat/sessions/{id}/turn/stop` | 停止本轮 |
+| `GET /api/v1/jobs` | 持久化任务列表 / 状态 |
 
 ## Agent 工具（全部 scope-checked，只发 GET/HEAD）
 

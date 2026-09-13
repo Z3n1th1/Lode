@@ -1,10 +1,12 @@
 <script setup lang="ts">
-// F6 壳顶栏:品牌 + R2 模型切换下拉 + 次级面板抽屉入口 + 刷新/退出。对话台为主视图,旧 17 面板收进抽屉。
+// 壳顶栏:品牌 + 对话模式选择器 + 模型切换下拉 + 次级面板抽屉入口 + 刷新/退出。
+// 统一对话是唯一主视图,原来的三个视图 tab 由模式选择器取代。
 import { computed, onMounted, ref } from 'vue'
 import { NAvatar, NButton, NSelect, NTooltip, useMessage } from 'naive-ui'
-import { Bot, Crosshair, LayoutGrid, LogOut, MessageSquare, RefreshCw, Settings } from '@lucide/vue'
-import { refreshing, refreshDashboard, signOut, panelsOpen, mainView } from '../store'
+import { Bot, LayoutGrid, LogOut, RefreshCw, Settings } from '@lucide/vue'
+import { refreshing, refreshDashboard, signOut, panelsOpen, mainView, chatMode, chatModes, loadChatModes } from '../store'
 import { loadModelPool, setActiveModel, type ModelPool } from '../api'
+import ModeSelect from './chat/ModeSelect.vue'
 
 const message = useMessage()
 
@@ -46,7 +48,10 @@ async function onSwitch(name: string) {
   }
 }
 
-onMounted(reloadPool)
+onMounted(() => {
+  void reloadPool()
+  void loadChatModes()
+})
 </script>
 
 <template>
@@ -59,23 +64,7 @@ onMounted(reloadPool)
       </div>
     </div>
     <div class="header-actions">
-      <div class="view-switch" role="tablist">
-        <button
-          class="view-tab" :class="{ active: mainView === 'src' }"
-          role="tab" :aria-selected="mainView === 'src'"
-          @click="mainView = 'src'"
-        ><Crosshair :size="14" /> SRC 挖掘</button>
-        <button
-          class="view-tab" :class="{ active: mainView === 'chat' }"
-          role="tab" :aria-selected="mainView === 'chat'"
-          @click="mainView = 'chat'"
-        ><MessageSquare :size="14" /> 对话台</button>
-        <button
-          class="view-tab" :class="{ active: mainView === 'settings' }"
-          role="tab" :aria-selected="mainView === 'settings'"
-          @click="mainView = 'settings'"
-        ><Settings :size="14" /> 挖洞设置</button>
-      </div>
+      <ModeSelect v-model:value="chatMode" :modes="chatModes" />
       <n-tooltip trigger="hover">
         <template #trigger>
           <n-select
@@ -133,34 +122,5 @@ onMounted(reloadPool)
 <style scoped>
 .model-select {
   width: 200px;
-}
-.view-switch {
-  display: inline-flex;
-  background: var(--pa-bg);
-  border: 1px solid var(--pa-border);
-  border-radius: 9px;
-  padding: 2px;
-  gap: 2px;
-}
-.view-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: none;
-  background: transparent;
-  color: var(--pa-text-2);
-  font: inherit;
-  font-size: 12.5px;
-  padding: 5px 13px;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: all .12s;
-}
-.view-tab:hover { color: var(--pa-text); }
-.view-tab.active {
-  background: var(--pa-surface);
-  color: var(--pa-primary);
-  font-weight: 600;
-  box-shadow: var(--pa-shadow-soft);
 }
 </style>

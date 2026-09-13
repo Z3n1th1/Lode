@@ -123,7 +123,7 @@ class JobRunner:
         ctx = JobContext(self, job)
         with self._lock:
             self._contexts[job_id] = ctx
-        ctx.emit("subtask_started", kind=job.kind, target=job.target, title=job.payload.get("title", ""))
+        ctx.emit("subtask_started", job_kind=job.kind, target=job.target, title=job.payload.get("title", ""))
         try:
             last_error = ""
             for phase in range(self.max_phases):

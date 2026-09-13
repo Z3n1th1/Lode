@@ -29,12 +29,6 @@ from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
 
-
-try:                                   # F1 对话台芯:读 Strix agents.db 真实多智能体对话
-    from core import strix_conversation  # type: ignore
-except Exception:                      # noqa: BLE001
-    strix_conversation = None          # type: ignore
-
 try:                                   # LLM 供应商设置(界面配置 key/分层模型)
     from core import llm_settings      # type: ignore
 except Exception:                      # noqa: BLE001
@@ -439,34 +433,6 @@ class ReadOnlyControlPlane:
             if tid and op:
                 out[tid] = Path(str(op))
         return out
-
-    def conversation(self, session_id: str, *, limit: int = 2000) -> Dict[str, Any]:
-        """F1 对话台芯:某会话(=task)的 Strix 真实多智能体对话(读 agents.db)。
-        {agents:[树], messages:[user/assistant/tool_call/tool_result], counts}。只读,缺库→空。"""
-        if strix_conversation is None or not SESSION_ID_RE.fullmatch(str(session_id or "")):
-            return {"agents": [], "messages": [], "counts": {}, "session_id": session_id}
-        task_dir = self._task_dirs().get(session_id)
-        if not task_dir:
-            return {"agents": [], "messages": [], "counts": {}, "session_id": session_id}
-        try:
-            res = strix_conversation.load_for_task(task_dir, limit=max(1, min(5000, limit)))
-        except Exception:  # noqa: BLE001
-            return {"agents": [], "messages": [], "counts": {}, "session_id": session_id}
-        res["session_id"] = session_id
-        res.pop("db", None)   # 不外泄绝对路径
-        return res
-
-    def conversation_db_path(self, session_id: str) -> Optional[Path]:
-        """F3 SSE 用:某会话最新 run 的 agents.db 路径(内部用,不外泄)。"""
-        if strix_conversation is None or not SESSION_ID_RE.fullmatch(str(session_id or "")):
-            return None
-        task_dir = self._task_dirs().get(session_id)
-        if not task_dir:
-            return None
-        try:
-            return strix_conversation.find_run_db(task_dir)
-        except Exception:  # noqa: BLE001
-            return None
 
     def findings(self, limit: int = 200) -> List[Dict[str, Any]]:
         rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

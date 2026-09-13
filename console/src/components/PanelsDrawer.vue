@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// 控制面板抽屉:只保留 SRC 工作流真正会用到的 6 个面板。
+// 控制面板抽屉:只保留 SRC 工作流真正会用到的 5 个面板。
 // 其余低频运维面板已删除(系统主体是 SRC agent,不做功能堆砌)。
 import { computed, h, type Component } from 'vue'
 import { NDrawer, NDrawerContent, NIcon, NMenu, NSelect, type MenuOption } from 'naive-ui'
-import { Bell, FolderKanban, KeyRound, SlidersHorizontal, Target, Workflow } from '@lucide/vue'
+import { Bell, FolderKanban, SlidersHorizontal, Target, Workflow } from '@lucide/vue'
 
 import { activePage, panelsOpen, pageNames } from '../store'
 import SrcAutopilotPanel from './panels/SrcAutopilotPanel.vue'
@@ -11,7 +11,6 @@ import FindingsPanel from './panels/FindingsPanel.vue'
 import ProjectsPanel from './panels/ProjectsPanel.vue'
 import TrajectoryPanel from './panels/TrajectoryPanel.vue'
 import HealthPanel from './panels/HealthPanel.vue'
-import SecretsPanel from './panels/SecretsPanel.vue'
 
 const icon = (component: Component) => () => h(NIcon, null, { default: () => h(component) })
 
@@ -20,11 +19,10 @@ const ICONS: Record<string, Component> = {
   findings: Bell,
   projects: FolderKanban,
   trajectory: Workflow,
-  health: SlidersHorizontal,
-  secrets: KeyRound
+  health: SlidersHorizontal
 }
 
-const PANEL_KEYS = ['src-autopilot', 'findings', 'projects', 'trajectory', 'health', 'secrets']
+const PANEL_KEYS = ['src-autopilot', 'findings', 'projects', 'trajectory', 'health']
 
 const menuOptions: MenuOption[] = PANEL_KEYS.map(key => ({
   label: pageNames[key] ?? key,
@@ -39,8 +37,7 @@ const panelComponents: Record<string, Component> = {
   findings: FindingsPanel,
   projects: ProjectsPanel,
   trajectory: TrajectoryPanel,
-  health: HealthPanel,
-  secrets: SecretsPanel
+  health: HealthPanel
 }
 
 const activePanel = computed(() => panelComponents[activePage.value] ?? SrcAutopilotPanel)

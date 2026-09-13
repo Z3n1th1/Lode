@@ -149,15 +149,14 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 
     if decision.escalates and decision.target:
         # Subtask node: a blackboard intent + a durable job (DAG/lease handled there).
+        # The runner announces it (subtask_started) — don't emit a second copy here.
         run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
         subtask = get_registry(state_dir).create(
             session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
             target=decision.target,
             payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
-                     "reason": decision.reason},
+                     "reason": decision.reason, "title": mode.title},
         )
-        ctx.emit("subtask_started", job_id=subtask.job_id, kind=decision.subtask_kind,
-                 target=decision.target, title=mode.title)
         get_runner(state_dir).submit(subtask)
 
     prompt = skills.compose_prompt(mode.skill)

@@ -5,12 +5,10 @@ that is added, renamed or accidentally dropped must be an intentional edit here.
 """
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -26,7 +24,9 @@ SESSION_SECRET = "session-secret-for-test-0123456789"
 # Frozen (method, path) set produced by create_app().
 # P2 removed the phantom-module routes (/keys*, /fingerprint, /sink-kb, /poc,
 # /socks, /egress, /evolve, /proxy/subscriptions), the /dsh + /arl proxies and
-# the intel routes. Deliberately 42 entries now (was 101 at P0).
+# the intel routes. P5 removed the whole /src-agent/* surface (run + session
+# management + chat, plus the H1 LLM intake) now that the unified conversation
+# drives the same durable jobs. Deliberately 37 entries.
 ROUTE_CONTRACT = frozenset({
     ("*", "/assets"),
     ("GET", "/"),
@@ -44,20 +44,6 @@ ROUTE_CONTRACT = frozenset({
     ("GET", "/api/v1/llm/settings"),
     ("PUT", "/api/v1/llm/settings"),
     ("POST", "/api/v1/llm/test"),
-    # src agent run
-    ("POST", "/api/v1/src-agent/start"),
-    ("GET", "/api/v1/src-agent/status"),
-    ("POST", "/api/v1/src-agent/stop"),
-    ("POST", "/api/v1/src-agent/intake"),
-    ("GET", "/api/v1/src-agent/progress"),
-    # src agent chat / sessions
-    ("GET", "/api/v1/src-agent/sessions"),
-    ("PATCH", "/api/v1/src-agent/sessions/{session_id}"),
-    ("DELETE", "/api/v1/src-agent/sessions/{session_id}"),
-    ("POST", "/api/v1/src-agent/sessions/prune"),
-    ("GET", "/api/v1/src-agent/history"),
-    ("POST", "/api/v1/src-agent/chat"),
-    ("GET", "/api/v1/src-agent/events"),
     # findings / report
     ("GET", "/api/v1/findings"),
     ("GET", "/api/v1/report"),
@@ -68,8 +54,6 @@ ROUTE_CONTRACT = frozenset({
     ("GET", "/api/v1/projects"),
     ("GET", "/api/v1/project"),
     ("GET", "/api/v1/trajectory"),
-    ("GET", "/api/v1/conversation"),
-    ("GET", "/api/v1/conversation/stream"),
     ("POST", "/api/v1/session/guidance"),
     ("GET", "/api/v1/session/guidance"),
     ("POST", "/api/v1/project/intake"),
@@ -117,26 +101,15 @@ class _ConsoleCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def build(self, *, patch_chat=None):
-        ctx = patch("agents.src_chat.chat", patch_chat) if patch_chat else None
-        if ctx:
-            ctx.start()
-        try:
-            app = create_app(
-                state_dir=self.state_dir, password=PASSWORD,
-                session_secret=SESSION_SECRET, static_dir=self.static_dir,
-            )
-        finally:
-            if ctx:
-                ctx.stop()
+    def build(self):
+        app = create_app(
+            state_dir=self.state_dir, password=PASSWORD,
+            session_secret=SESSION_SECRET, static_dir=self.static_dir,
+        )
         client = TestClient(app)
         client.__enter__()
         self.addCleanup(client.__exit__, None, None, None)
         return client
-
-    def login(self, client) -> None:
-        resp = client.post("/api/v1/session", json={"password": PASSWORD})
-        self.assertEqual(204, resp.status_code, resp.text)
 
 
 class RouteContractTests(_ConsoleCase):
@@ -155,12 +128,11 @@ class AuthGateTests(_ConsoleCase):
         # Bodies carry valid payloads so FastAPI's request validation does not
         # short-circuit to 422 before the handler's session check runs.
         for method, path, body in (
-            ("GET", "/api/v1/src-agent/status", None),
-            ("GET", "/api/v1/src-agent/sessions", None),
-            ("POST", "/api/v1/src-agent/chat", {"message": "hi"}),
-            ("POST", "/api/v1/src-agent/start", {"target_url": "http://example.com"}),
             ("GET", "/api/v1/llm/settings", None),
             ("GET", "/api/v1/dashboard", None),
+            ("GET", "/api/v1/chat/sessions/src-abc1234567/events", None),
+            ("GET", "/api/v1/chat/sessions/src-abc1234567/stream", None),
+            ("POST", "/api/v1/chat/sessions/src-abc1234567/messages", {"text": "hi"}),
         ):
             with self.subTest(path=path):
                 resp = client.request(method, path, json=body)
@@ -171,54 +143,6 @@ class AuthGateTests(_ConsoleCase):
         resp = client.get("/healthz")
         self.assertEqual(200, resp.status_code)
         self.assertEqual("required", resp.json()["authentication"])
-
-
-class SrcAgentCharacterizationTests(_ConsoleCase):
-    def test_status_returns_dict_with_status_key(self) -> None:
-        client = self.build()
-        self.login(client)
-        resp = client.get("/api/v1/src-agent/status")
-        self.assertEqual(200, resp.status_code, resp.text)
-        body = resp.json()
-        self.assertIsInstance(body, dict)
-        self.assertIn("status", body)
-        self.assertNotIn("thread", body)
-
-    def test_stop_when_not_running(self) -> None:
-        client = self.build()
-        self.login(client)
-        resp = client.post("/api/v1/src-agent/stop")
-        self.assertEqual(200, resp.status_code, resp.text)
-        self.assertEqual({"ok": False, "reason": "not_running"}, resp.json())
-
-    def test_start_rejects_invalid_target(self) -> None:
-        client = self.build()
-        self.login(client)
-        resp = client.post("/api/v1/src-agent/start", json={"target_url": "not-a-url"})
-        self.assertEqual(400, resp.status_code, resp.text)
-        self.assertEqual("invalid_target", resp.json()["detail"])
-
-    def test_chat_rejects_empty_message(self) -> None:
-        client = self.build()
-        self.login(client)
-        resp = client.post("/api/v1/src-agent/chat", json={"message": "   "})
-        self.assertEqual(400, resp.status_code, resp.text)
-        self.assertEqual("empty_message", resp.json()["detail"])
-
-    def test_chat_returns_reply_shape(self) -> None:
-        client = self.build(patch_chat=lambda session, message, timeout=120.0: "pong")
-        self.login(client)
-        resp = client.post("/api/v1/src-agent/chat", json={"message": "hi"})
-        self.assertEqual(200, resp.status_code, resp.text)
-        body = resp.json()
-        self.assertEqual("pong", body["reply"])
-        self.assertIn("session_id", body)
-        self.assertIn("events", body)
-
-    def test_conversation_stream_requires_session(self) -> None:
-        client = self.build()
-        resp = client.get("/api/v1/conversation/stream")
-        self.assertEqual(401, resp.status_code, resp.text)
 
 
 if __name__ == "__main__":

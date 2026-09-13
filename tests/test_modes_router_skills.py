@@ -121,5 +121,59 @@ class SkillsTests(unittest.TestCase):
         self.assertLessEqual(len(text), 10 + len("\n\n[... skill pack truncated ...]"))
 
 
+class ShippedSkillsTests(unittest.TestCase):
+    """The packs on disk are what actually primes each mode's turn."""
+
+    EXPECTED = ("chat", "ctf", "src-blackbox", "code-audit",
+                "frontend-dev", "backend-dev", "refactor-guard")
+
+    def test_expected_packs_are_present(self) -> None:
+        packs = skills.discover()
+        for name in self.EXPECTED:
+            with self.subTest(pack=name):
+                self.assertIn(name, packs)
+
+    def test_every_mode_skill_resolves(self) -> None:
+        packs = skills.discover()
+        for mode in modes.modes().values():
+            with self.subTest(mode=mode.name):
+                self.assertIn(mode.skill, packs)
+
+    def test_every_pack_has_a_frontmatter_description(self) -> None:
+        for name, pack in skills.discover().items():
+            with self.subTest(pack=name):
+                head = pack.entry.read_text(encoding="utf-8")[:400]
+                self.assertTrue(head.startswith("---"), f"{name} is missing frontmatter")
+                self.assertIn("description:", head)
+
+    def test_packs_fit_the_prompt_budget_untruncated(self) -> None:
+        marker = "[... skill pack truncated ...]"
+        for name in self.EXPECTED:
+            with self.subTest(pack=name):
+                text = skills.compose_prompt(name)
+                self.assertTrue(text.strip(), f"{name} composed to nothing")
+                self.assertLessEqual(len(text), skills.DEFAULT_MAX_CHARS)
+                self.assertNotIn(marker, text)
+
+    def test_modules_are_lazy(self) -> None:
+        base = skills.compose_prompt("src-blackbox")
+        self.assertNotIn("A unlocks B", base)
+        with_chain = skills.compose_prompt("src-blackbox", modules=("chains",))
+        self.assertIn("A unlocks B", with_chain)
+
+    def test_src_blackbox_carries_the_operating_doctrine(self) -> None:
+        # SRC_SYSTEM_PROMPT now lives in the pack, not in agents/src_chat.py.
+        text = skills.compose_prompt("src-blackbox")
+        for phrase in ("授权安全研究员", "SQLi 识别", "IDOR 识别", "不挖 CORS"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_module_names_are_listed(self) -> None:
+        self.assertEqual(["auth", "chains", "idor", "injection", "recon", "ssrf"],
+                         skills.module_names("src-blackbox"))
+        self.assertEqual(["components", "store", "testing", "ui-lib"],
+                         skills.module_names("frontend-dev"))
+
+
 if __name__ == "__main__":
     unittest.main()

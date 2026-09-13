@@ -27,11 +27,6 @@ from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
 try:
-    from core import strix_conversation  # type: ignore
-except Exception:  # noqa: BLE001
-    strix_conversation = None  # type: ignore
-
-try:
     from core import llm_settings  # type: ignore
 except Exception:  # noqa: BLE001
     llm_settings = None  # type: ignore
@@ -134,76 +129,6 @@ def build(ctx: Ctx) -> APIRouter:
     def trajectory(request: Request, id: str = "") -> JSONResponse:
         _require_session(request)
         return JSONResponse(content=ctx.control_plane.session_trajectory(id), headers=_NOSTORE)
-
-    @router.get("/api/v1/conversation")
-    def conversation(request: Request, id: str = "", limit: int = 2000) -> JSONResponse:
-        """F1 对话台:某会话 Strix 真实多智能体对话(agents.db → user/assistant/tool_call/tool_result + agent 树)。"""
-        _require_session(request)
-        return JSONResponse(content=ctx.control_plane.conversation(id, limit=limit), headers=_NOSTORE)
-
-    def _pending_approvals() -> List[Dict[str, str]]:
-        """Human-gate items surfaced as first-class events.
-
-        No gate has a backing module in this checkout (the poc / fingerprint /
-        evolve modules were removed with their routes), so this stays empty until
-        a real gate is wired to the blackboard human-review flag.
-        """
-        return []
-
-    @router.get("/api/v1/conversation/stream")
-    async def conversation_stream(request: Request, id: str = "") -> StreamingResponse:
-        """F3 SSE 实时:tail agents.db 新增消息(id>last),边跑边冒。替 20s 轮询。
-        F5:同通道把待人工确认门作为一等事件推 approval_required/approval_resolved(AG-UI INTERRUPT)。"""
-        _require_session(request)
-        import asyncio
-
-        async def gen():
-            last = 0
-            appr_seen: Dict[str, str] = {}
-            if strix_conversation is not None:
-                db = ctx.control_plane.conversation_db_path(id)
-            else:
-                db = None
-            if db is not None:
-                try:
-                    last = strix_conversation.max_message_id(db)
-                except Exception:  # noqa: BLE001
-                    last = 0
-            yield ": connected\n\n"   # SSE 注释保活
-            for _ in range(0, 1800):  # ~1h(2s/轮),客户端断开即止
-                if await request.is_disconnected():
-                    break
-                try:
-                    if db is None and strix_conversation is not None:  # run 还没起,重探
-                        db = ctx.control_plane.conversation_db_path(id)
-                    if db is not None:
-                        for ev in strix_conversation.load_since(db, last, limit=200):
-                            last = ev.get("seq", last)
-                            yield "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    current = {a["approval_id"]: a for a in _pending_approvals()}
-                    for aid, a in current.items():
-                        if aid not in appr_seen:
-                            yield "data: " + json.dumps(
-                                {"seq": 0, "ts": time.time(), "source": "gate",
-                                 "kind": "approval_required", "approval_id": aid,
-                                 "gate": a["gate"], "summary": a["summary"]},
-                                ensure_ascii=False) + "\n\n"
-                    for aid in appr_seen:
-                        if aid not in current:
-                            yield "data: " + json.dumps(
-                                {"seq": 0, "ts": time.time(), "source": "gate",
-                                 "kind": "approval_resolved", "approval_id": aid},
-                                ensure_ascii=False) + "\n\n"
-                    appr_seen = current
-                except Exception:  # noqa: BLE001
-                    pass
-                await asyncio.sleep(2)
-
-        return StreamingResponse(gen(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @router.post("/api/v1/session/guidance")
     def session_guidance(payload: SessionGuidanceRequest, request: Request) -> JSONResponse:

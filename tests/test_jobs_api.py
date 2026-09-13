@@ -65,37 +65,35 @@ class _Base(unittest.TestCase):
 
 
 class JobEndpointTests(_Base):
-    def test_start_creates_a_durable_job_and_completes(self) -> None:
-        def fake_src_loop(job, ctx):
+    """Job lifecycle. The only way to launch a durable job now is a chat turn."""
+
+    SESSION = "src-abc1234567"
+
+    def _send_turn(self, text="hi") -> dict:
+        resp = self.client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages", json={"text": text})
+        self.assertEqual(202, resp.status_code, resp.text)
+        return resp.json()
+
+    def test_turn_creates_a_durable_job_and_completes(self) -> None:
+        def fake_turn(job, ctx):
             ctx.progress(phase="done")
             return {"summary_ref": "sum-1"}
 
-        self.start_client({"src_loop": fake_src_loop})
+        self.start_client({"chat_turn": fake_turn})
         self.login()
-        resp = self.client.post("/api/v1/src-agent/start", json={"target_url": "http://example.com"})
-        self.assertEqual(200, resp.status_code, resp.text)
-        body = resp.json()
-        self.assertTrue(body["ok"])
-        job_id = body["job_id"]
+        job_id = self._send_turn()["job_id"]
         self.assertTrue(job_id.startswith("J-"))
 
         listing = self.client.get("/api/v1/jobs").json()["jobs"]
         self.assertEqual([job_id], [j["job_id"] for j in listing])
         self.assertTrue(_wait(lambda: self.client.get(f"/api/v1/jobs/{job_id}").json()["status"] == "completed"))
         detail = self.client.get(f"/api/v1/jobs/{job_id}").json()
+        self.assertEqual("chat_turn", detail["kind"])
+        self.assertEqual(self.SESSION, detail["session_id"])
         self.assertEqual("sum-1", detail["summary_ref"])
         self.assertEqual("done", detail["progress"]["phase"])
 
-    def test_status_projects_the_job(self) -> None:
-        self.start_client({"src_loop": lambda job, ctx: {"summary_ref": "s"}})
-        self.login()
-        self.client.post("/api/v1/src-agent/start", json={"target_url": "http://example.com"})
-        result = self.client.get("/api/v1/src-agent/status").json()
-        self.assertIn(result["status"], {"running", "completed"})
-        self.assertTrue(result["job_id"].startswith("J-"))
-        self.assertNotIn("thread", result)
-
-    def test_second_start_conflicts_while_running(self) -> None:
+    def test_job_stop_is_cooperative(self) -> None:
         def slow(job, ctx):
             for _ in range(1000):
                 if ctx.stopped():
@@ -103,22 +101,18 @@ class JobEndpointTests(_Base):
                 time.sleep(0.01)
             return {}
 
-        self.start_client({"src_loop": slow})
+        self.start_client({"chat_turn": slow})
         self.login()
-        first = self.client.post("/api/v1/src-agent/start", json={"target_url": "http://example.com"})
-        self.assertEqual(200, first.status_code)
-        second = self.client.post("/api/v1/src-agent/start", json={"target_url": "http://example.com"})
-        self.assertEqual(409, second.status_code)
-        self.assertEqual("agent_already_running", second.json()["detail"])
-        job_id = first.json()["job_id"]
-        self.client.post("/api/v1/src-agent/stop")
+        job_id = self._send_turn()["job_id"]
+        stop = self.client.post(f"/api/v1/jobs/{job_id}/stop")
+        self.assertEqual(200, stop.status_code, stop.text)
         self.assertTrue(_wait(lambda: self.client.get(f"/api/v1/jobs/{job_id}").json()["status"]
                               in {"failed", "completed", "interrupted"}))
 
-    def test_stop_when_idle(self) -> None:
+    def test_stop_turn_when_idle(self) -> None:
         self.start_client()
         self.login()
-        resp = self.client.post("/api/v1/src-agent/stop")
+        resp = self.client.post(f"/api/v1/chat/sessions/{self.SESSION}/turn/stop")
         self.assertEqual({"ok": False, "reason": "not_running"}, resp.json())
 
     def test_jobs_require_session(self) -> None:
@@ -132,24 +126,6 @@ class JobEndpointTests(_Base):
         self.login()
         self.assertEqual(404, self.client.get("/api/v1/jobs/J-nope").status_code)
         self.assertEqual(404, self.client.post("/api/v1/jobs/J-nope/stop").status_code)
-
-    def test_start_rejects_invalid_target(self) -> None:
-        self.start_client()
-        self.login()
-        resp = self.client.post("/api/v1/src-agent/start", json={"target_url": "nope"})
-        self.assertEqual(400, resp.status_code)
-
-    def test_legacy_thread_path_when_flag_disabled(self) -> None:
-        """LODE_JOBS_V2=0 keeps the old daemon-thread behaviour (no job_id)."""
-        with patch.dict("os.environ", {"LODE_JOBS_V2": "0"}):
-            self.start_client()
-            self.login()
-            with patch("console.routers.src_agent.threading.Thread") as thread_cls:
-                resp = self.client.post("/api/v1/src-agent/start",
-                                       json={"target_url": "http://example.com"})
-        self.assertEqual(200, resp.status_code, resp.text)
-        self.assertNotIn("job_id", resp.json())
-        thread_cls.assert_called_once()
 
 
 class ChatStreamTests(_Base):

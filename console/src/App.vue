@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// F6 收敛后的薄壳:登录门 → 对话台主视图(ConsoleChat) + 次级面板抽屉 + 共享弹窗。
+// 薄壳:登录门 → 统一对话(唯一主视图) + 挖洞设置 + 次级面板抽屉 + 共享弹窗。
 // 全部业务状态/逻辑在 store.ts(单例);面板在 components/panels/*;弹窗在 components/modals/*。
 import { onBeforeUnmount, onMounted } from 'vue'
 import { NConfigProvider, NMessageProvider, dateZhCN, zhCN, type GlobalThemeOverrides } from 'naive-ui'
@@ -7,17 +7,15 @@ import { NConfigProvider, NMessageProvider, dateZhCN, zhCN, type GlobalThemeOver
 import AppLogin from './components/AppLogin.vue'
 import AppHeader from './components/AppHeader.vue'
 import PanelsDrawer from './components/PanelsDrawer.vue'
-import ConsoleChat from './components/ConsoleChat.vue'
-import SrcAgentPanel from './components/panels/SrcAgentPanel.vue'
+import UnifiedChat from './components/UnifiedChat.vue'
 import SettingsPanel from './components/panels/SettingsPanel.vue'
 import DetailModal from './components/modals/DetailModal.vue'
-import KeyUnlockModal from './components/modals/KeyUnlockModal.vue'
 import NewProjectModal from './components/modals/NewProjectModal.vue'
 import ProjectResultsModal from './components/modals/ProjectResultsModal.vue'
 
 import { authenticated, refreshDashboard, startPolling, stopPolling, mainView } from './store'
 
-// 审美收敛:naive-ui 与 Element-Plus 共用一套 token(teal 主色 + 8px 圆角)
+// 审美收敛:naive-ui 单套 token(teal 主色 + 8px 圆角)
 const themeOverrides: GlobalThemeOverrides = {
   common: {
     primaryColor: '#178e8b',
@@ -44,15 +42,12 @@ onBeforeUnmount(stopPolling)
       <div v-else class="shell">
         <AppHeader />
         <main class="console-main">
-          <!-- 主视图切换:SRC 挖掘台(默认) / Strix 对话台 / 挖洞设置。
-               ConsoleChat 常驻(v-show)以保留在途 SSE 流;其余面板按需挂载。 -->
-          <ConsoleChat v-show="mainView === 'chat'" />
-          <SrcAgentPanel v-if="mainView === 'src'" />
-          <SettingsPanel v-if="mainView === 'settings'" />
+          <!-- 统一对话是唯一主视图;挖洞设置是唯一的次级视图。 -->
+          <UnifiedChat v-if="mainView === 'chat'" />
+          <SettingsPanel v-else />
         </main>
         <PanelsDrawer />
         <DetailModal />
-        <KeyUnlockModal />
         <NewProjectModal />
         <ProjectResultsModal />
       </div>

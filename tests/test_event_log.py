@@ -31,6 +31,21 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual("user_message", a["kind"])
         self.assertEqual(2, log.max_seq())
 
+    def test_payload_cannot_clobber_the_envelope(self) -> None:
+        """Payload keys matching a *computed* envelope field must not rewrite it.
+
+        ``seq``/``ts`` are not parameters of ``append``, so a handler that emits
+        e.g. ``ts=...`` could otherwise overwrite the event's own sequence number
+        and break ``since``-based replay.
+        """
+        log = EventLog(self.path)
+        a = log.append("user_message", session_id="s1", text="hi", seq=999, ts=1.0)
+        b = log.append("assistant_message", session_id="s1", text="ok", seq=999)
+        self.assertEqual(1, a["seq"])
+        self.assertEqual(2, b["seq"])
+        self.assertNotEqual(1.0, a["ts"])
+        self.assertEqual("user_message", log.since(0)[0]["kind"])
+
     def test_since_returns_only_newer_events(self) -> None:
         log = EventLog(self.path)
         for i in range(5):

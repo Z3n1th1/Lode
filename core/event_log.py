@@ -27,6 +27,11 @@ except ImportError:  # pragma: no cover - stripped checkout with core/ on sys.pa
 MAX_EVENT_BYTES = 64 * 1024
 DEFAULT_LIMIT = 500
 
+# 信封字段由 append 自己写。`session_id`/`turn_id`/`agent_id`/`kind` 都是形参,
+# 载荷里带同名键会直接 TypeError(参数重复);只有 `seq`/`ts` 是计算出来的,能被
+# 载荷一路传进来覆盖掉事件的序号与时间戳 —— 这里挡住它们。
+_ENVELOPE_KEYS = frozenset({"seq", "ts"})
+
 EVENT_KINDS = (
     "user_message", "assistant_message", "assistant_delta", "reasoning",
     "tool_call", "tool_result", "subtask_started", "subtask_progress",
@@ -90,7 +95,7 @@ class EventLog:
                 "agent_id": agent_id,
                 "kind": kind,
             }
-            event.update(payload)
+            event.update({k: v for k, v in payload.items() if k not in _ENVELOPE_KEYS})
             line = json.dumps(event, ensure_ascii=False, default=str)
             if len(line) > MAX_EVENT_BYTES:
                 line = json.dumps({**event, "_truncated": True}, ensure_ascii=False, default=str)[:MAX_EVENT_BYTES]

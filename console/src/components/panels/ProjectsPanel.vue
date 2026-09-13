@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { NButton, NCard, NEmpty, NTag } from 'naive-ui'
 import {
-  projectRows, fleet, intakeRows, pageLoading,
-  projectStatusType, openProject, openProjectResults, openNewProject,
-  taskTagType, taskStatusLabel, trajKindLabel, formatTimestamp
+  projectRows, intakeRows, pageLoading,
+  projectStatusType, openProject, openProjectResults, openNewProject, formatTimestamp
 } from '../../store'
 </script>
 
@@ -16,16 +15,6 @@ import {
         <n-button type="primary" size="small" @click="openNewProject">+ 新建项目</n-button>
       </div>
     </section>
-    <n-card v-if="fleet && fleet.count" class="data-panel" :bordered="false" style="margin-bottom:16px">
-      <template #header><div><span class="panel-kicker">FLEET</span><h2>🟢 在跑 {{ fleet.count }} 个 agent</h2></div></template>
-      <div class="pending-list">
-        <article v-for="f in fleet.running" :key="f.task_id" class="pending-row">
-          <strong>{{ f.target }} <n-tag size="tiny" :type="taskTagType(f.status)" :bordered="false">{{ taskStatusLabel(f.status) }}</n-tag></strong>
-          <span>{{ f.task_id }}{{ f.last_kind ? ' · ' + (trajKindLabel[f.last_kind] || f.last_kind) : '' }}：{{ f.last_event || '—' }}</span>
-          <small>{{ f.created_at ? formatTimestamp(f.created_at) : '' }}</small>
-        </article>
-      </div>
-    </n-card>
     <n-empty v-if="!projectRows.length && !pageLoading" size="small" description="暂无项目(有目标运行后自动归集)" />
     <section v-else class="metric-grid">
       <n-card v-for="p in projectRows" :key="p.project_id" class="metric-card project-card" :bordered="false">

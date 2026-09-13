@@ -26,12 +26,6 @@ from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
 
-
-try:                                   # F1 对话台芯:读 Strix agents.db 真实多智能体对话
-    from core import strix_conversation  # type: ignore
-except Exception:                      # noqa: BLE001
-    strix_conversation = None          # type: ignore
-
 try:                                   # LLM 供应商设置(界面配置 key/分层模型)
     from core import llm_settings      # type: ignore
 except Exception:                      # noqa: BLE001
@@ -41,7 +35,6 @@ try:                                   # LLM provider 池(连通性测试 + 分�
     from core import llm_pool          # type: ignore
 except Exception:                      # noqa: BLE001
     llm_pool = None                    # type: ignore
-
 
 
 def _require_session(request: Request) -> None:
