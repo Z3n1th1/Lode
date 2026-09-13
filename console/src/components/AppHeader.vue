@@ -62,8 +62,8 @@ onMounted(() => {
     <div class="header-left">
       <div class="brand-mark"><Bot :size="18" /></div>
       <div class="brand-copy">
-        <strong>CONTROLPLANE</strong>
-        <span>SRC 漏洞挖掘控制台</span>
+        <strong>LODE</strong>
+        <span>对话式 SRC 控制台</span>
       </div>
     </div>
     <div class="header-actions">

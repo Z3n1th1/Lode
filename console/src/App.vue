@@ -3,7 +3,8 @@
 // 全部业务状态/逻辑在 store.ts(单例);面板在 components/panels/*;弹窗在 components/modals/*。
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import {
-  NConfigProvider, NMessageProvider, darkTheme, dateZhCN, zhCN, type GlobalThemeOverrides
+  NConfigProvider, NDialogProvider, NMessageProvider, darkTheme, dateZhCN, zhCN,
+  type GlobalThemeOverrides
 } from 'naive-ui'
 
 import AppLogin from './components/AppLogin.vue'
@@ -79,19 +80,22 @@ onBeforeUnmount(stopPolling)
     :theme-overrides="themeOverrides"
   >
     <n-message-provider>
-      <AppLogin v-if="!authenticated" />
-      <div v-else class="shell">
-        <AppHeader />
-        <main class="console-main">
-          <!-- 统一对话是唯一主视图;挖洞设置是唯一的次级视图。 -->
-          <UnifiedChat v-if="mainView === 'chat'" />
-          <SettingsPanel v-else />
-        </main>
-        <PanelsDrawer />
-        <DetailModal />
-        <NewProjectModal />
-        <ProjectResultsModal />
-      </div>
+      <n-dialog-provider>
+        <AppLogin v-if="!authenticated" />
+        <div v-else class="shell">
+          <a class="skip-link" href="#main">跳到主内容</a>
+          <AppHeader />
+          <main id="main" class="console-main">
+            <!-- 统一对话是唯一主视图;挖洞设置是唯一的次级视图。 -->
+            <UnifiedChat v-if="mainView === 'chat'" />
+            <SettingsPanel v-else />
+          </main>
+          <PanelsDrawer />
+          <DetailModal />
+          <NewProjectModal />
+          <ProjectResultsModal />
+        </div>
+      </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>
 </template>

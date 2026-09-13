@@ -2,7 +2,9 @@
 // 挖洞设置:界面配置 LLM provider(含 api key)+ 分层模型(reasoner 聪明/贵,explorer 便宜)。
 // 密钥只落到本地 lode-state/llm_settings.json;接口只回掩码,这里也绝不整串回显,不写 localStorage。
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NEmpty, NInput, NSelect, NSpin, NTag, useMessage } from 'naive-ui'
+import {
+  NAlert, NButton, NCard, NEmpty, NInput, NSelect, NSpin, NTag, useDialog, useMessage
+} from 'naive-ui'
 import {
   loadLlmSettings, saveLlmSettings, testLlmProvider,
   type LlmProviderInput, type LlmSettingsView
@@ -22,6 +24,7 @@ interface ProviderDraft {
 }
 
 const message = useMessage()
+const dialog = useDialog()
 const loading = ref(true)
 const saving = ref(false)
 const settings = ref<LlmSettingsView | null>(null)
@@ -81,17 +84,34 @@ function addProvider() {
   })
 }
 
+// 破坏性操作一律先确认,不提供"点了就没了"
 function removeProvider(row: ProviderDraft) {
-  providers.value = providers.value.filter((r) => r !== row)
-  if (reasoner.value === row.name) reasoner.value = ''
-  if (explorer.value === row.name) explorer.value = ''
+  dialog.warning({
+    title: '删除 provider',
+    content: `确定移除「${row.name || '未命名'}」吗?保存后它的模型分层引用也会一起清掉。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      providers.value = providers.value.filter((r) => r !== row)
+      if (reasoner.value === row.name) reasoner.value = ''
+      if (explorer.value === row.name) explorer.value = ''
+    }
+  })
 }
 
 function clearKey(row: ProviderDraft) {
-  row.api_key = ''
-  row.key_set = false
-  row.key_hint = ''
-  row.clear_key = true
+  dialog.warning({
+    title: '清除密钥',
+    content: `确定清除「${row.name || '未命名'}」已保存的密钥吗?保存后需要重新填写。`,
+    positiveText: '清除',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      row.api_key = ''
+      row.key_set = false
+      row.key_hint = ''
+      row.clear_key = true
+    }
+  })
 }
 
 async function test(row: ProviderDraft) {
@@ -194,7 +214,7 @@ onMounted(load)
                 size="small"
                 type="password"
                 show-password-on="click"
-                :placeholder="row.key_set ? `已设置 ••••${row.key_hint}(留空=不改)` : 'sk-...'"
+                :placeholder="row.key_set ? `已设置 ••••${row.key_hint}(留空=不改)` : 'sk-…'"
               />
             </label>
           </div>

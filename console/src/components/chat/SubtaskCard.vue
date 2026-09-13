@@ -110,6 +110,7 @@ const title = computed(
 .spacer { flex: 1; }
 
 .findings {
+  font-variant-numeric: tabular-nums;
   color: var(--pa-primary-hover);
   font-size: var(--pa-fs-xs);
   font-weight: 600;

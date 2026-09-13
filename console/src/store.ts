@@ -80,6 +80,9 @@ export const theme = ref<'dark' | 'light'>(
 )
 export function applyTheme(): void {
   document.documentElement.dataset.theme = theme.value
+  // 移动端地址栏/状态栏跟着底走,不然暗色页面配白条很割裂
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) meta.setAttribute('content', theme.value === 'dark' ? '#0d1117' : '#f5f7fa')
 }
 export function toggleTheme(): void {
   theme.value = theme.value === 'dark' ? 'light' : 'dark'

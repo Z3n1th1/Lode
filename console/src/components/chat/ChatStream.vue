@@ -100,7 +100,7 @@ watch(
 </script>
 
 <template>
-  <div ref="scroller" class="stream" @scroll.passive="onScroll">
+  <div ref="scroller" class="stream" role="log" aria-live="polite" aria-label="对话流" @scroll.passive="onScroll">
     <div v-if="hiddenCount" class="row row--center">
       <n-button size="tiny" quaternary @click="loadOlder">载入更早的 {{ hiddenCount }} 条</n-button>
     </div>

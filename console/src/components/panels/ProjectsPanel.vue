@@ -30,7 +30,7 @@ import {
         <div class="proj-foot">
           <small>{{ p.last_activity ? formatTimestamp(p.last_activity) : '—' }}</small>
           <div style="display:flex;gap:4px">
-            <n-button size="small" quaternary @click="openProjectResults(p.project_id)">成果</n-button>
+            <n-button size="small" quaternary @click="openProjectResults(p.project_id)">看成果</n-button>
             <n-button size="small" type="primary" quaternary @click="openProject(p.project_id)">查看会话 →</n-button>
           </div>
         </div>

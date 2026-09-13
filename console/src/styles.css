@@ -117,6 +117,83 @@ body { min-height: 100vh; font-size: var(--pa-fs-md); }
 
 button, input { font: inherit; }
 
+/* ===== 交互质量(Web Interface Guidelines)===== */
+
+/* 触控:去掉 300ms 双击缩放延迟,并把 tap 高亮收到可控范围 */
+button, a, [role="button"], input, textarea, select, summary {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 键盘焦点必须看得见。:focus-visible 而非 :focus —— 点鼠标不该出现焦点环 */
+:where(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--pa-primary-hover);
+  outline-offset: 2px;
+}
+
+/* 跳过导航:键盘/读屏用户直达主内容 */
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: -48px;
+  z-index: 100;
+  padding: 8px 14px;
+  border-radius: var(--pa-radius-sm);
+  background: var(--pa-surface-3);
+  color: var(--pa-text);
+  font-size: var(--pa-fs-base);
+  text-decoration: none;
+  box-shadow: var(--pa-shadow-pop);
+  transition: top .15s;
+}
+
+.skip-link:focus { top: 12px; }
+
+/* 数字对齐:控制台里全是计数/耗时/端口/哈希,比例数字会让整列跳动。
+   全局开,写作用的正文再关掉 —— 那边看的是排印,不是对齐。 */
+body { font-variant-numeric: tabular-nums; }
+.msg-body,
+.hero-sub,
+.hero-card-text,
+.modal-text,
+.page-heading p {
+  font-variant-numeric: normal;
+}
+
+/* 标题断行:避免最后一行只剩一个词 */
+.login-panel h1,
+.page-heading h1,
+.data-panel h2,
+.hero h1 {
+  text-wrap: balance;
+}
+
+/* 长内容兜底:任何容器里的长 URL / 哈希都不该撑破布局 */
+.n-card__content,
+.pd-body,
+.workbench {
+  overflow-wrap: anywhere;
+}
+
+/* 抽屉/弹窗内滚动不带动外层页面 */
+.pd-body,
+.n-drawer-container,
+.n-modal-container .n-scrollbar-container {
+  overscroll-behavior: contain;
+}
+
+/* 尊重系统的"减少动态效果":动画和过渡全部失效,但不影响布局正确性 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* 滚动条:细一点,别抢视线 */
 * { scrollbar-width: thin; scrollbar-color: var(--pa-border) transparent; }
 *::-webkit-scrollbar { width: 9px; height: 9px; }
