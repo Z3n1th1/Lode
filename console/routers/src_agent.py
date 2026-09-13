@@ -208,35 +208,97 @@ def build(ctx: Ctx) -> APIRouter:
                 _src_agent_state["finished_at"] = time.time()
                 _src_agent_state["error"] = f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
+    def _jobs_v2() -> bool:
+        """Durable jobs (default) vs the legacy daemon thread (LODE_JOBS_V2=0).
+
+        Read per request so the rollback switch can be flipped without a restart.
+        """
+        return os.environ.get("LODE_JOBS_V2", "1").strip() != "0"
+
     @router.post("/api/v1/src-agent/start")
     def src_agent_start(payload: SrcAgentStartRequest, request: Request) -> JSONResponse:
-        """Start the LLM-driven SRC agent pipeline in a background thread."""
+        """Start the LLM-driven SRC agent pipeline as a durable background job."""
         _require_session(request)
         target = _valid_public_target(payload.target_url)
         if not target:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_target")
-        with _src_agent_lock:
-            if _src_agent_state["status"] == "running":
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="agent_already_running")
-        state_dir_path = Path(ctx.state_dir)
-        t = threading.Thread(
-            target=_run_src_agent_background,
-            args=(target, payload.authorization, payload.allowed_domains, payload.allowed_hosts,
-                  state_dir_path, payload.max_cycles, payload.max_explore,
-                  payload.reasoner_prefer, payload.explorer_prefer),
-            daemon=True,
+
+        if not _jobs_v2():
+            with _src_agent_lock:
+                if _src_agent_state["status"] == "running":
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                        detail="agent_already_running")
+            thread = threading.Thread(
+                target=_run_src_agent_background,
+                args=(target, payload.authorization, payload.allowed_domains, payload.allowed_hosts,
+                      Path(ctx.state_dir), payload.max_cycles, payload.max_explore,
+                      payload.reasoner_prefer, payload.explorer_prefer),
+                daemon=True,
+            )
+            thread.start()
+            with _src_agent_lock:
+                _src_agent_state["thread"] = thread
+            return JSONResponse(content={"ok": True, "status": "started", "target": target},
+                                headers=_NOSTORE)
+
+        from console import jobs as _jobs
+
+        # One run at a time (matches the legacy 409 guard).
+        if _jobs.active_jobs(ctx.state_dir):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="agent_already_running")
+        run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
+        job = _jobs.get_registry(ctx.state_dir).create(
+            session_id=str(payload.session_id or ""), kind="src_loop", target=target,
+            payload={
+                "run_id": run_id,
+                "authorization": payload.authorization,
+                "allowed_domains": list(payload.allowed_domains or []),
+                "allowed_hosts": list(payload.allowed_hosts or []),
+                "max_cycles": payload.max_cycles,
+                "max_explore": payload.max_explore,
+                "reasoner_prefer": payload.reasoner_prefer,
+                "explorer_prefer": payload.explorer_prefer,
+                "_state_dir": str(Path(ctx.state_dir)),
+            },
         )
-        t.start()
-        with _src_agent_lock:
-            _src_agent_state["thread"] = t
-        return JSONResponse(content={"ok": True, "status": "started", "target": target}, headers=_NOSTORE)
+        _jobs.get_runner(ctx.state_dir).submit(job)
+        return JSONResponse(
+            content={"ok": True, "status": "started", "target": target,
+                     "job_id": job.job_id, "run_id": run_id},
+            headers=_NOSTORE,
+        )
 
     @router.get("/api/v1/src-agent/status")
     def src_agent_status(request: Request) -> JSONResponse:
-        """Check the current SRC agent run status, including blackboard state."""
+        """Current SRC agent run status, including a live blackboard snapshot."""
         _require_session(request)
-        with _src_agent_lock:
-            result = {k: v for k, v in _src_agent_state.items() if k != "thread"}
+
+        if not _jobs_v2():
+            with _src_agent_lock:
+                result = {k: v for k, v in _src_agent_state.items() if k != "thread"}
+        else:
+            from console import jobs as _jobs
+            recent = _jobs.get_registry(ctx.state_dir).list(limit=1)
+            if not recent:
+                result = {"status": "idle", "run_id": "", "target": "", "started_at": 0.0,
+                          "finished_at": 0.0, "summary": {}, "error": "", "job_id": ""}
+            else:
+                job = recent[0]
+                status_map = {"queued": "running", "running": "running",
+                              "stop_requested": "running", "waiting_approval": "running",
+                              "completed": "completed", "failed": "failed",
+                              "interrupted": "failed"}
+                result = {
+                    "status": status_map.get(job.status, "idle"),
+                    "job_id": job.job_id,
+                    "run_id": str(job.payload.get("run_id") or job.job_id),
+                    "target": job.target,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "summary": {"progress": job.progress},
+                    "error": job.error,
+                }
+
         # Append live blackboard snapshot if running
         if result.get("run_id"):
             bb_path = Path(ctx.state_dir) / "src-agent-runs" / result["run_id"] / "src-blackboard.json"
@@ -263,15 +325,30 @@ def build(ctx: Ctx) -> APIRouter:
 
     @router.post("/api/v1/src-agent/stop")
     def src_agent_stop(request: Request) -> JSONResponse:
-        """Request stop of the running SRC agent (best-effort)."""
+        """Request a stop of the running SRC agent (cooperative, durable)."""
         _require_session(request)
-        with _src_agent_lock:
-            if _src_agent_state["status"] != "running":
-                return JSONResponse(content={"ok": False, "reason": "not_running"}, headers=_NOSTORE)
-            _src_agent_state["status"] = "failed"
-            _src_agent_state["error"] = "operator_stopped"
-            _src_agent_state["finished_at"] = time.time()
-        return JSONResponse(content={"ok": True, "status": "stopped"}, headers=_NOSTORE)
+
+        if not _jobs_v2():
+            with _src_agent_lock:
+                if _src_agent_state["status"] != "running":
+                    return JSONResponse(content={"ok": False, "reason": "not_running"}, headers=_NOSTORE)
+                _src_agent_state["status"] = "failed"
+                _src_agent_state["error"] = "operator_stopped"
+                _src_agent_state["finished_at"] = time.time()
+            return JSONResponse(content={"ok": True, "status": "stopped"}, headers=_NOSTORE)
+
+        from console import jobs as _jobs
+        active = _jobs.active_jobs(ctx.state_dir)
+        if not active:
+            return JSONResponse(content={"ok": False, "reason": "not_running"}, headers=_NOSTORE)
+        runner = _jobs.get_runner(ctx.state_dir)
+        for job in active:
+            runner.stop(job.job_id)
+        return JSONResponse(
+            content={"ok": True, "status": "stopped", "job_ids": [j.job_id for j in active]},
+            headers=_NOSTORE,
+        )
+
 
     # ---- SRC Agent interactive chat ----
     try:

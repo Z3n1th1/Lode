@@ -99,6 +99,7 @@ class SrcIntakeRequest(BaseModel):
 class SrcAgentStartRequest(BaseModel):
     """Request to start an LLM-driven SRC agent run against a target."""
     target_url: str
+    session_id: str = ""          # when set, job events stream into that chat session
     authorization: str = ""
     allowed_domains: List[str] = []
     allowed_hosts: List[str] = []

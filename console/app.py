@@ -1,6 +1,7 @@
 """Console application factory: middleware, routers and the static SPA."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
@@ -9,7 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from console.deps import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH
 from console.projections import ConsoleStaticFiles, ReadOnlyControlPlane
-from console.routers import dashboard, intake, llm, meta, projects, src_agent
+from console.routers import chat, dashboard, intake, jobs, llm, meta, projects, src_agent
 from console.routers.base import Ctx
 
 def create_app(
@@ -25,15 +26,6 @@ def create_app(
     if len(session_secret) < MIN_SESSION_SECRET_LENGTH:
         raise ValueError("console_session_secret_too_short")
 
-    app = FastAPI(title="Pentest Agent ControlPlane", docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=session_secret,
-        session_cookie="pentest_agent_control_plane",
-        max_age=12 * 60 * 60,
-        same_site="strict",
-        https_only=False,
-    )
     control_plane = ReadOnlyControlPlane(state_dir)
 
     ctx = Ctx(
@@ -43,7 +35,35 @@ def create_app(
         session_secret=session_secret,
         static_dir=Path(static_dir) if static_dir is not None else None,
     )
-    for module in (meta, src_agent, dashboard, llm, intake, projects):
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Durable jobs whose owning process died are marked interrupted here.
+        try:
+            from console import jobs as _jobs
+
+            _jobs.recover(ctx.state_dir)
+        except Exception:  # noqa: BLE001 - recovery is best effort
+            pass
+        yield
+        try:
+            from console import jobs as _jobs
+
+            _jobs.shutdown_all()
+        except Exception:  # noqa: BLE001
+            pass
+
+    app = FastAPI(title="Pentest Agent ControlPlane", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret,
+        session_cookie="pentest_agent_control_plane",
+        max_age=12 * 60 * 60,
+        same_site="strict",
+        https_only=False,
+    )
+    for module in (meta, src_agent, dashboard, llm, intake, projects, jobs, chat):
         app.include_router(module.build(ctx))
 
     resolved_static_dir = Path(static_dir) if static_dir is not None else None
