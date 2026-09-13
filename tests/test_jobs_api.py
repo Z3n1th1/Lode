@@ -19,7 +19,7 @@ sys.path.insert(0, str(_ROOT / "core"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from console import jobs as console_jobs  # noqa: E402
-from console.control_plane import create_app  # noqa: E402
+from console.app import create_app  # noqa: E402
 
 PASSWORD = "strong-local-password"
 SECRET = "session-secret-for-test-0123456789"

@@ -15,8 +15,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "core"))
 
 from fastapi.testclient import TestClient
 
-from console import control_plane as cp
-from console.control_plane import create_app
+from console.app import create_app
 
 PASSWORD = "strong-local-password"
 SESSION_SECRET = "session-secret-for-test-0123456789"
@@ -149,34 +148,6 @@ class LlmSettingsEndpointTests(_ConsoleTestCase):
         })
         self.assertEqual(200, resp.status_code)
         self.assertEqual("missing_base_url_or_api_key", resp.json()["error"])
-
-
-class ScopeNormalizationTests(unittest.TestCase):
-    """The LLM's extraction output is untrusted and must be sanitized."""
-
-    def test_wildcards_ips_and_out_of_scope_hosts_are_dropped(self) -> None:
-        out = cp._normalize_scope({
-            "program": "Acme",
-            "in_scope": {
-                "domains": ["acme.com", "*.acme.com", "10.0.0.1", "not a domain"],
-                "hosts": ["api.acme.com", "127.0.0.1"],
-                "urls": ["https://api.acme.com/v1", "https://evil.test/x", "http://127.0.0.1/x"],
-            },
-            "out_of_scope": ["evil.test"],
-            "candidate_targets": ["https://api.acme.com/v1?id=1", "https://evil.test/x", "javascript:alert(1)"],
-            "notes": "n",
-        })
-        self.assertEqual(["acme.com"], out["in_scope"]["domains"])
-        self.assertEqual(["api.acme.com"], out["in_scope"]["hosts"])
-        self.assertEqual(["https://api.acme.com/v1"], out["in_scope"]["urls"])
-        self.assertEqual(["https://api.acme.com/v1?id=1"], out["candidate_targets"])
-        self.assertEqual("Acme", out["program"])
-
-    def test_garbage_input_yields_an_empty_draft(self) -> None:
-        out = cp._normalize_scope({"in_scope": "not-a-dict", "candidate_targets": "nope"})
-        self.assertEqual([], out["in_scope"]["domains"])
-        self.assertEqual([], out["candidate_targets"])
-        self.assertEqual("", out["program"])
 
 
 if __name__ == "__main__":

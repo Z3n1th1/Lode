@@ -19,7 +19,7 @@ sys.path.insert(0, str(_ROOT / "core"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from console import jobs as console_jobs  # noqa: E402
-from console.control_plane import create_app  # noqa: E402
+from console.app import create_app  # noqa: E402
 from agents import src_chat as agents_src_chat  # noqa: E402
 
 PASSWORD = "strong-local-password"
@@ -164,8 +164,13 @@ class EscalationTests(_ChatCase):
             ctx.emit("subtask_progress", phase="recon")
             return {"summary_ref": "loop-done"}
 
-        with patch.object(agents_src_chat, "chat", lambda session, text, **kw: "已收到"):
-            return self.start_client({"src_loop": fake_src_loop})
+        # Keep the model stubbed for the whole test, not just for start-up: the
+        # turn job runs after this method returns, and an unstubbed `chat` would
+        # make a real LLM call (slow, flaky, and it burns quota).
+        patcher = patch.object(agents_src_chat, "chat", lambda session, text, **kw: "已收到")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return self.start_client({"src_loop": fake_src_loop})
 
     def test_target_plus_verb_launches_a_subtask_and_streams_it(self) -> None:
         seen: list = []

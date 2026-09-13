@@ -100,3 +100,25 @@ class AdvisoryFileLock:
         finally:
             handle.close()
             self._thread_lock.release()
+
+
+def replace_with_retry(staged: Path | str, path: Path | str, *, attempts: int = 25,
+                       delay: float = 0.01) -> None:
+    """``os.replace``, retried while a concurrent reader holds the destination open.
+
+    On Windows ``os.replace`` raises ``PermissionError`` (WinError 5/32) whenever
+    another handle has the target open. Atomic-write helpers write to a staged
+    file and then replace, while readers are deliberately lock-free — so that
+    window is reachable under load and one ordinary concurrent read can kill the
+    write. Retry briefly instead of losing the write.
+    """
+    staged_path, final_path = Path(staged), Path(path)
+    for remaining in range(attempts, 0, -1):
+        try:
+            os.replace(staged_path, final_path)
+            return
+        except PermissionError:
+            if remaining == 1:
+                raise
+            time.sleep(delay)
+

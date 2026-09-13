@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from core.file_lock import AdvisoryFileLock
+from core.file_lock import AdvisoryFileLock, replace_with_retry
 from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
@@ -567,7 +567,7 @@ class ReadOnlyControlPlane:
         tmp = self.state_dir / ".model_active_provider.json.tmp"
         try:
             tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            replace_with_retry(tmp, path)
         except OSError:
             return {"ok": False, "error": "write_failed"}
         return {"ok": True, "active": name, "model": doc["model"], "up": doc["up"]}

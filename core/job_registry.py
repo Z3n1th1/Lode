@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
-    from core.file_lock import AdvisoryFileLock
+    from core.file_lock import AdvisoryFileLock, replace_with_retry
 except ImportError:  # pragma: no cover
-    from file_lock import AdvisoryFileLock  # type: ignore
+    from file_lock import AdvisoryFileLock, replace_with_retry  # type: ignore
 
 SCHEMA = "LodeJob/v1"
 JOB_ID_RE = r"^J-[A-Za-z0-9_.-]{1,80}$"
@@ -105,22 +105,6 @@ def new_job_id() -> str:
     return f"J-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
 
 
-def _replace_with_retry(staged: Path, path: Path, *, attempts: int = 25,
-                        delay: float = 0.01) -> None:
-    """``os.replace`` 在 Windows 上会因目标文件正被打开而抛 PermissionError。
-
-    读侧是刻意无锁的(见模块 docstring),所以"写替换"与"读打开"天然会重叠 ——
-    负载一高这个窗口就会被撞上。重试到超时为止,而不是让一次正常的并发读把
-    写操作打挂。
-    """
-    for remaining in range(attempts, 0, -1):
-        try:
-            os.replace(staged, path)
-            return
-        except PermissionError:
-            if remaining == 1:
-                raise
-            time.sleep(delay)
 
 
 class JobRegistry:
@@ -140,7 +124,7 @@ class JobRegistry:
         path = self._path(record.job_id)
         staged = path.with_name("." + path.name + ".tmp")
         staged.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        _replace_with_retry(staged, path)
+        replace_with_retry(staged, path)
 
     # -- API -----------------------------------------------------------------
     def create(self, *, session_id: str = "", turn_id: str = "", kind: str = "",

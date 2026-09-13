@@ -28,7 +28,7 @@ def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
 
 class ReadOnlyControlPlaneTests(unittest.TestCase):
     def test_intake_toggle_sanitizer_hard_disables_bruteforce(self) -> None:
-        from console.control_plane import _sanitize_toggles
+        from console.deps import _sanitize_toggles
 
         sanitized = _sanitize_toggles({
             "scan_enabled": True,
@@ -48,7 +48,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
         )))
 
     def test_public_target_rejects_embedded_credentials_and_bad_ports(self) -> None:
-        from console.control_plane import _valid_public_target
+        from console.deps import _valid_public_target
 
         self.assertEqual("", _valid_public_target("https://user:secret@example.com"))
         self.assertEqual("", _valid_public_target("https://example.com:bad"))
@@ -181,7 +181,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 (root / f"{source_name}.lock").write_bytes(b"\0")
 
     def test_snapshot_refuses_sources_without_existing_lock_sidecars(self) -> None:
-        from console.control_plane import ReadOnlyControlPlane
+        from console.projections import ReadOnlyControlPlane
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp)
@@ -204,7 +204,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(content, (state_dir / relative).read_bytes())
 
     def test_snapshot_is_redacted_bounded_and_does_not_change_state_files(self) -> None:
-        from console.control_plane import ReadOnlyControlPlane
+        from console.projections import ReadOnlyControlPlane
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp)
@@ -240,7 +240,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(content, (state_dir / relative).read_bytes())
 
     def test_dashboard_requires_a_login_session(self) -> None:
-        from console.control_plane import create_app
+        from console.app import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -276,7 +276,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
 
     def test_src_autopilot_projection_is_authenticated_bounded_and_local_only(self) -> None:
         from core.src_blackboard import SrcBlackboard
-        from console.control_plane import create_app
+        from console.app import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -305,7 +305,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertTrue(dashboard["src_autopilot"]["available"])
 
     def test_login_supports_a_unicode_password(self) -> None:
-        from console.control_plane import create_app
+        from console.app import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             password = "本地控制面-强口令-2026-安全测试"
@@ -319,7 +319,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual(204, client.post("/api/v1/session", json={"password": password}).status_code)
 
     def test_app_rejects_short_authentication_secrets(self) -> None:
-        from console.control_plane import create_app
+        from console.app import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -338,7 +338,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
 
     def test_model_active_switch_endpoint(self) -> None:
         """R2: POST /api/v1/model/active 只接受池内 provider,原子写状态文件,GET /api/v1/models 回显。"""
-        from console.control_plane import create_app
+        from console.app import create_app
 
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"

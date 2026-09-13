@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+
+from core.file_lock import replace_with_retry
+
 import re
 import time
 from pathlib import Path
@@ -173,7 +176,7 @@ def write_settings(
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = target.with_name("." + target.name + ".tmp")
     staged.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(staged, target)
+    replace_with_retry(staged, target)
     return doc
 
 

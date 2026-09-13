@@ -46,6 +46,7 @@ _CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
+from file_lock import replace_with_retry
 from file_lock import AdvisoryFileLock
 from confidentiality import external_target_label, sanitize_external_payload, sanitize_external_text
 from goal_control import GoalControl
@@ -139,7 +140,7 @@ class SeenMessages:
             json.dumps({"message_ids": self._seen}, ensure_ascii=False, sort_keys=True),
             encoding="utf-8",
         )
-        os.replace(staged, self.path)
+        replace_with_retry(staged, self.path)
 
     def seen_or_mark(self, message_id: str) -> bool:
         """Return whether this message was already handled, then persist new IDs."""

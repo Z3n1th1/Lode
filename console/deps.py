@@ -7,7 +7,6 @@ import hmac
 import ipaddress
 import json
 import math
-import os
 import re
 import secrets
 import subprocess
@@ -24,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from core.file_lock import AdvisoryFileLock
+from core.file_lock import AdvisoryFileLock, replace_with_retry
 from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
 
@@ -135,173 +134,6 @@ def _valid_public_target(raw: str) -> str:
     return s[:300]
 
 
-# ---- H1 接入：抓公开页面 + LLM 抽取 scope（公开页面不是打目标，授权门不适用，但 SSRF 门必须留）----
-
-INTAKE_TEXT_MAX = 200_000
-INTAKE_PROMPT_CHARS = 30_000
-INTAKE_BODY_MAX_BYTES = 1_000_000
-INTAKE_MAX_REDIRECTS = 3
-INTAKE_MAX_ITEMS = 20
-_DOMAIN_NAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
-
-INTAKE_SYSTEM = """\
-你在读一个漏洞赏金项目（如 HackerOne program）的页面或文本，目标是把资产范围抽成结构化 JSON。
-
-只输出严格 JSON，不要 markdown fence，不要解释：
-{
-  "program": "项目名/组织名",
-  "in_scope": {"domains": ["example.com"], "hosts": ["api.example.com"], "urls": ["https://api.example.com"]},
-  "out_of_scope": ["不在此范围的域名或说明"],
-  "candidate_targets": ["https://api.example.com"],
-  "notes": "范围要点/限制(可选)"
-}
-
-规则：
-1. 只抽取页面里**明确列出**的域名/主机/URL，不要脑补、不要扩充。
-2. 通配符（如 *.example.com）只保留根域名 example.com，不要保留 *。
-3. 不是域名的条目（邮箱、人名、奖项、货币金额）一律丢掉。
-4. candidate_targets 只放真正适合先做被动探测的 URL（带参数的 API 优先，静态资源不要）。
-5. 页面里没有的信息就留空数组，不要编造。"""
-
-INTAKE_USER_TEMPLATE = """\
-来源：{source}
-
-页面/文本内容：
-{content}
-
-按系统提示输出严格 JSON。"""
-
-
-def _normalize_domain(value: Any) -> str:
-    """Accept only a public-ish DNS name; drop IP literals and wildcards."""
-    name = _text(value, limit=253).lower().lstrip("*.").rstrip(".")
-    if not name or not _DOMAIN_NAME_RE.match(name):
-        return ""
-    try:
-        ipaddress.ip_address(name)
-        return ""                                  # IP 字面量不作为域名范围
-    except ValueError:
-        return name
-
-
-def _normalize_domain_list(values: Any) -> List[str]:
-    out: List[str] = []
-    for item in (values or [])[:INTAKE_MAX_ITEMS * 2]:
-        name = _normalize_domain(item)
-        if name and name not in out:
-            out.append(name)
-    return out[:INTAKE_MAX_ITEMS]
-
-
-def _url_inside_scope(raw: Any, accepted: Iterable[str]) -> str:
-    """Keep only a valid public URL whose host sits inside the accepted scope."""
-    target = _valid_public_target(str(raw or ""))
-    if not target:
-        return ""
-    host = (urlparse(target).hostname or "").lower()
-    if not host:
-        return ""
-    for base in accepted:
-        if host == base or host.endswith("." + base):
-            return target[:300]
-    return ""
-
-
-def _normalize_url_list(values: Any, accepted: Iterable[str]) -> List[str]:
-    allowed = [str(item) for item in accepted if item]
-    out: List[str] = []
-    for item in (values or [])[:INTAKE_MAX_ITEMS * 2]:
-        url = _url_inside_scope(item, allowed)
-        if url and url not in out:
-            out.append(url)
-    return out[:INTAKE_MAX_ITEMS]
-
-
-def _normalize_scope(raw: Any) -> Dict[str, Any]:
-    """Sanitize LLM extraction output. The model's answer is untrusted input."""
-    data = raw if isinstance(raw, dict) else {}
-    in_scope = data.get("in_scope") if isinstance(data.get("in_scope"), dict) else {}
-    domains = _normalize_domain_list(in_scope.get("domains"))
-    hosts = _normalize_domain_list(in_scope.get("hosts"))
-    accepted = domains + hosts
-    return {
-        "program": _text(data.get("program"), limit=120),
-        "in_scope": {
-            "domains": domains,
-            "hosts": hosts,
-            "urls": _normalize_url_list(in_scope.get("urls"), accepted),
-        },
-        "out_of_scope": [
-            _text(item, limit=200) for item in (data.get("out_of_scope") or [])[:INTAKE_MAX_ITEMS]
-            if _text(item, limit=200)
-        ],
-        "candidate_targets": _normalize_url_list(data.get("candidate_targets"), accepted),
-        "notes": _text(data.get("notes"), limit=500),
-    }
-
-
-def _http_get_once(url: str, timeout: float) -> Tuple[int, Dict[str, str], bytes]:
-    with httpx.Client(follow_redirects=False, timeout=timeout) as client:
-        resp = client.get(url, headers={"User-Agent": "Lode-Console/1.0"})
-        return resp.status_code, {k.lower(): v for k, v in resp.headers.items()}, resp.content
-
-
-def _fetch_public_page(
-    url: str,
-    *,
-    timeout: float = 10.0,
-    transport: Optional[Callable[[str, float], Tuple[int, Dict[str, str], bytes]]] = None,
-) -> Dict[str, Any]:
-    """Fetch a public page for intake, re-validating SSRF rules on every hop."""
-    get = transport or _http_get_once
-    current = _valid_public_target(url)
-    if not current:
-        return {"ok": False, "url": url[:300], "text": "", "error": "invalid_target"}
-    for _ in range(INTAKE_MAX_REDIRECTS + 1):
-        request_url = current if "://" in current else "http://" + current
-        if not _valid_public_target(request_url):
-            return {"ok": False, "url": request_url[:300], "text": "", "error": "invalid_target"}
-        try:
-            code, headers, body = get(request_url, timeout)
-        except Exception as exc:  # noqa: BLE001 - surface a short reason only
-            return {"ok": False, "url": request_url[:300], "text": "", "error": f"fetch_failed:{type(exc).__name__}"}
-        if code in (301, 302, 303, 307, 308):
-            location = str(headers.get("location") or "").strip()
-            if not location:
-                return {"ok": False, "url": request_url[:300], "text": "", "error": "redirect_without_location"}
-            current = urljoin(request_url, location)
-            continue
-        if code >= 400:
-            return {"ok": False, "url": request_url[:300], "text": "", "error": f"http_{code}"}
-        content_type = str(headers.get("content-type") or "").lower()
-        if content_type and not (content_type.startswith("text/") or content_type.startswith("application/json")):
-            return {"ok": False, "url": request_url[:300], "text": "", "error": "unsupported_content_type"}
-        text = body[:INTAKE_BODY_MAX_BYTES].decode("utf-8", errors="replace")
-        return {"ok": True, "url": request_url[:300], "text": text, "error": ""}
-    return {"ok": False, "url": current[:300], "text": "", "error": "too_many_redirects"}
-
-
-def _extract_scope(content: str, *, source: str, timeout: float = 45.0) -> Dict[str, Any]:
-    """Ask the Reasoner-tier model to turn a page/text into a scope draft."""
-    if llm_pool is None:
-        return {"ok": False, "extracted": None, "error": "llm_pool_unavailable"}
-    prompt = INTAKE_USER_TEMPLATE.format(source=source[:200], content=content[:INTAKE_PROMPT_CHARS])
-    prefer = os.environ.get("SRC_REASONER_PREFER", "").strip()
-    try:
-        raw = llm_pool.complete(INTAKE_SYSTEM, prompt, timeout=timeout, prefer=prefer)
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "extracted": None, "error": f"llm_failed:{type(exc).__name__}"}
-    if not raw:
-        return {"ok": False, "extracted": None, "error": "llm_unavailable"}
-    from agents.src_agent import _parse_json_response
-
-    parsed = _parse_json_response(raw)
-    if parsed is None:
-        return {"ok": False, "extracted": None, "error": "extraction_unparseable"}
-    extracted = _normalize_scope(parsed)
-    if not (extracted["in_scope"]["domains"] or extracted["in_scope"]["hosts"]):
-        return {"ok": False, "extracted": extracted, "error": "no_scope_found"}
-    return {"ok": True, "extracted": extracted, "error": ""}
 
 
 def _valid_profile(pid: str) -> str:
@@ -349,7 +181,7 @@ def _write_intake(state_dir: Path, payload: Dict[str, Any]) -> None:
     final = d / (iid + ".json")
     tmp = d / ("." + iid + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, final)
+    replace_with_retry(tmp, final)
 
 
 def _write_guidance(state_dir: Path, payload: Dict[str, Any]) -> None:
@@ -360,4 +192,4 @@ def _write_guidance(state_dir: Path, payload: Dict[str, Any]) -> None:
     final = d / (gid + ".json")
     tmp = d / ("." + gid + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, final)
+    replace_with_retry(tmp, final)

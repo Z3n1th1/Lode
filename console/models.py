@@ -82,34 +82,3 @@ class LlmTestRequest(BaseModel):
     """Test connectivity for a stored provider or an unsaved draft row."""
     name: str = ""
     provider: LlmProviderInput | None = None
-
-
-class SrcIntakeRequest(BaseModel):
-    """Read a HackerOne program page (URL) or pasted text into a scope draft."""
-    url: str = ""
-    text: str = ""
-
-
-class SrcAgentStartRequest(BaseModel):
-    """Request to start an LLM-driven SRC agent run against a target."""
-    target_url: str
-    session_id: str = ""          # when set, job events stream into that chat session
-    authorization: str = ""
-    allowed_domains: List[str] = []
-    allowed_hosts: List[str] = []
-    max_cycles: int = 20
-    max_explore: int = 3
-    reasoner_prefer: str = ""
-    explorer_prefer: str = ""
-
-
-class SrcAgentChatRequest(BaseModel):
-    """Send a message to the SRC agent chat."""
-    message: str
-    session_id: str = ""
-
-
-class SrcSessionPatchRequest(BaseModel):
-    """Rename and/or pin a stored session."""
-    title: str = ""
-    pinned: Optional[bool] = None

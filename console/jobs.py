@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from core.file_lock import replace_with_retry
 from core.event_log import EventLog
 from core.job_registry import ACTIVE, JobRecord, JobRegistry
 from core.job_runner import JobContext, JobRunner
@@ -78,7 +79,7 @@ def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
         }
         staged = out_dir / ".scope.json.tmp"
         staged.write_text(json.dumps(scope_doc, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(staged, out_dir / "scope.json")
+        replace_with_retry(staged, out_dir / "scope.json")
     except OSError:
         pass
 

@@ -30,7 +30,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
-from core.file_lock import AdvisoryFileLock
+from core.file_lock import AdvisoryFileLock, replace_with_retry
 from agents.surface_discovery import SurfaceResult, SurfaceScope, surface_to_dict
 from core.src_blackboard import SrcBlackboard
 
@@ -326,7 +326,7 @@ class SrcAutopilot:
         if staged.is_symlink():
             raise RuntimeError("src_autopilot_staging_symlink_rejected")
         staged.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(staged, self.state_path)
+        replace_with_retry(staged, self.state_path)
 
     def _validate_target(self, target: str) -> None:
         allowed, reason = self.scope.check_url(target)
@@ -458,7 +458,7 @@ class SrcAutopilot:
         if path.is_symlink() or staged.is_symlink():
             raise RuntimeError("src_autopilot_output_symlink_rejected")
         staged.write_text(text, encoding="utf-8")
-        os.replace(staged, path)
+        replace_with_retry(staged, path)
 
     @staticmethod
     def _summary(state: Dict[str, Any], event: str) -> Dict[str, Any]:

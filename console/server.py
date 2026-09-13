@@ -7,7 +7,8 @@ from pathlib import Path
 
 import uvicorn
 
-from console.control_plane import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH, create_app
+from console.app import create_app
+from console.deps import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH
 
 # Load .env + the Console-managed LLM settings into os.environ. Importing
 # core.config already runs both; the explicit call below re-runs it with the

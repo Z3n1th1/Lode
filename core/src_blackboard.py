@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from core.file_lock import AdvisoryFileLock
+from core.file_lock import AdvisoryFileLock, replace_with_retry
 
 
 SCHEMA = "SrcBlackboard/v1"
@@ -837,7 +837,7 @@ class SrcBlackboard:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.state_path.with_name("." + self.state_path.name + ".next")
         staged.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(staged, self.state_path)
+        replace_with_retry(staged, self.state_path)
 
     def _new_state(self) -> Dict[str, Any]:
         return {

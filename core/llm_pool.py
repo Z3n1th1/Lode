@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+
+from core.file_lock import replace_with_retry
+
 import time
 import urllib.error
 import urllib.request
@@ -107,7 +110,7 @@ def set_active_provider(name: str) -> Optional[Dict[str, str]]:
         path.parent.mkdir(parents=True, exist_ok=True)
         staged = path.with_name("." + path.name + ".tmp")
         staged.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-        os.replace(staged, path)
+        replace_with_retry(staged, path)
     except OSError:
         return None
     return {"name": match["name"], "model": match["model"]}
