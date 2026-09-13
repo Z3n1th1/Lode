@@ -4,11 +4,12 @@
 // 注意:当前后端只声明了 approval_required / approval_resolved 两个事件类型,
 // 还没有对应的"批准"端点,所以这里不摆假的批准按钮 —— 只展示门禁内容,
 // 并把唯一真实的动作(停止本轮)交出去。
+import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 
 import type { ChatEvent } from '../../api'
 
-defineProps<{ event: ChatEvent }>()
+const props = defineProps<{ event: ChatEvent }>()
 const emit = defineEmits<{ (e: 'stop'): void }>()
 
 const GATE_LABEL: Record<string, string> = {
@@ -17,62 +18,67 @@ const GATE_LABEL: Record<string, string> = {
   outbound: '对外请求'
 }
 
-function labelFor(gate: unknown): string {
-  const key = String(gate ?? '')
+const gate = computed(() => {
+  const key = String(props.event.gate ?? '')
   return GATE_LABEL[key] ?? (key || '需要人工确认')
-}
+})
 </script>
 
 <template>
   <div class="approval" role="alert">
-    <div class="approval-head">
-      <span class="approval-badge">待确认</span>
-      <span class="approval-gate">{{ labelFor(event.gate) }}</span>
+    <span class="icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="15" height="15">
+        <path d="M12 3 2.5 20h19L12 3Z" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linejoin="round" />
+        <path d="M12 10v4.6M12 17.4v.2" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+    </span>
+    <div class="body">
+      <p class="gate">{{ gate }}</p>
+      <p class="message">{{ event.message || '该动作需要人工确认后才能继续。' }}</p>
     </div>
-    <p class="approval-message">{{ event.message || '该动作需要人工确认后才能继续。' }}</p>
-    <div class="approval-actions">
-      <n-button size="small" quaternary type="error" @click="emit('stop')">停止本轮</n-button>
-    </div>
+    <n-button size="small" quaternary type="error" @click="emit('stop')">停止本轮</n-button>
   </div>
 </template>
 
 <style scoped>
 .approval {
-  border: 1px solid var(--pa-danger);
-  border-radius: var(--pa-radius-sm);
-  padding: 10px 12px;
-  background: #fdf3f2;
-}
-
-.approval-head {
+  width: 100%;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--pa-warning) 45%, var(--pa-border));
+  border-radius: var(--pa-radius);
+  background: var(--pa-warning-soft);
 }
 
-.approval-badge {
-  padding: 1px 6px;
-  border-radius: var(--pa-radius-sm);
-  background: var(--pa-danger);
-  color: #fff;
-  font-size: var(--pa-fs-xs);
+.icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pa-warning) 22%, transparent);
+  color: var(--pa-warning);
 }
 
-.approval-gate {
-  font-size: var(--pa-fs-base);
-  font-weight: 600;
+.body { flex: 1; min-width: 0; }
+
+.gate {
+  margin: 0;
+  color: var(--pa-text);
+  font-size: var(--pa-fs-md);
+  font-weight: 620;
 }
 
-.approval-message {
-  margin: 8px 0 0;
-  font-size: var(--pa-fs-sm);
+.message {
+  margin: 4px 0 0;
   color: var(--pa-text-2);
+  font-size: var(--pa-fs-base);
+  line-height: 1.6;
   overflow-wrap: anywhere;
-}
-
-.approval-actions {
-  margin-top: 10px;
-  display: flex;
-  justify-content: flex-end;
 }
 </style>

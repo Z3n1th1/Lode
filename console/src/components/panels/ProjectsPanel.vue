@@ -37,7 +37,7 @@ import {
       </n-card>
     </section>
     <n-card v-if="intakeRows.length" class="data-panel" :bordered="false" style="margin-top:16px">
-      <template #header><div><span class="panel-kicker">INTAKE</span><h2>已提交待确认 <small style="color:#9ca3af">(console 提交意图,执行仍走 agent 确认门)</small></h2></div></template>
+      <template #header><div><span class="panel-kicker">INTAKE</span><h2>已提交待确认 <small style="color:var(--pa-text-3)">(console 提交意图,执行仍走 agent 确认门)</small></h2></div></template>
       <div class="pending-list">
         <article v-for="it in intakeRows" :key="it.intake_id" class="pending-row">
           <strong>{{ it.name || it.target_url }}</strong>

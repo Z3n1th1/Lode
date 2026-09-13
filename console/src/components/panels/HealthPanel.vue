@@ -168,8 +168,8 @@ function memState(pct: unknown): 'success' | 'warning' | 'error' | 'default' {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--pa-mono); font-size: var(--pa-fs-base); color: var(--pa-text);
 }
-.svc-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: #93a2a9; }
+.svc-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--pa-text-3); }
 .svc-dot.success { background: var(--pa-success); box-shadow: 0 0 0 3px rgb(21 156 132 / 14%); }
 .svc-dot.error { background: var(--pa-danger); box-shadow: 0 0 0 3px rgb(212 73 68 / 14%); }
-.svc-dot.warning { background: #c98a12; box-shadow: 0 0 0 3px rgb(201 138 18 / 14%); }
+.svc-dot.warning { background: var(--pa-warning); box-shadow: 0 0 0 3px var(--pa-warning-soft); }
 </style>

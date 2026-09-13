@@ -43,9 +43,9 @@ import { newProjectModal, intakeForm, profileOptions, intakeSubmitting, intakeEr
           </div>
         </n-collapse-item>
       </n-collapse>
-      <p style="color:#9aa8af;font-size:12.5px;margin:4px 0 0">提交只记录意图,<strong>不会自动执行</strong>——agent 侧仍走 TargetCard 人工确认门后才开跑。</p>
-      <p v-if="intakeErr" style="color:#dc2626;font-size:13px;margin:2px 0 0">{{ intakeErr }}</p>
-      <p v-if="intakeOk" style="color:#159c84;font-size:13px;margin:2px 0 0">{{ intakeOk }}</p>
+      <p style="color:var(--pa-text-3);font-size:12.5px;margin:4px 0 0">提交只记录意图,<strong>不会自动执行</strong>——agent 侧仍走 TargetCard 人工确认门后才开跑。</p>
+      <p v-if="intakeErr" style="color:var(--pa-danger);font-size:13px;margin:2px 0 0">{{ intakeErr }}</p>
+      <p v-if="intakeOk" style="color:var(--pa-success);font-size:13px;margin:2px 0 0">{{ intakeOk }}</p>
     </div>
     <template #footer>
       <n-button type="primary" block :loading="intakeSubmitting" @click="submitIntake">提交(记录意图,不执行)</n-button>

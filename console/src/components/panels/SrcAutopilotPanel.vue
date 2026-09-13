@@ -228,15 +228,15 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
   transition: transform .12s, box-shadow .12s;
 }
 .dag-node:hover { transform: translateY(-1px); box-shadow: var(--pa-shadow-pop); }
-.dag-node.st-queued { border-left-color: #c98a12; }
-.dag-node.st-claimed { border-left-color: #2f6fed; }
+.dag-node.st-queued { border-left-color: var(--pa-warning); }
+.dag-node.st-claimed { border-left-color: var(--pa-info); }
 .dag-node.st-completed { border-left-color: var(--pa-success); }
 .dag-node.st-blocked { border-left-color: var(--pa-danger); }
-.dag-node.st-dead_end { border-left-color: #9aa5ad; opacity: .72; }
+.dag-node.st-dead_end { border-left-color: var(--pa-text-3); opacity: .72; }
 .dag-node-top { display: flex; align-items: center; gap: 6px; }
-.dag-dot { width: 7px; height: 7px; border-radius: 50%; background: #93a2a9; flex: 0 0 auto; }
-.dag-dot.st-queued { background: #c98a12; }
-.dag-dot.st-claimed { background: #2f6fed; animation: dag-pulse 1.4s infinite; }
+.dag-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pa-text-3); flex: 0 0 auto; }
+.dag-dot.st-queued { background: var(--pa-warning); }
+.dag-dot.st-claimed { background: var(--pa-info); animation: dag-pulse 1.4s infinite; }
 .dag-dot.st-completed { background: var(--pa-success); }
 .dag-dot.st-blocked { background: var(--pa-danger); }
 @keyframes dag-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
@@ -248,7 +248,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
 }
 .dag-node-bottom { display: flex; align-items: center; gap: 8px; }
 .dag-retry { font-size: 10px; color: var(--pa-text-3); font-family: var(--pa-mono); }
-.dag-retry.warn { color: #c98a12; font-weight: 600; }
+.dag-retry.warn { color: var(--pa-warning); font-weight: 600; }
 .dag-err {
   margin-top: 6px; font-size: 10.5px; color: var(--pa-danger);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -263,8 +263,8 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
 }
 .wm-todos { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
 .wm-todos li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--pa-text); }
-.todo-mark { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; flex: 0 0 auto; background: #93a2a9; }
-.todo-open .todo-mark { background: #c98a12; }
+.todo-mark { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; flex: 0 0 auto; background: var(--pa-text-3); }
+.todo-open .todo-mark { background: var(--pa-warning); }
 .todo-done .todo-mark { background: var(--pa-success); }
 .todo-done { color: var(--pa-text-3); text-decoration: line-through; }
 .todo-blocked .todo-mark { background: var(--pa-danger); }

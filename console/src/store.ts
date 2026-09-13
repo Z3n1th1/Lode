@@ -71,6 +71,24 @@ export async function loadChatModes(): Promise<void> {
   } catch { /* 模式列表读不到时不阻塞对话,沿用默认 */ }
 }
 
+// ---- 主题:暗色默认,可切浅色(<html data-theme>),选择记在 localStorage ----
+const THEME_KEY = 'lode.theme'
+export const theme = ref<'dark' | 'light'>(
+  (() => {
+    try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+  })()
+)
+export function applyTheme(): void {
+  document.documentElement.dataset.theme = theme.value
+}
+export function toggleTheme(): void {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark'
+  try { localStorage.setItem(THEME_KEY, theme.value) } catch { /* 隐私模式:不记也行 */ }
+  applyTheme()
+}
+// 模块加载就应用一次,免得选过浅色的人首屏闪一下暗色
+if (typeof document !== 'undefined') applyTheme()
+
 export const snapshot = ref<DashboardSnapshot | null>(null)
 export const authenticated = ref(false)
 export const loading = ref(true)

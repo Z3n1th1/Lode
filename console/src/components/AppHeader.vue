@@ -3,8 +3,11 @@
 // 统一对话是唯一主视图,原来的三个视图 tab 由模式选择器取代。
 import { computed, onMounted, ref } from 'vue'
 import { NAvatar, NButton, NSelect, NTooltip, useMessage } from 'naive-ui'
-import { Bot, LayoutGrid, LogOut, RefreshCw, Settings } from '@lucide/vue'
-import { refreshing, refreshDashboard, signOut, panelsOpen, mainView, chatMode, chatModes, loadChatModes } from '../store'
+import { Bot, LayoutGrid, LogOut, Moon, RefreshCw, Settings, Sun } from '@lucide/vue'
+import {
+  refreshing, refreshDashboard, signOut, panelsOpen, mainView,
+  chatMode, chatModes, loadChatModes, theme, toggleTheme
+} from '../store'
 import { loadModelPool, setActiveModel, type ModelPool } from '../api'
 import ModeSelect from './chat/ModeSelect.vue'
 
@@ -89,6 +92,15 @@ onMounted(() => {
           </n-button>
         </template>
         挖洞设置(模型 / 密钥)
+      </n-tooltip>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button quaternary circle :aria-label="theme === 'dark' ? '切到浅色' : '切到暗色'" @click="toggleTheme()">
+            <Sun v-if="theme === 'dark'" :size="17" />
+            <Moon v-else :size="17" />
+          </n-button>
+        </template>
+        {{ theme === 'dark' ? '切到浅色' : '切到暗色' }}
       </n-tooltip>
       <n-tooltip trigger="hover">
         <template #trigger>
