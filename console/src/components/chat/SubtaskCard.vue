@@ -1,13 +1,13 @@
 <script setup lang="ts">
-// 子任务卡片:一个 job 折成的节点(见 chatEvents.foldSubtasks)。
-// 挂在它第一条事件的位置上渲染,所以对话顺序不乱、也不会重复出现。
+// 子任务:一个 job 折成的节点(见 chatEvents.foldSubtasks),挂在它第一条事件的位置。
+// 版式克制:描边分块、状态用文字+刻度而不是彩色胶囊、阶段当日志尾读。
 import { computed } from 'vue'
 
 import type { SubtaskNode, SubtaskStatus } from '../../chatEvents'
 
 const props = defineProps<{ node: SubtaskNode }>()
 
-const STATUS: Record<SubtaskStatus, string> = {
+const STATE: Record<SubtaskStatus, string> = {
   running: '进行中',
   completed: '已完成',
   failed: '失败'
@@ -21,161 +21,116 @@ const KIND_LABEL: Record<string, string> = {
   chat_turn: '对话回合'
 }
 
-const statusLabel = computed(() => STATUS[props.node.status])
+const state = computed(() => STATE[props.node.status])
 const title = computed(
   () => props.node.title || KIND_LABEL[props.node.kind] || props.node.kind || '子任务'
 )
+/** 最后一条阶段就是当前所在的那一步,提亮它,其余压暗 —— 不排队号、不画箭头。 */
+const lastIndex = computed(() => props.node.updates.length - 1)
 </script>
 
 <template>
-  <article class="subtask" :class="`subtask--${node.status}`">
-    <header class="subtask-head">
-      <span class="dot" aria-hidden="true" />
-      <h3 class="kind">{{ title }}</h3>
-      <code v-if="node.target" class="target">{{ node.target }}</code>
-      <span class="spacer" />
-      <span v-if="node.findings" class="findings">{{ node.findings }} 发现</span>
-      <span class="pill">{{ statusLabel }}</span>
+  <section class="task" :class="`is-${node.status}`">
+    <header class="task-head">
+      <span class="tick" aria-hidden="true" />
+      <h3 class="task-title">{{ title }}</h3>
+      <code v-if="node.target" class="task-target">{{ node.target }}</code>
+      <span class="grow" />
+      <span v-if="node.findings" class="task-count">{{ node.findings }} 个发现</span>
+      <span class="task-state">{{ state }}</span>
     </header>
 
-    <ol v-if="node.updates.length" class="steps">
-      <li v-for="(update, index) in node.updates" :key="index">
-        <span class="step-phase">{{ update.phase }}</span>
-        <span v-if="update.detail" class="step-detail">{{ update.detail }}</span>
+    <ol v-if="node.updates.length" class="phases">
+      <li v-for="(update, index) in node.updates" :key="index" :class="{ 'is-current': index === lastIndex }">
+        <span class="phase">{{ update.phase }}</span>
+        <span v-if="update.detail" class="phase-detail">{{ update.detail }}</span>
       </li>
     </ol>
 
-    <p v-if="node.error" class="err">{{ node.error }}</p>
-  </article>
+    <p v-if="node.error" class="task-error">{{ node.error }}</p>
+  </section>
 </template>
 
 <style scoped>
-.subtask {
-  width: 100%;
-  padding: 12px 14px;
+.task {
   border: 1px solid var(--pa-border);
   border-radius: var(--pa-radius);
   background: var(--pa-surface);
-  box-shadow: var(--pa-shadow-soft);
+  padding: 11px 14px;
 }
 
-.subtask--failed { border-color: color-mix(in srgb, var(--pa-danger) 55%, var(--pa-border)); }
+.task.is-failed { border-color: var(--pa-danger); }
 
-.subtask-head {
+.task-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 9px;
   flex-wrap: wrap;
 }
 
-.dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
+.tick {
+  align-self: center;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--pa-text-3);
 }
 
-.subtask--running .dot {
-  background: var(--pa-primary-hover);
-  box-shadow: 0 0 0 3px var(--pa-primary-soft);
-  animation: breathe 1.6s ease-in-out infinite;
+.task.is-running .tick { background: var(--pa-primary-hover); animation: live 1.6s ease-in-out infinite; }
+.task.is-completed .tick { background: var(--pa-success); }
+.task.is-failed .tick { background: var(--pa-danger); }
+
+@keyframes live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .25; }
 }
 
-.subtask--completed .dot { background: var(--pa-success); }
-.subtask--failed .dot { background: var(--pa-danger); }
-
-@keyframes breathe {
-  0%, 100% { box-shadow: 0 0 0 3px var(--pa-primary-soft); }
-  50% { box-shadow: 0 0 0 6px transparent; }
-}
-
-.kind {
+.task-title {
   margin: 0;
   color: var(--pa-text);
   font-size: var(--pa-fs-md);
   font-weight: 620;
 }
 
-.target {
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--pa-surface-3);
+.task-target {
   color: var(--pa-text-2);
   font-family: var(--pa-mono);
   font-size: var(--pa-fs-xs);
   overflow-wrap: anywhere;
 }
 
-.spacer { flex: 1; }
+.grow { flex: 1; }
 
-.findings {
-  font-variant-numeric: tabular-nums;
-  color: var(--pa-primary-hover);
-  font-size: var(--pa-fs-xs);
-  font-weight: 600;
-}
+.task-count { color: var(--pa-text-2); font-size: var(--pa-fs-sm); font-variant-numeric: tabular-nums; }
+.task-state { color: var(--pa-text-3); font-size: var(--pa-fs-sm); }
+.task.is-running .task-state { color: var(--pa-primary-hover); }
+.task.is-failed .task-state { color: var(--pa-danger); }
 
-.pill {
-  padding: 2px 9px;
-  border-radius: var(--pa-radius-pill);
-  background: var(--pa-surface-3);
-  color: var(--pa-text-2);
-  font-size: var(--pa-fs-xs);
-  font-weight: 600;
-}
-
-.subtask--running .pill { background: var(--pa-primary-soft); color: var(--pa-primary-hover); }
-.subtask--completed .pill { background: color-mix(in srgb, var(--pa-success) 16%, transparent); color: var(--pa-success); }
-.subtask--failed .pill { background: var(--pa-danger-soft); color: var(--pa-danger); }
-
-/* 阶段:左侧导轨 + 节点,读起来像时间线 */
-.steps {
-  margin: 11px 0 0;
-  padding: 0 0 0 3px;
+/* 阶段:当日志尾读,当前那步提亮 */
+.phases {
+  margin: 9px 0 0;
+  padding: 0;
   list-style: none;
+  display: grid;
+  gap: 2px;
 }
 
-.steps li {
-  position: relative;
-  padding: 0 0 8px 16px;
-  color: var(--pa-text-2);
+.phases li {
+  color: var(--pa-text-3);
+  font-family: var(--pa-mono);
   font-size: var(--pa-fs-xs);
-  line-height: 1.6;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
 }
 
-.steps li:last-child { padding-bottom: 0; }
+.phases li.is-current { color: var(--pa-text); }
 
-.steps li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 5px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--pa-border);
-}
+.phase-detail { margin-left: 8px; color: var(--pa-text-3); }
 
-.steps li:not(:last-child)::after {
-  content: "";
-  position: absolute;
-  left: 2.5px;
-  top: 13px;
-  bottom: 0;
-  width: 1px;
-  background: var(--pa-border);
-}
-
-.steps li:last-child::before { background: var(--pa-primary); }
-
-.step-phase { color: var(--pa-text); font-family: var(--pa-mono); }
-.step-detail { margin-left: 6px; }
-
-.err {
-  margin: 10px 0 0;
+.task-error {
+  margin: 9px 0 0;
   color: var(--pa-danger);
-  font-size: var(--pa-fs-xs);
+  font-size: var(--pa-fs-sm);
   overflow-wrap: anywhere;
 }
 </style>

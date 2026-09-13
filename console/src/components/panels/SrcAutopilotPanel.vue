@@ -83,7 +83,6 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
   <main class="workbench">
     <section class="page-heading">
       <div>
-        <p class="eyebrow">SRC AUTOPILOT</p>
         <h1>SRC 黑板</h1>
         <p>候选分诊 · 依赖图 · 失败重试 · 工作记忆,每个 intent 都保留授权和人工复核门</p>
       </div>
@@ -106,7 +105,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
 
     <!-- 依赖图(DAG) -->
     <n-card v-if="srcAutopilot.available" class="data-panel dag-panel" :bordered="false">
-      <template #header><div><span class="panel-kicker">DEPENDENCY DAG</span><h2>任务依赖图</h2></div></template>
+      <template #header><div><h2>任务依赖图</h2></div></template>
       <template #header-extra>
         <n-tag size="small" :bordered="false" type="info">{{ dag.length }} 层 · {{ edgeCount }} 条边</n-tag>
       </template>
@@ -146,7 +145,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
     <!-- 工作记忆 -->
     <section v-if="srcAutopilot.available" class="src-detail-grid">
       <n-card class="data-panel" :bordered="false">
-        <template #header><div><span class="panel-kicker">WORKING MEMORY</span><h2>工作记忆</h2></div></template>
+        <template #header><div><h2>工作记忆</h2></div></template>
         <template #header-extra>
           <n-tag size="small" :bordered="false" :type="openTodos.length ? 'warning' : 'success'">
             {{ openTodos.length ? openTodos.length + ' 项未完成' : '无未完成项' }}
@@ -163,7 +162,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
       </n-card>
 
       <n-card class="data-panel" :bordered="false">
-        <template #header><div><span class="panel-kicker">TIMELINE</span><h2>时间线</h2></div></template>
+        <template #header><div><h2>时间线</h2></div></template>
         <n-empty v-if="!timeline.length" size="small" description="暂无观察记录" />
         <div v-else class="tl">
           <div v-for="(ev, i) in timeline" :key="i" class="tl-row">
@@ -176,7 +175,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
     </section>
 
     <n-card v-if="srcAutopilot.available" class="data-panel" :bordered="false">
-      <template #header><div><span class="panel-kicker">CANDIDATE QUEUE</span><h2>候选队列</h2></div></template>
+      <template #header><div><h2>候选队列</h2></div></template>
       <template #header-extra><n-tag size="small" :bordered="false" type="warning">只读 · 需要人工/授权 runner</n-tag></template>
       <n-empty v-if="!srcAutopilot.candidates.length" size="small" description="暂无候选,等待下一份 SrcSurfaceResult" />
       <n-data-table v-else :columns="candidateColumns" :data="srcAutopilot.candidates" :loading="pageLoading" :pagination="{ pageSize: 20 }" :bordered="false" :single-line="false" :scroll-x="900" />
@@ -184,7 +183,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
 
     <section v-if="srcAutopilot.available" class="src-detail-grid">
       <n-card class="data-panel" :bordered="false">
-        <template #header><div><span class="panel-kicker">LEASES</span><h2>Worker 租约</h2></div></template>
+        <template #header><div><h2>Worker 租约</h2></div></template>
         <n-empty v-if="!srcAutopilot.claims.length" size="small" description="当前没有 worker claim" />
         <div v-else class="pending-list">
           <article v-for="claim in srcAutopilot.claims" :key="claim.intent_id" class="pending-row">
@@ -194,7 +193,7 @@ const candidateColumns: DataTableColumns<SrcCandidate> = [
         </div>
       </n-card>
       <n-card class="data-panel" :bordered="false">
-        <template #header><div><span class="panel-kicker">DEAD ENDS & HINTS</span><h2>死路与提示</h2></div></template>
+        <template #header><div><h2>死路与提示</h2></div></template>
         <n-empty v-if="!srcAutopilot.dead_ends.length && !srcAutopilot.hints.length" size="small" description="暂无记录" />
         <div v-else class="pending-list">
           <article v-for="dead in srcAutopilot.dead_ends" :key="dead.intent_id + dead.reason" class="pending-row">

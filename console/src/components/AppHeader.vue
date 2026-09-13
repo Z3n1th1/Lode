@@ -3,7 +3,8 @@
 // 统一对话是唯一主视图,原来的三个视图 tab 由模式选择器取代。
 import { computed, onMounted, ref } from 'vue'
 import { NAvatar, NButton, NSelect, NTooltip, useMessage } from 'naive-ui'
-import { Bot, LayoutGrid, LogOut, Moon, RefreshCw, Settings, Sun } from '@lucide/vue'
+import { LayoutGrid, LogOut, Moon, RefreshCw, Settings, Sun } from '@lucide/vue'
+import BrandMark from './BrandMark.vue'
 import {
   refreshing, refreshDashboard, signOut, panelsOpen, mainView,
   chatMode, chatModes, loadChatModes, theme, toggleTheme
@@ -60,15 +61,16 @@ onMounted(() => {
 <template>
   <header class="app-header">
     <div class="header-left">
-      <div class="brand-mark"><Bot :size="18" /></div>
+      <div class="brand-mark"><BrandMark :size="16" /></div>
       <div class="brand-copy">
-        <strong>LODE</strong>
+        <strong>Lode</strong>
         <span>对话式 SRC 控制台</span>
       </div>
     </div>
     <div class="header-actions">
       <ModeSelect v-model:value="chatMode" :modes="chatModes" />
-      <n-tooltip trigger="hover">
+      <!-- 模型池没数据时不渲染:一个空的"请选择"框会被读成 bug -->
+      <n-tooltip v-if="options.length" trigger="hover">
         <template #trigger>
           <n-select
             class="model-select"

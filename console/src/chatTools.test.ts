@@ -52,18 +52,18 @@ describe('sliceRecent', () => {
 describe('toolCallSummary (R-A P0-1)', () => {
   it('summarizes primary arg in one line', () => {
     expect(toolCallSummary('exec_command', '{"cmd":"nmap -sV t.example"}'))
-      .toBe('exec_command · cmd: nmap -sV t.example')
+      .toBe('exec_command  cmd: nmap -sV t.example')
   })
   it('counts extra params and truncates long values', () => {
     const s = toolCallSummary('exec_command', JSON.stringify({ cmd: 'x'.repeat(200), timeout: 30 }))
     expect(s).toContain('+1 参数')
     expect(s.length).toBeLessThan(200)
-    expect(s.endsWith('参数')).toBe(true)
+    expect(s.endsWith('参数)')).toBe(true)
   })
   it('falls back for missing/non-JSON args', () => {
     expect(toolCallSummary('finish_scan', '')).toBe('finish_scan')
     expect(toolCallSummary(undefined, undefined)).toBe('tool')
-    expect(toolCallSummary('t', 'not json')).toBe('t · not json')
+    expect(toolCallSummary('t', 'not json')).toBe('t  not json')
   })
 })
 

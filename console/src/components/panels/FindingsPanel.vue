@@ -6,7 +6,7 @@ import { findingRows, findingColumns, pageLoading } from '../../store'
 <template>
   <main class="workbench">
     <section class="page-heading">
-      <div><p class="eyebrow">FINDINGS</p><h1>发现与证据</h1><p>SARIF 候选发现 · 需二次确认</p></div>
+      <div><h1>发现与证据</h1><p>SARIF 候选,需二次确认</p></div>
       <n-tag :bordered="false" type="info">{{ findingRows.length }} 条候选</n-tag>
     </section>
     <n-card class="data-panel" :bordered="false">

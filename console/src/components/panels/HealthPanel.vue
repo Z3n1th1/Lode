@@ -48,9 +48,8 @@ function memState(pct: unknown): 'success' | 'warning' | 'error' | 'default' {
   <main class="workbench health">
     <section class="page-heading">
       <div>
-        <p class="eyebrow">SYSTEM HEALTH</p>
         <h1>运行健康</h1>
-        <p>服务状态 · 内存 · 情报调度</p>
+        <p>服务、内存与调度</p>
       </div>
       <div v-if="systemInfo" class="health-badges">
         <span class="hb" :class="upCount === knownCount && knownCount ? 'ok' : 'warn'">
@@ -81,7 +80,7 @@ function memState(pct: unknown): 'success' | 'warning' | 'error' | 'default' {
         <n-card class="hstat" :bordered="false">
           <span class="hstat-lbl">情报已见</span>
           <div class="hstat-row"><strong>{{ dash(systemInfo.scheduler.rss_seen) }}</strong></div>
-          <small>上轮播报 {{ dash(systemInfo.scheduler.rss_last_notified) }} · 新增 {{ dash(systemInfo.scheduler.rss_last_new) }}</small>
+          <small>上轮播报 {{ dash(systemInfo.scheduler.rss_last_notified) }},新增 {{ dash(systemInfo.scheduler.rss_last_new) }}</small>
         </n-card>
 
         <n-card class="hstat" :bordered="false">
@@ -106,7 +105,7 @@ function memState(pct: unknown): 'success' | 'warning' | 'error' | 'default' {
       <n-card class="data-panel" :bordered="false">
         <template #header>
           <div class="panel-head">
-            <div><span class="panel-kicker">SERVICES</span><h2>服务状态</h2></div>
+            <div><h2>服务状态</h2></div>
             <n-tag v-if="knownCount" size="small" :bordered="false" round :type="upCount === knownCount ? 'success' : 'warning'">
               {{ upCount }}/{{ knownCount }} 在线
             </n-tag>
@@ -123,7 +122,7 @@ function memState(pct: unknown): 'success' | 'warning' | 'error' | 'default' {
 
       <n-card v-if="modelPool && modelPool.providers.length" class="data-panel" :bordered="false">
         <template #header>
-          <div><span class="panel-kicker">MODEL POOL · MoA</span><h2>模型池上游 {{ modelPool.up ?? '—' }}/{{ modelPool.total ?? '—' }} 可用</h2></div>
+          <div><h2>模型池上游 {{ modelPool.up ?? '—' }}/{{ modelPool.total ?? '—' }} 可用</h2></div>
         </template>
         <n-data-table :columns="modelColumns" :data="modelPool.providers" :pagination="false" :bordered="false" :single-line="false" />
       </n-card>

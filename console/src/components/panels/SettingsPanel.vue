@@ -165,7 +165,6 @@ onMounted(load)
   <main class="workbench">
     <section class="page-heading">
       <div>
-        <p class="eyebrow">LLM SETTINGS</p>
         <h1>挖洞设置</h1>
         <p>配置模型与密钥 · Reasoner 用聪明模型,Explorer 用便宜模型</p>
       </div>

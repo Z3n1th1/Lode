@@ -23,40 +23,40 @@ import {
 // naive-ui 的 token 与 --pa-* 对齐,不然组件库和自绘部分会花
 const DARK: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#17a8a0',
-    primaryColorHover: '#22c4b9',
-    primaryColorPressed: '#0e837d',
-    primaryColorSuppl: '#22c4b9',
-    bodyColor: '#0d1117',
-    cardColor: '#151b23',
-    modalColor: '#151b23',
-    popoverColor: '#1b222c',
-    tableColor: '#151b23',
-    inputColor: '#0d1117',
-    borderColor: '#2a323d',
-    dividerColor: '#212832',
-    textColorBase: '#e7edf3',
-    textColor1: '#e7edf3',
-    textColor2: '#9dabba',
-    textColor3: '#7d8b99',
+    primaryColor: '#3f8f88',
+    primaryColorHover: '#4ea8a0',
+    primaryColorPressed: '#336f6a',
+    primaryColorSuppl: '#4ea8a0',
+    bodyColor: '#14171b',
+    cardColor: '#1a1e23',
+    modalColor: '#1a1e23',
+    popoverColor: '#1f242a',
+    tableColor: '#1a1e23',
+    inputColor: '#14171b',
+    borderColor: '#2c333a',
+    dividerColor: '#23282e',
+    textColorBase: '#e8eaed',
+    textColor1: '#e8eaed',
+    textColor2: '#9aa3ad',
+    textColor3: '#6f7883',
     borderRadius: '10px',
-    borderRadiusSmall: '8px'
+    borderRadiusSmall: '6px'
   }
 }
 
 const LIGHT: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#0f8b84',
-    primaryColorHover: '#12a39b',
-    primaryColorPressed: '#0b6c67',
-    primaryColorSuppl: '#12a39b',
-    borderColor: '#e2e7ee',
-    dividerColor: '#edf1f5',
-    textColorBase: '#121820',
-    textColor2: '#55616d',
-    textColor3: '#6b7783',
+    primaryColor: '#2f7d77',
+    primaryColorHover: '#26665f',
+    primaryColorPressed: '#1f554f',
+    primaryColorSuppl: '#26665f',
+    borderColor: '#dfe3e8',
+    dividerColor: '#e9ecf0',
+    textColorBase: '#171a1e',
+    textColor2: '#5a636d',
+    textColor3: '#7c848e',
     borderRadius: '10px',
-    borderRadiusSmall: '8px'
+    borderRadiusSmall: '6px'
   }
 }
 

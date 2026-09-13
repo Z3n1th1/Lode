@@ -18,13 +18,11 @@ const AUTONOMY_LABEL: Record<string, string> = {
   auto: '自动执行'
 }
 
-const options = computed(() => props.modes.map((mode) => ({ label: mode.title, value: mode.name })))
-
-const hint = computed(() => {
-  const mode = props.modes.find((item) => item.name === props.value)
-  if (!mode) return ''
-  return AUTONOMY_LABEL[mode.autonomy] ?? mode.autonomy
-})
+// 自治级别写进选项里,而不是在 select 旁边挂一段游离文字 —— 那样在顶栏会读成错位的注解
+const options = computed(() => props.modes.map((mode) => ({
+  label: `${mode.title}(${AUTONOMY_LABEL[mode.autonomy] ?? mode.autonomy})`,
+  value: mode.name
+})))
 </script>
 
 <template>
@@ -37,7 +35,6 @@ const hint = computed(() => {
       :consistent-menu-width="false"
       @update:value="emit('update:value', $event)"
     />
-    <span v-if="hint" class="mode-hint">{{ hint }}</span>
   </div>
 </template>
 
@@ -47,11 +44,5 @@ const hint = computed(() => {
   align-items: center;
   gap: 8px;
   min-width: 210px;
-}
-
-.mode-hint {
-  color: var(--pa-text-3);
-  font-size: var(--pa-fs-xs);
-  white-space: nowrap;
 }
 </style>

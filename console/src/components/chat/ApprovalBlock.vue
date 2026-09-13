@@ -1,9 +1,8 @@
 <script setup lang="ts">
-// 阻塞式审批气泡:`approval_required` 未解决前,输入框应当被禁用。
+// 阻塞式审批:`approval_required` 未解决前输入框禁用。
 //
-// 注意:当前后端只声明了 approval_required / approval_resolved 两个事件类型,
-// 还没有对应的"批准"端点,所以这里不摆假的批准按钮 —— 只展示门禁内容,
-// 并把唯一真实的动作(停止本轮)交出去。
+// 后端目前只声明了 approval_required / approval_resolved 两个事件类型,还没有对应的
+// "批准"端点,所以这里不摆假的批准按钮 —— 只说明门禁内容,并把唯一真实的动作交出去。
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 
@@ -12,7 +11,7 @@ import type { ChatEvent } from '../../api'
 const props = defineProps<{ event: ChatEvent }>()
 const emit = defineEmits<{ (e: 'stop'): void }>()
 
-const GATE_LABEL: Record<string, string> = {
+const GATE: Record<string, string> = {
   write_action: '写操作',
   scope_change: '范围变更',
   outbound: '对外请求'
@@ -20,65 +19,47 @@ const GATE_LABEL: Record<string, string> = {
 
 const gate = computed(() => {
   const key = String(props.event.gate ?? '')
-  return GATE_LABEL[key] ?? (key || '需要人工确认')
+  return GATE[key] ?? (key || '需要人工确认')
 })
 </script>
 
 <template>
-  <div class="approval" role="alert">
-    <span class="icon" aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="15" height="15">
-        <path d="M12 3 2.5 20h19L12 3Z" fill="none" stroke="currentColor"
-              stroke-width="1.8" stroke-linejoin="round" />
-        <path d="M12 10v4.6M12 17.4v.2" fill="none" stroke="currentColor"
-              stroke-width="1.8" stroke-linecap="round" />
-      </svg>
-    </span>
-    <div class="body">
-      <p class="gate">{{ gate }}</p>
-      <p class="message">{{ event.message || '该动作需要人工确认后才能继续。' }}</p>
+  <section class="gate" role="alert">
+    <div class="gate-body">
+      <p class="gate-title">停在人工门:{{ gate }}</p>
+      <p class="gate-message">{{ event.message || '这一步需要你先确认,才会继续。' }}</p>
     </div>
     <n-button size="small" quaternary type="error" @click="emit('stop')">停止本轮</n-button>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.approval {
-  width: 100%;
+.gate {
   display: flex;
   align-items: flex-start;
-  gap: 11px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--pa-warning) 45%, var(--pa-border));
+  gap: 12px;
+  border: 1px solid var(--pa-border);
+  border-left: 2px solid var(--pa-warning);
   border-radius: var(--pa-radius);
-  background: var(--pa-warning-soft);
+  background: var(--pa-surface);
+  padding: 11px 14px;
 }
 
-.icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--pa-warning) 22%, transparent);
-  color: var(--pa-warning);
-}
+.gate-body { flex: 1; min-width: 0; }
 
-.body { flex: 1; min-width: 0; }
-
-.gate {
+.gate-title {
   margin: 0;
   color: var(--pa-text);
   font-size: var(--pa-fs-md);
   font-weight: 620;
 }
 
-.message {
-  margin: 4px 0 0;
+.gate-message {
+  margin: 5px 0 0;
+  max-width: var(--pa-prose);
   color: var(--pa-text-2);
   font-size: var(--pa-fs-base);
-  line-height: 1.6;
+  line-height: 1.65;
   overflow-wrap: anywhere;
 }
 </style>

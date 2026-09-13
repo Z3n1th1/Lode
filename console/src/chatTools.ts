@@ -60,10 +60,10 @@ export function toolCallSummary(toolName: string | undefined, rawArgs?: string):
     if (!keys.length) return name
     const k = PRIMARY_ARG_KEYS.find(x => x in obj) ?? keys[0]
     const rest = keys.length - 1
-    return `${name} · ${k}: ${oneLine(valStr(obj[k]))}${rest > 0 ? ` · +${rest} 参数` : ''}`
+    return `${name}  ${k}: ${oneLine(valStr(obj[k]))}${rest > 0 ? `  (+${rest} 参数)` : ''}`
   }
   const t = (rawArgs || '').trim()
-  return t ? `${name} · ${oneLine(t)}` : name
+  return t ? `${name}  ${oneLine(t)}` : name
 }
 
 // tool_call 展开判定:参数必须比摘要一行信息量更多(否则前端不渲染折叠按钮)

@@ -9,7 +9,7 @@ import {
 <template>
   <main class="workbench">
     <section class="page-heading">
-      <div><p class="eyebrow">PROJECTS</p><h1>项目</h1><p>一个目标 = 一个项目 · 点「查看会话」进流程轨迹</p></div>
+      <div><h1>项目</h1><p>一个目标就是一个项目,点「查看会话」进流程轨迹</p></div>
       <div style="display:flex;align-items:center;gap:10px">
         <n-tag :bordered="false" type="info">{{ projectRows.length }} 个</n-tag>
         <n-button type="primary" size="small" @click="openNewProject">+ 新建项目</n-button>
@@ -31,13 +31,13 @@ import {
           <small>{{ p.last_activity ? formatTimestamp(p.last_activity) : '—' }}</small>
           <div style="display:flex;gap:4px">
             <n-button size="small" quaternary @click="openProjectResults(p.project_id)">看成果</n-button>
-            <n-button size="small" type="primary" quaternary @click="openProject(p.project_id)">查看会话 →</n-button>
+            <n-button size="small" type="primary" quaternary @click="openProject(p.project_id)">查看会话</n-button>
           </div>
         </div>
       </n-card>
     </section>
     <n-card v-if="intakeRows.length" class="data-panel" :bordered="false" style="margin-top:16px">
-      <template #header><div><span class="panel-kicker">INTAKE</span><h2>已提交待确认 <small style="color:var(--pa-text-3)">(console 提交意图,执行仍走 agent 确认门)</small></h2></div></template>
+      <template #header><div><h2>已提交待确认 <small style="color:var(--pa-text-3)">(console 提交意图,执行仍走 agent 确认门)</small></h2></div></template>
       <div class="pending-list">
         <article v-for="it in intakeRows" :key="it.intake_id" class="pending-row">
           <strong>{{ it.name || it.target_url }}</strong>
