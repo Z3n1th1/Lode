@@ -68,13 +68,6 @@ def create_app(
 
     resolved_static_dir = Path(static_dir) if static_dir is not None else None
 
-    # ---- Standalone SRC Agent page (no build required) ----
-    _src_agent_page = Path(__file__).resolve().parent / "src_agent_page.html"
-    if _src_agent_page.is_file():
-        @app.get("/src-agent", include_in_schema=False)
-        def src_agent_page() -> FileResponse:
-            return FileResponse(_src_agent_page)
-
     if resolved_static_dir is not None and (resolved_static_dir / "index.html").is_file():
         assets_dir = resolved_static_dir / "assets"
         if assets_dir.is_dir():

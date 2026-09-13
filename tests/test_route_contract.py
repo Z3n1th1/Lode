@@ -31,7 +31,6 @@ ROUTE_CONTRACT = frozenset({
     ("*", "/assets"),
     ("GET", "/"),
     ("GET", "/{path:path}"),
-    ("GET", "/src-agent"),
     ("GET", "/healthz"),
     ("POST", "/api/v1/session"),
     ("DELETE", "/api/v1/session"),
