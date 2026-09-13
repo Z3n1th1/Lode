@@ -1,0 +1,23 @@
+{
+  "program": "kubernetes (HackerOne)",
+  "authorization": "HackerOne program https://hackerone.com/kubernetes . Scope lists these web assets individually (no wildcard). The prow.k8s.io in-scope instruction states verbatim: 'Please limit automated scanning to 1qps.' surface_delay_seconds is set to 1.0 to honour that. Only GET/HEAD; no writes. Re-read the policy page before each run.",
+  "allowed_domains": [],
+  "allowed_hosts": [
+    "k8s.io",
+    "kubernetes-csi.github.io",
+    "kubernetes.io",
+    "prow.k8s.io"
+  ],
+  "allowed_ips": [],
+  "forbidden_hosts": [],
+  "seed_urls": [
+    "https://k8s.io/",
+    "https://kubernetes.io/",
+    "https://prow.k8s.io/"
+  ],
+  "rate_limit": {
+    "timeout_seconds": 10,
+    "surface_delay_seconds": 1.0
+  },
+  "max_items": 200
+}

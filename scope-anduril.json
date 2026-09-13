@@ -1,0 +1,25 @@
+{
+  "program": "anduril_industries (HackerOne)",
+  "authorization": "HackerOne program https://hackerone.com/anduril_industries . Scope is 6 wildcards, all critical max severity, bounty eligible. READ THE POLICY PAGE FIRST and confirm it does not forbid automated scanning. Only GET/HEAD; no writes, no DoS.",
+  "allowed_domains": [
+    "anduril.au",
+    "anduril.com",
+    "anduril.com.au",
+    "anduril.dev",
+    "andurildev.au",
+    "andurildev.com"
+  ],
+  "allowed_hosts": [],
+  "allowed_ips": [],
+  "forbidden_hosts": [
+    "andurilgear.com"
+  ],
+  "seed_urls": [
+    "https://www.anduril.com/"
+  ],
+  "rate_limit": {
+    "timeout_seconds": 10,
+    "surface_delay_seconds": 1.0
+  },
+  "max_items": 200
+}
