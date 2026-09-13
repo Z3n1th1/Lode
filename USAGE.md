@@ -172,7 +172,7 @@ nssm start Lode
 # LLM
 LLM_API_KEY=sk-xxxxx
 LLM_BASE_URL=https://api.deepseek.com
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-flash
 
 # Console
 LODE_ADMIN_PASSWORD=至少16字符

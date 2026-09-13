@@ -67,7 +67,7 @@ class LlmProviderInput(BaseModel):
     """
     name: str
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     api_key: str = ""
     clear_key: bool = False
 

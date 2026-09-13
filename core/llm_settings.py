@@ -29,7 +29,7 @@ SCHEMA = "LlmSettings/v1"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_PROVIDERS = 12
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-flash"
 TIER_ROLES = ("reasoner", "explorer")
 
 # 这些 env var 由本模块负责投影(供 core.llm_pool / core.llm_client / agents 消费)。

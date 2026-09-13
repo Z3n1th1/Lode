@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-flash"
 MAX_RESPONSE_BYTES = 512_000
 
 

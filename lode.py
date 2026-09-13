@@ -205,7 +205,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "arch": platform.machine(),
         "llm_api_key_set": bool(os.environ.get("LLM_API_KEY", "").strip()),
         "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com"),
-        "llm_model": os.environ.get("LLM_MODEL", "deepseek-chat"),
+        "llm_model": os.environ.get("LLM_MODEL", "deepseek-flash"),
         "env_file": (ROOT / ".env").is_file(),
         "console_dist": (ROOT / "console" / "dist" / "index.html").is_file(),
     }

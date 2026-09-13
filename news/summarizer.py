@@ -49,7 +49,7 @@ def _deepseek_summary(title: str, summary: str, *, timeout: float = 20.0) -> str
         f"标题：{title[:300]}\n摘要：{summary[:1200]}"
     )
     body = {
-        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-flash"),
         "temperature": 0.1,
         "max_tokens": 160,
         "messages": [
