@@ -35,6 +35,7 @@ if str(_CORE_DIR) not in sys.path:
 
 from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason
 from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
+from core import skills as _skills
 
 # Auto-load .env config (API keys, etc.)
 try:
@@ -100,6 +101,14 @@ REASONER_SYSTEM = """\
 8. "## Recalled Experience" 是历史记忆：[已失效] 的事实已经给过结论，[死路] 的不要重复；
    能复用历史结论就直接引用，别重新挖一遍。
 
+## 需要打法细节就点名要
+这套系统里有一批打法卡。判断这步要用到哪本(比如看出是客户端、是联调域名、是越权形状),
+把卡名填进 `read_knowledge`,它会在**下一轮**成为你上下文里的一节,然后照着它干活。
+可用:`mobile`(安卓客户端面) · `url-trust`(域名/白名单信任边界) · `evidence`(怎么让发现被接受)
+· `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains`,以及长文知识库
+(`idor-test` / `ssrf-test` / `xss-test` / http-smuggling-test …)。最多 2 个。
+不确定就留空 —— 系统也会从你的分析里自己认。
+
 ## 输出（严格 JSON，无 markdown fence）
 {
   "reasoning": "当前状态分析",
@@ -112,6 +121,7 @@ REASONER_SYSTEM = """\
       "depends_on": []
     }
   ],
+  "read_knowledge": [],
   "should_stop": false,
   "stop_reason": ""
 }
@@ -163,6 +173,12 @@ EXPLORER_SYSTEM = """\
   "http_actions": [{"method": "GET", "url": "https://...", "reason": "为什么需要"}]
 结果会在 follow-up 给你。不需要就省略。
 
+## 需要打法细节就点名要
+看清响应之后如果要用到某本打法(比如差分怎么设、这个弱点的证据要长什么样),把卡名填进
+`read_knowledge`,它会在**下一轮**成为你上下文里的一节。可用:`mobile` · `url-trust` ·
+`evidence` · `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains`,以及长文知识库
+(`idor-test` / `ssrf-test` / `xss-test` …)。最多 2 个;不确定就留空。
+
 ## 输出（严格 JSON）
 {
   "analysis": "观察到了什么",
@@ -171,6 +187,7 @@ EXPLORER_SYSTEM = """\
      "evidence": "响应中的具体内容", "description": "说明"}
   ],
   "http_actions": [],
+  "read_knowledge": [],
   "conclusion": "confirmed|dead_end|needs_human|inconclusive",
   "dead_end_reason": "为什么是 dead end",
   "suggested_next": "基于发现建议下一步"
@@ -396,6 +413,9 @@ class AgentConfig:
     timeline_compress_ratio: int = 2
     # 依赖边:让 reasoner 产出的 depends_on 真正写回黑板,驱动 DAG 顺序。
     enable_dependencies: bool = True
+    # 知识激活:用哪个技能包,以及开局先激活哪几篇(jobs.py 从操作员那句话推)。
+    skill_pack: str = "pentest"
+    knowledge_seed: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -425,6 +445,23 @@ RETRY_BACKOFF_SECONDS = 0.0
 # (yaklang 的 "gate finish checkpoints on remaining todos")。
 MAX_STOP_BLOCKS = 2
 
+# -- knowledge activation ----------------------------------------------------
+#
+# "MoE": a signal activates an expert, and the activated expert specialises the rest of
+# the work. The hunt used to run on the two hardcoded prompts below and never touched
+# the skill pack at all — the distilled playbooks only reached *conversation* turns.
+#
+# Two things trigger activation, and both feed the same set:
+#   1. the harness scans the hypothesis / response for a shape it recognises
+#      (core.skills.signal_modules), and
+#   2. the model names a card outright in its JSON output.
+# Either way a card is loaded ONCE and then rides in the system prompt for the rest of
+# the run. That is why the per-card cap here is far tighter than the 12k the
+# read_knowledge tool allows: this text is paid for on EVERY subsequent cycle, not once.
+KNOWLEDGE_MAX_ACTIVE = 4
+KNOWLEDGE_CARD_CHARS = 2_500
+KNOWLEDGE_TOTAL_CHARS = 6_000
+
 
 class SrcAgentLoop:
     """LLM-driven SRC agent: Reason → Explore → Blackboard."""
@@ -440,6 +477,63 @@ class SrcAgentLoop:
         self._complete = config.llm_complete_fn or _default_llm_complete
         self._worker_id = config.worker_id or f"src-agent-{os.getpid()}"
         self._last_request_at = 0.0
+        # 已激活的打法:name -> 正文。只在第一次激活时读盘,之后每轮复用。
+        self._activated: Dict[str, str] = {}
+        self._activation_log: List[Dict[str, Any]] = []
+        if config.knowledge_seed:
+            self.activate(config.knowledge_seed, source="seed")
+
+    # ------------------------------------------------------------ activation
+    #
+    # What has been activated is injected into every later system prompt, so the cap is
+    # on *chars* as much as on count: a card that is paid for on every cycle has to earn
+    # its place. Nothing here is loaded up front except the seed.
+
+    def activate(self, names: Sequence[str], *, source: str) -> List[str]:
+        """Load playbooks by name, once each. Returns the ones newly activated."""
+        added: List[str] = []
+        for raw in names or ():
+            name = str(raw or "").strip().removesuffix(".md")
+            if not name or name in self._activated:
+                continue
+            if len(self._activated) >= KNOWLEDGE_MAX_ACTIVE:
+                break
+            budget = KNOWLEDGE_TOTAL_CHARS - sum(len(t) for t in self._activated.values())
+            if budget < 200:
+                break
+            got = _skills.read_knowledge(name, limit=min(KNOWLEDGE_CARD_CHARS, budget))
+            text = str(got.get("text") or "")
+            if not text:
+                continue
+            self._activated[name] = text
+            self._activation_log.append({
+                "name": name, "source": source, "library": got.get("source"),
+                "chars": got.get("chars"), "truncated": bool(got.get("truncated")),
+            })
+            added.append(name)
+        return added
+
+    def activate_from_signals(self, *texts: str, source: str) -> List[str]:
+        """Activate whatever shape the harness recognises in ``texts``."""
+        blob = "\n".join(t for t in texts if t)
+        if not blob:
+            return []
+        names = _skills.signal_modules(blob, limit=KNOWLEDGE_MAX_ACTIVE,
+                                       pack=self.config.skill_pack)
+        return self.activate(names, source=source)
+
+    def _activated_section(self) -> str:
+        if not self._activated:
+            return ""
+        parts = ["## 已激活的打法（这次运行已经加载,直接照着做,不要重新问一遍）"]
+        for name, text in self._activated.items():
+            parts.append(f"### {name}\n{text}")
+        return "\n\n".join(parts)
+
+    def _system(self, base: str) -> str:
+        """Role prompt + whatever is activated. This is the 'specialise' half."""
+        section = self._activated_section()
+        return f"{base}\n\n{section}" if section else base
 
     def run(self) -> Dict[str, Any]:
         """Main agent loop. Returns a summary dict."""
@@ -539,6 +633,8 @@ class SrcAgentLoop:
             "total_findings": total_findings,
             "stop_reason": stop_reason,
             "errors": errors[:20],
+            # 这次运行激活了哪几本打法、谁触发的 —— 复盘时才说得清"为什么它这轮打得不一样"。
+            "activated_knowledge": list(self._activation_log),
         }
 
     def _timeline(self, kind: str, intent_id: str, summary: str) -> None:
@@ -728,7 +824,7 @@ class SrcAgentLoop:
             max_explore=self.config.max_explore_per_cycle,
         )
         raw = self._complete(
-            REASONER_SYSTEM, user_msg,
+            self._system(REASONER_SYSTEM), user_msg,
             timeout=self.config.timeout,
             prefer=self.config.reasoner_prefer,
             only=self.config.reasoner_only,
@@ -738,7 +834,36 @@ class SrcAgentLoop:
         parsed = _parse_json_response(raw)
         if parsed is None:
             return None
+        self._activate_from_reasoner(parsed)
         return parsed
+
+    def _activate_from_reasoner(self, parsed: Dict[str, Any]) -> None:
+        """Activate after the reasoner has spoken — the cards land from the next cycle."""
+        declared = parsed.get("read_knowledge")
+        if isinstance(declared, list):
+            self.activate([str(name) for name in declared], source="reasoner")
+        hypotheses = " ".join(
+            str(item.get("hypothesis") or "")
+            for item in (parsed.get("selected_intents") or [])
+            if isinstance(item, dict)
+        )
+        self.activate_from_signals(
+            str(parsed.get("reasoning") or ""), hypotheses, source="reasoner-signal")
+
+    def _activate_from_explorer(self, parsed: Optional[Dict[str, Any]], *extra: str) -> None:
+        """Activate on what the response actually showed, for the cycles that follow."""
+        if not isinstance(parsed, dict):
+            return
+        declared = parsed.get("read_knowledge")
+        if isinstance(declared, list):
+            self.activate([str(name) for name in declared], source="explorer")
+        self.activate_from_signals(
+            str(parsed.get("analysis") or ""),
+            str(parsed.get("suggested_next") or ""),
+            json.dumps(parsed.get("findings") or [], ensure_ascii=False),
+            *extra,
+            source="explorer-signal",
+        )
 
     def _explore(
         self,
@@ -842,7 +967,7 @@ class SrcAgentLoop:
         )
 
         raw = self._complete(
-            EXPLORER_SYSTEM, user_msg,
+            self._system(EXPLORER_SYSTEM), user_msg,
             timeout=self.config.timeout,
             prefer=self.config.explorer_prefer,
             only=self.config.explorer_only,
@@ -907,7 +1032,7 @@ class SrcAgentLoop:
                 + "\n\nNow provide your final analysis JSON. Do NOT request more http_actions."
             )
             raw = self._complete(
-                EXPLORER_SYSTEM, followup_msg,
+                self._system(EXPLORER_SYSTEM), followup_msg,
                 timeout=self.config.timeout,
                 prefer=self.config.explorer_prefer,
                 only=self.config.explorer_only,
@@ -916,6 +1041,8 @@ class SrcAgentLoop:
                 break
             parsed = _parse_json_response(raw)
 
+        # 这一轮看到的东西决定后面几轮带哪本打法上路 —— 激活的是**下一轮**的 prompt。
+        self._activate_from_explorer(parsed, body_text, hypothesis or "")
         return self._process_explorer_result(claimed_intent_id, parsed, raw)
 
     def _process_explorer_result(
@@ -1020,6 +1147,8 @@ def run_src_agent(
     timeline_keep: int = 40,
     timeline_max_chars: int = 1600,
     enable_dependencies: bool = True,
+    skill_pack: str = "pentest",
+    knowledge_seed: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Run the SRC agent loop and return a summary."""
     config = AgentConfig(
@@ -1039,6 +1168,8 @@ def run_src_agent(
         timeline_keep=timeline_keep,
         timeline_max_chars=timeline_max_chars,
         enable_dependencies=enable_dependencies,
+        skill_pack=skill_pack,
+        knowledge_seed=tuple(knowledge_seed),
     )
     agent = SrcAgentLoop(config)
     return agent.run()

@@ -37,6 +37,7 @@ from agents.surface_discovery import SurfaceScope, discover_surface, surface_to_
 from agents.src_autopilot import SrcAutopilot
 from core.file_lock import replace_with_retry
 from core import llm_client
+from core import skills as _skills
 from core.src_blackboard import SrcBlackboard
 from core.test_log import SrcTestLog, TestEvent
 
@@ -561,75 +562,19 @@ def _exec_add_candidates(session: SrcChatSession, args: Dict[str, Any]) -> str:
     return json.dumps({"added": result, "count": len(candidates)})
 
 
-KNOWLEDGE_CHAR_LIMIT = 12_000
-_KNOWLEDGE_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
-
-
-def _knowledge_roots() -> List[Tuple[str, Path]]:
-    """``(label, dir)`` for every place a knowledge file may live, in pull order.
-
-    Two tiers, both pull-only — nothing here is injected into the system prompt:
-
-    - ``module:<pack>``  — ``.codebuddy/skills/<pack>/modules/*.md``: the distilled
-      pattern modules, one per surface/class (``mobile``, ``url-trust`` …).
-    - ``kb``             — ``references/knowledge-base/*.md``: the long-form library
-      (48 cards). Big enough that pasting it into a prompt would be wrong; reading
-      exactly one card is right.
-    """
-    roots: List[Tuple[str, Path]] = []
-    try:
-        from core import skills as _skills
-
-        packs = _skills.discover()
-    except Exception:  # noqa: BLE001 - retrieval must never break a turn
-        packs = {}
-    for name in sorted(packs):
-        roots.append((f"module:{name}", packs[name].root / "modules"))
-    try:
-        from core import skills as _skills
-
-        repo_root = Path(_skills.SKILLS_ROOT).parents[1]
-        roots.append(("kb", repo_root / "references" / "knowledge-base"))
-    except Exception:  # noqa: BLE001
-        pass
-    return roots
+KNOWLEDGE_CHAR_LIMIT = _skills.KNOWLEDGE_CHAR_LIMIT
 
 
 def _exec_read_knowledge(session: SrcChatSession, args: Dict[str, Any]) -> str:
     """Pull one knowledge file on demand.
 
-    This is the retrieval channel. The system prompt carries only the discipline and
-    an index; depth (a pattern module, a long-form KB card) arrives when the agent
-    recognises the shape in front of it and asks for it by name. That is the whole
-    reason the library can grow without the prompt growing with it.
+    This is the retrieval channel for a conversation turn: the system prompt carries
+    only the discipline and an index, and depth (a pattern module, a long-form KB card)
+    arrives when the agent recognises the shape in front of it and asks for it by name.
+    Resolution lives in :mod:`core.skills` so the background hunt activates the same
+    library through the same code.
     """
-    name = str(args.get("name") or "").strip().removesuffix(".md")
-    if not _KNOWLEDGE_NAME_RE.fullmatch(name):
-        return json.dumps({"error": "invalid name", "hint": "bare filename stem, e.g. mobile"}, ensure_ascii=False)
-
-    roots = _knowledge_roots()
-    for label, directory in roots:
-        path = directory / f"{name}.md"
-        try:
-            if not path.is_file() or path.is_symlink():
-                continue
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        truncated = len(text) > KNOWLEDGE_CHAR_LIMIT
-        if truncated:
-            text = text[:KNOWLEDGE_CHAR_LIMIT] + "\n\n[... truncated — this file is longer than one pull ...]"
-        return json.dumps({"name": name, "source": label, "chars": len(text),
-                           "truncated": truncated, "text": text}, ensure_ascii=False)
-
-    # A miss is the agent's chance to correct itself: hand back what does exist.
-    names: List[str] = []
-    for _label, directory in roots:
-        try:
-            names.extend(sorted(p.stem for p in directory.glob("*.md") if p.name != "README.md"))
-        except OSError:
-            continue
-    return json.dumps({"error": "not found", "name": name, "available": sorted(set(names))},
+    return json.dumps(_skills.read_knowledge(str(args.get("name") or "")),
                       ensure_ascii=False)
 
 

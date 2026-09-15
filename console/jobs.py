@@ -78,9 +78,14 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
         return {"progress": {"phase": "stopped"}}
 
     ctx.emit("subtask_progress", phase="reason_explore")
+    # 猎场也要能拿到打法:开局按操作员那句话先激活一轮(和对话轮同一套选择逻辑),
+    # 之后由循环自己按信号/按需继续激活。以前这条路上一点知识都不进来。
+    seed = skills.select_modules(str(job.payload.get("instruction") or job.payload.get("title") or ""),
+                                 pack="pentest")
     summary = run_src_agent(
         bb_path, scope,
         max_cycles=int(job.payload.get("max_cycles") or 20),
+        knowledge_seed=seed,
         max_explore_per_cycle=int(job.payload.get("max_explore") or 3),
         reasoner_prefer=reasoner, explorer_prefer=explorer,
         worker_id=f"console-{run_id}",

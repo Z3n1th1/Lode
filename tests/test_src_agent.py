@@ -388,6 +388,95 @@ class TestSrcAgentLoop(unittest.TestCase):
         self.assertEqual(summary["stop_reason"], "blackboard_not_found")
 
 
+class TestKnowledgeActivation(unittest.TestCase):
+    """激活 + 专精:信号把打法唤醒,唤醒的那本进后续每一轮的 system prompt。
+
+    以前猎场走的是两个硬编码 prompt,一点技能包都拿不到 —— 蒸出来的打法只到得了
+    对话轮,到不了真正在挖的那条路。
+    """
+
+    def _loop(self, tmp, *, seed=()):
+        bb_path = Path(tmp) / "bb.json"
+        SrcBlackboard(bb_path)
+        return SrcAgentLoop(AgentConfig(blackboard_path=bb_path, scope=_make_scope(),
+                                       knowledge_seed=seed))
+
+    def test_seed_activates_before_the_first_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp, seed=("url-trust",))
+        self.assertEqual(["url-trust"], list(loop._activated))
+        self.assertIn("白名单", loop._system("BASE"))
+
+    def test_a_signal_activates_the_matching_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            added = loop.activate_from_signals("导出组件 exported deep link", source="test")
+            self.assertEqual(["mobile"], added)
+        self.assertIn("Android", loop._system("BASE"))
+        self.assertEqual("test", loop._activation_log[0]["source"])
+        self.assertEqual("module:pentest", loop._activation_log[0]["library"])
+
+    def test_the_model_can_name_a_card_outright(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            self.assertEqual(["url-trust"], loop.activate(["url-trust"], source="reasoner"))
+            # 幂等:同一个名字再来一次不该重复占预算
+            self.assertEqual([], loop.activate(["url-trust"], source="reasoner"))
+            self.assertEqual(1, len(loop._activated))
+
+    def test_a_long_knowledge_base_card_is_capped_harder_than_a_module(self):
+        """激活的正文每轮都要付一次,所以单卡上限比 read_knowledge 的 12k 紧得多。"""
+        from agents.src_agent import KNOWLEDGE_CARD_CHARS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            self.assertEqual(["idor-test"], loop.activate(["idor-test"], source="t"))
+            self.assertLessEqual(len(loop._activated["idor-test"]), KNOWLEDGE_CARD_CHARS + 120)
+            # 进了 kb 那一层,而不是当成同名模块
+            self.assertEqual("kb", loop._activation_log[0]["library"])
+
+    def test_activation_is_capped_in_count_and_chars(self):
+        from agents.src_agent import KNOWLEDGE_MAX_ACTIVE, KNOWLEDGE_TOTAL_CHARS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            added = loop.activate(
+                ["mobile", "url-trust", "idor", "ssrf", "injection", "auth"], source="t")
+        self.assertLessEqual(len(added), KNOWLEDGE_MAX_ACTIVE)
+        self.assertLessEqual(sum(len(t) for t in loop._activated.values()),
+                             KNOWLEDGE_TOTAL_CHARS + 200)
+
+    def test_a_name_that_does_not_exist_activates_nothing(self):
+        """不存在的卡名不能进上下文 —— 那等于给模型指一个不存在的门。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            self.assertEqual([], loop.activate(["no-such-card", "../escape", ""], source="t"))
+            self.assertEqual({}, loop._activated)
+
+    def test_what_the_reasoner_saw_is_active_from_the_next_cycle(self):
+        """专精的关键:这一轮认出来的东西,下一轮才在 prompt 里 —— 顺序别写反。"""
+        systems: List[str] = []
+
+        def mock_complete(system, user, **kwargs):
+            systems.append(system)
+            return json.dumps({
+                "reasoning": "这个目标看着是安卓客户端,有导出组件",
+                "selected_intents": [],
+                "should_stop": True,
+            })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp)
+            loop._complete = mock_complete
+            _seed_blackboard(loop.blackboard, 1)   # 建锁文件:snapshot 需要它
+            loop._reason(loop.blackboard.snapshot())
+            self.assertNotIn("已激活的打法", systems[0])   # 第一轮还没激活
+            loop._reason(loop.blackboard.snapshot())
+            self.assertIn("已激活的打法", systems[1])      # 第二轮带着它上路
+
+        self.assertEqual(["mobile"], list(loop._activated))
+
+
 class TestSelfTest(unittest.TestCase):
     def test_self_test_passes(self):
         from agents.src_agent import _self_test
