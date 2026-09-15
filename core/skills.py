@@ -115,5 +115,58 @@ def module_names(name: str, root: Path | str = SKILLS_ROOT) -> List[str]:
     return [m.name for m in pack.modules] if pack else []
 
 
+# -- first-turn module floor -------------------------------------------------
+#
+# The system prompt carries only the dispatcher; depth is pulled on demand with the
+# ``read_knowledge`` tool. That is the main path. This is the *floor*: the first turn
+# of a hunt has no recon yet, so the operator's own sentence is the only signal —
+# matching the obvious words saves a round trip. Deliberately blunt (substring match,
+# no model call) and deliberately capped: guessing wide here just burns the budget
+# that on-demand pulling exists to protect.
+
+_MODULE_SIGNALS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("android", "apk", "安卓", "客户端", "hybrid", "webview", "jsbridge", "小程序",
+      "intent", "导出组件"), "mobile"),
+    (("域名", "白名单", "allowlist", "跳转", "redirect", "重定向"), "url-trust"),
+    (("idor", "越权", "水平权限", "垂直权限"), "idor"),
+    (("ssrf",), "ssrf"),
+    (("注入", "sqli", "sql", "命令执行", "rce", "ssti", "模板注入"), "injection"),
+    (("登录", "认证", "会话", "token", "jwt", "oauth", "单点"), "auth"),
+    (("组合链", "利用链", "提权", "接管", "串联"), "chains"),
+    (("侦察", "信息收集", "资产", "子域", "子域名", "端点", "攻击面"), "recon"),
+)
+
+# Report discipline applies to every hunt, so it is never conditional.
+FLOOR_ALWAYS: Tuple[str, ...] = ("evidence",)
+FLOOR_DEFAULT: Tuple[str, ...] = ("recon",)
+FLOOR_MAX_MATCHED = 2
+
+
+def select_modules(text: str, root: Path | str = SKILLS_ROOT, pack: str = "pentest") -> List[str]:
+    """Module names to inject for the first turn, given the operator's sentence.
+
+    Pure and cheap: substring match over ``_MODULE_SIGNALS``, capped at
+    ``FLOOR_MAX_MATCHED`` distinct hits, plus the always-on floor. Falls back to
+    ``FLOOR_DEFAULT`` when nothing matches, because "进站建面" is the default posture.
+    Names that the pack does not actually ship are dropped, so this can never inject
+    a module that does not exist.
+    """
+    available = set(module_names(pack, root))
+    lowered = (text or "").lower()
+
+    matched: List[str] = []
+    for needles, module in _MODULE_SIGNALS:
+        if module in matched or module in FLOOR_ALWAYS:
+            continue
+        if any(needle in lowered for needle in needles):
+            matched.append(module)
+        if len(matched) >= FLOOR_MAX_MATCHED:
+            break
+
+    chosen = list(FLOOR_ALWAYS) + (matched or list(FLOOR_DEFAULT))
+    return [name for name in dict.fromkeys(chosen) if name in available]
+
+
 __all__ = ["SkillModule", "SkillPack", "discover", "load", "compose_prompt",
-           "module_names", "SKILLS_ROOT", "DEFAULT_MAX_CHARS"]
+           "module_names", "select_modules", "SKILLS_ROOT", "DEFAULT_MAX_CHARS",
+           "FLOOR_ALWAYS", "FLOOR_DEFAULT"]

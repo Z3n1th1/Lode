@@ -20,7 +20,7 @@ _FALLBACK: Dict[str, Dict[str, Any]] = {
              "tools": [], "system_fragment": "纯对话模式：只讨论与推理，不主动发起任何扫描或请求。"},
     "pentest": {"title": "挖洞", "skill": "pentest", "tier": "reasoner", "autonomy": "ask",
                 "tools": ["scan_target", "run_agent_analysis", "fetch_url", "show_blackboard",
-                          "add_candidates", "show_progress", "auto_scan"],
+                          "add_candidates", "show_progress", "auto_scan", "read_knowledge"],
                 "system_fragment": "挖洞模式：黑盒 SRC 与授权渗透同一套打法，"
                                    "只在授权范围内动手，先侦察再逐点验证，写操作先要人工确认。"},
 }

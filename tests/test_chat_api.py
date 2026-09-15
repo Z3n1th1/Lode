@@ -312,7 +312,8 @@ class EscalationTests(_ChatCase):
         self.assertEqual(202, resp.status_code, resp.text)
         self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
         self.assertEqual(["scan_target", "run_agent_analysis", "fetch_url", "show_blackboard",
-                          "add_candidates", "show_progress", "auto_scan"], captured["tools"])
+                          "add_candidates", "show_progress", "auto_scan", "read_knowledge"],
+                         captured["tools"])
 
     def test_chat_mode_turn_offers_no_tools(self) -> None:
         """A declared-empty tool list means nothing is advertised, not the hunting set."""

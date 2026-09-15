@@ -23,5 +23,5 @@ modes:
     skill: pentest
     tier: reasoner
     autonomy: ask
-    tools: [scan_target, run_agent_analysis, fetch_url, show_blackboard, add_candidates, show_progress, auto_scan]
+    tools: [scan_target, run_agent_analysis, fetch_url, show_blackboard, add_candidates, show_progress, auto_scan, read_knowledge]
     system_fragment: "挖洞模式：黑盒 SRC 与授权渗透同一套打法，只在授权范围内动手，先侦察再逐点验证，写操作先要人工确认。"

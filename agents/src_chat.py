@@ -142,6 +142,31 @@ SRC_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_knowledge",
+            "description": (
+                "Pull one distilled playbook by name — the moment you recognise the shape in front of "
+                "you, read the matching card before you act on it. This is the retrieval channel: the "
+                "system prompt carries only discipline and an index, so depth arrives on demand.\n"
+                "Two tiers, both pulled the same way: pattern modules ('mobile' Android client "
+                "surface, 'url-trust' host/allowlist trust boundaries, 'evidence' how to make a "
+                "finding stick, 'idor', 'ssrf', 'injection', 'auth', 'recon', 'chains') and the "
+                "long-form knowledge base ('idor-test', 'ssrf-test', 'xss-test', 'http-smuggling-test' "
+                "… 48 cards). Read ONE at a time, at the point it is relevant — never pull the whole "
+                "set. An unknown name returns the list of what exists."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "Card name without extension, e.g. 'mobile' or 'idor-test'"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 SRC_SYSTEM_PROMPT = """\
@@ -536,12 +561,85 @@ def _exec_add_candidates(session: SrcChatSession, args: Dict[str, Any]) -> str:
     return json.dumps({"added": result, "count": len(candidates)})
 
 
+KNOWLEDGE_CHAR_LIMIT = 12_000
+_KNOWLEDGE_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _knowledge_roots() -> List[Tuple[str, Path]]:
+    """``(label, dir)`` for every place a knowledge file may live, in pull order.
+
+    Two tiers, both pull-only — nothing here is injected into the system prompt:
+
+    - ``module:<pack>``  — ``.codebuddy/skills/<pack>/modules/*.md``: the distilled
+      pattern modules, one per surface/class (``mobile``, ``url-trust`` …).
+    - ``kb``             — ``references/knowledge-base/*.md``: the long-form library
+      (48 cards). Big enough that pasting it into a prompt would be wrong; reading
+      exactly one card is right.
+    """
+    roots: List[Tuple[str, Path]] = []
+    try:
+        from core import skills as _skills
+
+        packs = _skills.discover()
+    except Exception:  # noqa: BLE001 - retrieval must never break a turn
+        packs = {}
+    for name in sorted(packs):
+        roots.append((f"module:{name}", packs[name].root / "modules"))
+    try:
+        from core import skills as _skills
+
+        repo_root = Path(_skills.SKILLS_ROOT).parents[1]
+        roots.append(("kb", repo_root / "references" / "knowledge-base"))
+    except Exception:  # noqa: BLE001
+        pass
+    return roots
+
+
+def _exec_read_knowledge(session: SrcChatSession, args: Dict[str, Any]) -> str:
+    """Pull one knowledge file on demand.
+
+    This is the retrieval channel. The system prompt carries only the discipline and
+    an index; depth (a pattern module, a long-form KB card) arrives when the agent
+    recognises the shape in front of it and asks for it by name. That is the whole
+    reason the library can grow without the prompt growing with it.
+    """
+    name = str(args.get("name") or "").strip().removesuffix(".md")
+    if not _KNOWLEDGE_NAME_RE.fullmatch(name):
+        return json.dumps({"error": "invalid name", "hint": "bare filename stem, e.g. mobile"}, ensure_ascii=False)
+
+    roots = _knowledge_roots()
+    for label, directory in roots:
+        path = directory / f"{name}.md"
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        truncated = len(text) > KNOWLEDGE_CHAR_LIMIT
+        if truncated:
+            text = text[:KNOWLEDGE_CHAR_LIMIT] + "\n\n[... truncated — this file is longer than one pull ...]"
+        return json.dumps({"name": name, "source": label, "chars": len(text),
+                           "truncated": truncated, "text": text}, ensure_ascii=False)
+
+    # A miss is the agent's chance to correct itself: hand back what does exist.
+    names: List[str] = []
+    for _label, directory in roots:
+        try:
+            names.extend(sorted(p.stem for p in directory.glob("*.md") if p.name != "README.md"))
+        except OSError:
+            continue
+    return json.dumps({"error": "not found", "name": name, "available": sorted(set(names))},
+                      ensure_ascii=False)
+
+
 _TOOL_DISPATCH = {
     "scan_target": _exec_scan_target,
     "run_agent_analysis": _exec_run_analysis,
     "fetch_url": _exec_fetch_url,
     "show_blackboard": _exec_show_blackboard,
     "add_candidates": _exec_add_candidates,
+    "read_knowledge": _exec_read_knowledge,
 }
 
 

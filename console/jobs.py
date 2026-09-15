@@ -283,7 +283,9 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
             )
             get_runner(state_dir).submit(subtask)
 
-    prompt = skills.compose_prompt(mode.skill)
+    # 只注入 dispatcher + 第一轮地板模块。深度不走这里 —— 模型用 read_knowledge
+    # 在认出面相的时候按需拉(见 core/skills.select_modules 与 SKILL.md §2)。
+    prompt = skills.compose_prompt(mode.skill, modules=skills.select_modules(text, pack=mode.skill))
     if mode.system_fragment:
         prompt = (prompt + "\n\n" + mode.system_fragment).strip()
     session = src_chat._get_or_create_session(session_id, state_dir=state_dir)

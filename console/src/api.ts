@@ -62,8 +62,21 @@ export interface SystemInfo {
   services: Record<string, string>
   scheduler: { rss_last_run?: number; rss_seen?: number; rss_last_notified?: number; rss_last_new?: number; keyleak_last_run?: number; keyleak_status?: string; gh_events_last_run?: number; gh_events_status?: string; gh_events_poll?: number; socks_last_run?: number; socks_status?: string }
 }
-export interface ModelProvider { name: string; model: string; host: string; up: boolean; latency_ms?: number }
-export interface ModelPool { checked_at?: number; total?: number; up?: number; providers: ModelProvider[]; active?: string | null; active_model?: string | null; active_set_at?: number }
+/** up=null 是"配了但没探测过"——三态,不是布尔。probed=false 时别把它画成 down。 */
+export interface ModelProvider {
+  name: string; model: string; host: string
+  up: boolean | null; latency_ms?: number | null; probed: boolean
+}
+export interface ModelPool {
+  checked_at?: number | null
+  /** 有没有真实探测结果。false = 列表来自本机配置,不是健康检查。 */
+  probed?: boolean
+  /** status_file(探测过) | configured(只有配置) | none */
+  source?: string
+  total?: number; up?: number | null
+  providers: ModelProvider[]; active?: string | null; active_model?: string | null
+  active_set_at?: number
+}
 
 export interface SrcCandidate {
   candidate_id: string; intent_id: string; url: string; path: string; priority: number

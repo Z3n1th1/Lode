@@ -53,7 +53,13 @@ export default function HealthView() {
       key: 'up',
       header: '状态',
       width: 84,
-      render: (row) => <Badge tone={row.up ? 'ok' : 'danger'}>{row.up ? 'up' : 'down'}</Badge>
+      /* 三态:探测过才是 up/down;"配了但没探测过"既不是 up 也不是 down,别画红。 */
+      render: (row) =>
+        row.probed ? (
+          <Badge tone={row.up ? 'ok' : 'danger'}>{row.up ? 'up' : 'down'}</Badge>
+        ) : (
+          <Badge tone="neutral">未探测</Badge>
+        )
     },
     {
       key: 'latency_ms',
@@ -98,6 +104,8 @@ export default function HealthView() {
   ].filter((stat) => hasValue(stat.value))
   const poolTotal = models?.total ?? 0
   const poolUp = models?.up ?? 0
+  /** 有 provider 但没探测过:报数量,不报 "0/N" —— 那个数字看起来就像全挂了。 */
+  const poolProbed = Boolean(models?.probed)
   const tasks = [
     { label: 'rss 状态', value: scheduler?.rss_last_run ? `${Math.round(scheduler.rss_last_run)}` : '' },
     { label: 'rss 新增', value: hasValue(scheduler?.rss_last_new) ? `${scheduler?.rss_last_new}` : '' },
@@ -117,7 +125,13 @@ export default function HealthView() {
     <section className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="运行"
-        meta={models?.checked_at ? `模型池 ${new Date(models.checked_at * 1000).toLocaleTimeString('zh-CN')}` : ''}
+        meta={
+          models?.checked_at
+            ? `模型池 ${new Date(models.checked_at * 1000).toLocaleTimeString('zh-CN')}`
+            : models?.source === 'configured'
+              ? '模型池:本机配置,未探测'
+              : ''
+        }
         actions={
           <Button
             variant="ghost"
@@ -138,9 +152,9 @@ export default function HealthView() {
           ))}
           <Stat
             label="模型池"
-            value={models ? `${poolUp}/${poolTotal}` : '—'}
-            /* 没配过上游时 total=0:那不是"全挂了",别画红 */
-            tone={poolTotal > 0 && poolUp === 0 ? 'text-danger' : undefined}
+            value={!models ? '—' : poolProbed ? `${poolUp}/${poolTotal}` : `${poolTotal} 个未探测`}
+            /* 只有探测过才谈得上"全挂了";没配过上游(total=0)也不是故障,别画红 */
+            tone={poolProbed && poolTotal > 0 && poolUp === 0 ? 'text-danger' : undefined}
           />
           <Stat label="活跃模型" value={models?.active_model || '—'} />
         </div>

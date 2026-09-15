@@ -100,7 +100,7 @@ deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）
 | `code-audit/` | 白盒审计隔离区（clone 落点/semgrep 规则/CodeAuditCard） | **克隆代码永不执行**（不 build/不跑 install 脚本） |
 | `notify/` | Notifier 渠道适配 + 飞书白名单控制入口 | 渠道配置走 deploy env；普通通知只出不进，飞书指令仅允许显式白名单；只发结论不发报告或证据细节 |
 | `console/` | 本地只读控制台（Goal/Task/profile/sandbox 状态） | 当前固定 loopback；写操作、审批与远程管理尚未接入 |
-| `references/` | 领域知识/打法卡（数据，非代码） | 热更新生效（L1 通道）；新卡必须带 source+双审 |
+| `references/` | 领域知识/打法卡（数据，非代码） | 由 `pentest` 的 `read_knowledge` 工具按需拉取，**每次调用都读盘**，所以改完立即生效（无需重启）；新卡必须带 source+双审 |
 | `evals/` | golden CTF + A/B + 正向门 + 对抗 eval | 每次改动三门全绿才可部署 |
 | `audit/` | InvariantGate/AdversarialReview/AuditSweep/AcceptanceRun 产物 | 执行者≠审查者 |
 | `evolution/` | 自进化：`candidates/`（未过门提案）、`ledger/`（每次自改留痕+回滚点）、`freeze_state` | 连续回归失败≥2 自动冻结；L3(core/安全门)永不自改 |

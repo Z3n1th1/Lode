@@ -381,6 +381,68 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertEqual("m-two", listing["active_model"])
                 self.assertEqual(2, len(listing["providers"]))
 
+    def test_models_list_configured_providers_when_nothing_was_probed(self) -> None:
+        """没探测过 ≠「全挂了」。
+
+        钉住的 bug:`/api/v1/models` 只读 `model_pool_status.json`,而那份文件在本仓库
+        里没有任何东西写 —— 于是「模型上游」永远是一张空表,配好的 key 通不通看不见。
+        现在没有探测结果时退回本机 `LLM_PROVIDERS` 配置,并把 `up` 留成 None(三态)。
+        """
+        from unittest import mock
+
+        from console import projections
+        from console.projections import ReadOnlyControlPlane
+
+        configured = [
+            {"name": "alpha", "base_url": "https://alpha.test/v1",
+             "api_key": "sk-alpha-DO-NOT-LEAK", "model": "model-a"},
+            {"name": "beta", "base_url": "https://beta.test:8443/v1/",
+             "api_key": "sk-beta-DO-NOT-LEAK", "model": "model-b"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir(parents=True)
+            with mock.patch.object(projections, "llm_pool",
+                                   mock.Mock(parse_providers=lambda: configured)):
+                listing = ReadOnlyControlPlane(state_dir, now_fn=lambda: 1_100.0).models()
+
+        self.assertFalse(listing["probed"])
+        self.assertEqual("configured", listing["source"])
+        self.assertIsNone(listing["checked_at"])
+        self.assertIsNone(listing["up"])
+        self.assertEqual(["alpha", "beta"], [p["name"] for p in listing["providers"]])
+        # host 只留 netloc:path / query 都不带出去
+        self.assertEqual(["alpha.test", "beta.test:8443"],
+                         [p["host"] for p in listing["providers"]])
+        # 没探测过就不是 up 也不是 down
+        self.assertTrue(all(p["up"] is None and p["probed"] is False
+                            for p in listing["providers"]))
+        # 绝不带出 key
+        self.assertNotIn("DO-NOT-LEAK", json.dumps(listing))
+
+    def test_active_model_can_be_switched_from_configuration_alone(self) -> None:
+        """只有配置、没有探测结果时「切换」也要能用,否则按钮点下去只会 400。"""
+        from unittest import mock
+
+        from console import projections
+        from console.projections import ReadOnlyControlPlane
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir(parents=True)
+            with mock.patch.object(projections, "llm_pool", mock.Mock(parse_providers=lambda: [
+                {"name": "alpha", "base_url": "https://alpha.test/v1",
+                 "api_key": "k", "model": "model-a"},
+            ])):
+                plane = ReadOnlyControlPlane(state_dir, now_fn=lambda: 1_100.0)
+                self.assertEqual("unknown_provider", plane.set_active_model("ghost")["error"])
+                ok = plane.set_active_model("alpha")
+
+        self.assertTrue(ok["ok"], ok)
+        self.assertEqual("alpha", ok["active"])
+        self.assertEqual("model-a", ok["model"])
+        self.assertIsNone(ok["up"])   # 未探测:不谎报 up,也不谎报 down
+
 
 if __name__ == "__main__":
     unittest.main()

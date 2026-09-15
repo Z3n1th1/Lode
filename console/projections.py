@@ -678,25 +678,64 @@ class ReadOnlyControlPlane:
             "gh_events_poll": ghe.get("poll_interval"),
             "socks_last_run": sv.get("last_run"), "socks_status": sv.get("last_status")}}
 
+    def _configured_providers(self) -> List[Dict[str, Any]]:
+        """本机 LLM_PROVIDERS 解析出来的 provider 配了哪些。
+
+        这是 agent 侧从没写过 ``model_pool_status.json`` 时的兜底:那份文件没人写时,
+        「模型上游」永远是一张空表,看起来像全挂了 —— 其实只是没人探测过。
+        只取 name/base_url/model:``parse_providers()`` 的返回值里有 api_key,
+        这里**绝不**把它带出去;host 只留 urlparse 的 netloc,path/query 都丢掉。
+        """
+        if llm_pool is None:
+            return []
+        try:
+            providers = llm_pool.parse_providers()
+        except Exception:  # noqa: BLE001 - 配置坏了不该把这一页整个打掉
+            return []
+        out: List[Dict[str, Any]] = []
+        for p in providers[:20]:
+            out.append({
+                "name": _text(p.get("name", ""), limit=32),
+                "model": _text(p.get("model", ""), limit=40),
+                "host": _text(urlparse(str(p.get("base_url") or "")).netloc, limit=48),
+                "up": None,          # 没探测过 —— 不是"挂了"
+                "latency_ms": None,
+                "probed": False,
+            })
+        return out
+
     def models(self) -> Dict[str, Any]:
-        """MoA 模型池健康(agent 侧写的 model_pool_status.json;脱敏 host,绝不含 key)。
-        R2: 附带当前活跃 provider(读 model_active_provider.json,由 POST /api/v1/model/active 写入)。"""
+        """MoA 模型池健康。脱敏 host,绝不含 key。
+
+        两段式:优先 agent 侧写的 ``model_pool_status.json``(带真实探测结果 up/latency);
+        它不在时退回本机配置(``LLM_PROVIDERS``),provider 列得出来但 ``probed=false``。
+        没有这层兜底,这一页就只有一张空表,而"配了没探测"和"探了全挂"长得一样。
+        R2: 附带当前活跃 provider(读 model_active_provider.json,由 POST /api/v1/model/active 写入)。
+        """
         j = self._read_json_file(self.state_dir / "model_pool_status.json") or {}
-        provs = []
+        probed: List[Dict[str, Any]] = []
         for p in (j.get("providers") or [])[:20]:
-            provs.append({
+            probed.append({
                 "name": _text(p.get("name", ""), limit=32),
                 "model": _text(p.get("model", ""), limit=40),
                 "host": _text(p.get("host", ""), limit=48),
                 "up": bool(p.get("up")),
                 "latency_ms": p.get("latency_ms"),
+                "probed": True,
             })
+        if probed:
+            provs, source = probed, "status_file"
+        else:
+            provs = self._configured_providers()
+            source = "configured" if provs else "none"
         active = self._read_json_file(self.state_dir / "model_active_provider.json") or {}
         active_name = _text(active.get("name", ""), limit=32)
         active_model = _text(active.get("model", ""), limit=40)
         known = {p["name"] for p in provs}
-        return {"checked_at": j.get("checked_at"), "total": j.get("total") or len(provs),
-                "up": j.get("up"), "providers": provs,
+        return {"checked_at": j.get("checked_at") if probed else None,
+                "probed": bool(probed), "source": source,
+                "total": (j.get("total") if probed else None) or len(provs),
+                "up": j.get("up") if probed else None, "providers": provs,
                 "active": active_name if active_name in known else (active_name or None),
                 "active_model": active_model or None,
                 "active_set_at": active.get("set_at")}
@@ -704,18 +743,18 @@ class ReadOnlyControlPlane:
     def set_active_model(self, name: str) -> Dict[str, Any]:
         """R2: 切换活跃 provider。只写 model_active_provider.json(原子替换);
         core.llm_pool 每次调用时读取该文件并把活跃 provider 提到 failover 队首。
-        name 必须命中 model_pool_status.json 里已知 provider(不引入 console 侧不可见的新凭据)。"""
+        name 必须命中池内已知 provider(不引入 console 侧不可见的新凭据)。池的来源与
+        GET /api/v1/models 一致:探测结果优先,本机配置兜底。"""
         name = (name or "").strip()
         if not name or len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             return {"ok": False, "error": "invalid_name"}
-        j = self._read_json_file(self.state_dir / "model_pool_status.json") or {}
-        providers = j.get("providers") or []
-        match = next((p for p in providers if p.get("name") == name), None)
+        by_name = {p["name"]: p for p in (self.models().get("providers") or [])}
+        match = by_name.get(name)
         if match is None:
             return {"ok": False, "error": "unknown_provider",
-                    "providers": [str(p.get("name", "")) for p in providers][:20]}
+                    "providers": sorted(by_name)[:20]}
         doc = {"name": name, "model": str(match.get("model", ""))[:40],
-               "up": bool(match.get("up")), "set_at": time.time(), "set_by": "console"}
+               "up": match.get("up"), "set_at": time.time(), "set_by": "console"}
         path = self.state_dir / "model_active_provider.json"
         tmp = self.state_dir / ".model_active_provider.json.tmp"
         try:

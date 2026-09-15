@@ -214,6 +214,29 @@ class ShippedSkillsTests(unittest.TestCase):
         self.assertEqual(["components", "store", "testing", "ui-lib"],
                          skills.module_names("frontend-dev"))
 
+    def test_first_turn_module_floor(self) -> None:
+        """第一轮地板:认得出的词带出对应模块,报告纪律永远在,认不出就退回建面。
+
+        真正的深度走 read_knowledge 按需拉,所以这里只挑明显的、并且有上限 ——
+        猜宽了就把按需拉取本来要省下的预算又烧回去了。
+        """
+        self.assertEqual(["evidence", "recon"], skills.select_modules(""))
+        self.assertEqual(["evidence", "mobile"], skills.select_modules("这个安卓 App 有导出组件"))
+        self.assertEqual(["evidence", "url-trust"], skills.select_modules("帮我看看它的域名校验"))
+        # 有上限:一句话里点了一堆词也不会把整包拉进来
+        self.assertLessEqual(len(skills.select_modules("安卓 ssrf 注入 越权 域名")),
+                             1 + skills.FLOOR_MAX_MATCHED)
+
+    def test_first_turn_floor_never_names_a_module_that_does_not_exist(self) -> None:
+        """注入一个不存在的模块名等于给模型指一个不存在的门。"""
+        available = set(skills.module_names("pentest"))
+        for text in ("", "安卓 ssrf 注入 越权 域名 组合链 侦察 token", "nope"):
+            self.assertLessEqual(set(skills.select_modules(text)), available)
+
+    def test_first_turn_floor_is_empty_for_a_pack_without_modules(self) -> None:
+        """jobs.py 是对 mode.skill 调的 —— chat 包没有模块,必须是空表而不是报错。"""
+        self.assertEqual([], skills.select_modules("随便聊聊", pack="chat"))
+
 
 if __name__ == "__main__":
     unittest.main()

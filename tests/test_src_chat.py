@@ -117,3 +117,68 @@ def test_chat_answers_every_tool_call(monkeypatch) -> None:
     assert len(assistant_tc[0]["tool_calls"]) == MAX_TOOL_CALLS_PER_ROUND
     tool_msgs = [m for m in second if m.get("role") == "tool"]
     assert len(tool_msgs) == MAX_TOOL_CALLS_PER_ROUND
+
+
+# -- read_knowledge: the retrieval channel ----------------------------------
+#
+# The system prompt carries only the dispatcher. Depth arrives when the agent
+# recognises a shape and pulls the matching file by name — which is what lets the
+# library grow without the prompt growing with it.
+
+import json as _json
+
+from agents.src_chat import KNOWLEDGE_CHAR_LIMIT, _exec_read_knowledge
+
+
+def _pull(name: str) -> Dict[str, Any]:
+    return _json.loads(_exec_read_knowledge(SrcChatSession(session_id="t"), {"name": name}))
+
+
+def test_read_knowledge_pulls_a_pattern_module() -> None:
+    got = _pull("mobile")
+    assert got["source"] == "module:pentest"
+    assert "Android" in got["text"]
+    assert got["truncated"] is False
+
+
+def test_read_knowledge_pulls_a_knowledge_base_card() -> None:
+    got = _pull("idor-test")
+    assert got["source"] == "kb"
+    assert got["text"].strip()
+
+
+def test_read_knowledge_accepts_a_trailing_extension() -> None:
+    assert _pull("mobile.md")["name"] == "mobile"
+
+
+def test_read_knowledge_truncates_instead_of_flooding() -> None:
+    """A long card must come back bounded, and say so rather than ending mid-sentence."""
+    got = _pull("idor-test")
+    assert got["truncated"] is True
+    assert "truncated" in got["text"]
+    assert got["chars"] <= KNOWLEDGE_CHAR_LIMIT + 200
+
+
+def test_read_knowledge_unknown_name_returns_the_catalogue() -> None:
+    got = _pull("no-such-card")
+    assert got["error"] == "not found"
+    assert "mobile" in got["available"]
+    assert "idor-test" in got["available"]
+
+
+def test_read_knowledge_refuses_paths() -> None:
+    """Bare stems only — this must not become an arbitrary file reader."""
+    for name in ("../../../../etc/passwd", "modules/mobile", "a b", ""):
+        assert _pull(name)["error"] == "invalid name", name
+
+
+def test_read_knowledge_is_wired_as_a_callable_tool() -> None:
+    """Declared by a mode AND resolvable to a schema + impl, or it is not a tool."""
+    from agents import tool_registry
+    from core import modes
+
+    declared = set(modes.get_mode("pentest").tools)
+    assert "read_knowledge" in declared
+    schemas, dispatch, missing = tool_registry.resolve(["read_knowledge"])
+    assert missing == []
+    assert schemas and "read_knowledge" in dispatch
