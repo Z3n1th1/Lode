@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -56,14 +57,169 @@ from console.deps import (
     _text,
 )
 
+# 宿主机的 mime 注册表经常认不全前端产物:Windows 上 .woff2/.ttf 直接返回 None,
+# 于是文件按 application/octet-stream 送出去,浏览器不保证还当字体解析 ——
+# 表现是 @font-face 静默变 error、页面回落到系统字体。所以这里显式写死。
+STATIC_MEDIA_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+}
+
+
+def static_media_type(path: Path | str) -> str | None:
+    """按扩展名给出媒体类型;认不出返回 None(交给调用方兜底)。"""
+    return STATIC_MEDIA_TYPES.get(Path(path).suffix.lower())
+
+
+# ---------------------------------------------------------------------------
+# 宿主机指标 —— 三个平台各读各的;读不到就返回空,不编造 0。
+#
+# 原来只读 /proc/meminfo、只 shell 出 `systemctl is-active`,于是非 Linux 机器上
+# 「运行」页永远只能显示一排横线 —— 看着像"服务全挂了",其实只是这台机器不是 Linux。
+# ---------------------------------------------------------------------------
+
+MONITORED_SERVICES_ENV = "LODE_MONITORED_SERVICES"
+
+
+def _memory_from_linux(meminfo_path: Path | str = "/proc/meminfo") -> Dict[str, int]:
+    info: Dict[str, int] = {}
+    for line in Path(meminfo_path).read_text().splitlines():
+        key, _, value = line.partition(":")
+        info[key.strip()] = int(value.strip().split()[0]) // 1024
+    return {"total_mb": info.get("MemTotal", 0), "avail_mb": info.get("MemAvailable", 0)}
+
+
+def _memory_from_macos(run: Callable[..., Any]) -> Dict[str, int]:
+    total = run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+    vm = run(["vm_stat"], capture_output=True, text=True, timeout=5)
+    page_size = 4096
+    free_pages = 0
+    for line in str(vm.stdout).splitlines():
+        if "page size of" in line:
+            page_size = int(line.split("page size of")[1].split()[0])
+        key, _, value = line.partition(":")
+        if key.strip() in ("Pages free", "Pages inactive", "Pages speculative"):
+            free_pages += int(value.strip().rstrip("."))
+    return {"total_mb": int(str(total.stdout).strip()) // (1024 * 1024),
+            "avail_mb": free_pages * page_size // (1024 * 1024)}
+
+
+def _memory_from_windows() -> Dict[str, int]:
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return {}
+    mib = 1024 * 1024
+    return {"total_mb": int(status.ullTotalPhys) // mib, "avail_mb": int(status.ullAvailPhys) // mib}
+
+
+def host_memory(
+    platform_name: Optional[str] = None,
+    run: Optional[Callable[..., Any]] = None,
+    linux_meminfo: Path | str = "/proc/meminfo",
+) -> Dict[str, Any]:
+    """{total_mb, avail_mb, used_pct};这台机器读不到就返回 {},让界面显示横线。"""
+    name = (platform_name or sys.platform).lower()
+    runner = run or subprocess.run
+    try:
+        if name.startswith("linux"):
+            raw = _memory_from_linux(linux_meminfo)
+        elif name.startswith("darwin") or name.startswith("macos"):
+            raw = _memory_from_macos(runner)
+        elif name.startswith("win"):
+            raw = _memory_from_windows()
+        else:
+            raw = {}
+    except Exception:  # noqa: BLE001 - 一项宿主机指标读不到,不该让整页 500
+        return {}
+    total, avail = int(raw.get("total_mb") or 0), int(raw.get("avail_mb") or 0)
+    if total <= 0:
+        return {}
+    return {"total_mb": total, "avail_mb": avail,
+            "used_pct": round((total - avail) * 100 / total)}
+
+
+def monitored_services() -> Tuple[str, ...]:
+    """要盯的服务名,来自 LODE_MONITORED_SERVICES(逗号分隔)。
+
+    这里原来写死五个 `pa-*` 单元名:那是某一台机器上的私事,不是这个产品的东西,
+    而且在非 Linux 上永远只能是 n/a。现在没配置就一个都不盯,前端那一段自己消失。
+    """
+    raw = os.environ.get(MONITORED_SERVICES_ENV, "")
+    return tuple(name.strip() for name in raw.split(",") if name.strip())
+
+
+def _service_state_linux(name: str, run: Callable[..., Any]) -> str:
+    done = run(["systemctl", "is-active", name], capture_output=True, text=True, timeout=5)
+    return str(done.stdout).strip() or "unknown"
+
+
+def _service_state_macos(name: str, run: Callable[..., Any]) -> str:
+    done = run(["launchctl", "list", name], capture_output=True, text=True, timeout=5)
+    return "active" if getattr(done, "returncode", 1) == 0 else "inactive"
+
+
+def _service_state_windows(name: str, run: Callable[..., Any]) -> str:
+    done = run(["sc", "query", name], capture_output=True, text=True, timeout=5)
+    text = str(done.stdout).upper()
+    if "RUNNING" in text:
+        return "active"
+    if "STOPPED" in text:
+        return "inactive"
+    return "unknown"
+
+
+def service_states(
+    names: Iterable[str],
+    *,
+    platform_name: Optional[str] = None,
+    run: Optional[Callable[..., Any]] = None,
+) -> Dict[str, str]:
+    """逐个服务问平台自己的管家:systemd / launchd / 服务控制台。"""
+    wanted = [str(name).strip() for name in names if str(name).strip()]
+    if not wanted:
+        return {}
+    name_of_platform = (platform_name or sys.platform).lower()
+    runner = run or subprocess.run
+    if name_of_platform.startswith("linux"):
+        probe: Callable[[str, Callable[..., Any]], str] = _service_state_linux
+    elif name_of_platform.startswith("darwin") or name_of_platform.startswith("macos"):
+        probe = _service_state_macos
+    elif name_of_platform.startswith("win"):
+        probe = _service_state_windows
+    else:
+        return {name: "n/a" for name in wanted}
+    states: Dict[str, str] = {}
+    for name in wanted:
+        try:
+            states[name] = probe(name, runner) or "unknown"
+        except Exception:  # noqa: BLE001 - 单个服务问不到,其余照常
+            states[name] = "n/a"
+    return states
+
+
+
 class ConsoleStaticFiles(StaticFiles):
     """Keep Vite module MIME types stable on hosts with incomplete registries."""
 
-    _MEDIA_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
-
     def file_response(self, full_path: str, stat_result: Any, scope: Any, status_code: int = 200) -> Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
-        media_type = self._MEDIA_TYPES.get(Path(full_path).suffix.lower())
+        media_type = static_media_type(full_path)
         if media_type:
             response.headers["content-type"] = media_type
         return response
@@ -246,7 +402,17 @@ class ReadOnlyControlPlane:
         return sorted(current, key=lambda item: item["expires_at"])[:MAX_VISIBLE_ITEMS]
 
     def _project_pending_intakes(self, events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Project only review-safe preview fields from the shared intake ledger."""
+        """Project only review-safe preview fields from the shared intake ledger.
+
+        Same ledger the Feishu path writes, so 提交队列 shows exactly the previews
+        that are still confirmable — a preview disappears here the moment it is
+        confirmed, discarded or left to expire, which is the whole point of
+        reading the gate's own log instead of keeping a second list.
+
+        The operator's ``instruction`` stays out, like every other free-text
+        field in this projection: it is the one place a secret could ride along,
+        and the dialog that needs it reads the gate directly instead.
+        """
         pending: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for event in events:
             kind = _text(event.get("event"), limit=48)
@@ -271,6 +437,11 @@ class ReadOnlyControlPlane:
                         "intake_id": intake_id,
                         "target": target,
                         "profile_name": profile,
+                        # 队列要显示"这次确认到底绑了哪些开关"。
+                        "enabled_options": sorted(
+                            key for key, value in options.items()
+                            if isinstance(value, dict) and value.get("enabled") is True
+                        )[:MAX_VISIBLE_ITEMS],
                         "created_at": _number(raw.get("created_at")),
                         "expires_at": expires_at,
                         "asset_inventory_enabled": asset_inventory.get("enabled") is True,
@@ -494,30 +665,12 @@ class ReadOnlyControlPlane:
         return out
 
     def system(self) -> Dict[str, Any]:
-        mem: Dict[str, Any] = {}
-        try:
-            info: Dict[str, int] = {}
-            for ln in Path("/proc/meminfo").read_text().splitlines():
-                key, _, val = ln.partition(":")
-                info[key.strip()] = int(val.strip().split()[0]) // 1024
-            total, avail = info.get("MemTotal", 0), info.get("MemAvailable", 0)
-            mem = {"total_mb": total, "avail_mb": avail,
-                   "used_pct": round((total - avail) * 100 / total) if total else 0}
-        except Exception:  # noqa: BLE001
-            mem = {}
-        services: Dict[str, str] = {}
-        for n in ("pa-feishu-reply", "pa-mihomo", "pa-poc-admin", "pa-dashboard", "pa-soybean-console"):
-            try:
-                services[n] = subprocess.run(["systemctl", "is-active", n], capture_output=True,
-                                             text=True, timeout=5).stdout.strip() or "unknown"
-            except Exception:  # noqa: BLE001
-                services[n] = "n/a"
         st = self._read_json_file(self.state_dir / "scheduler_state.json") or {}
         rss = st.get("_rss", {})
         kl = st.get("_keyleak", {})
         ghe = st.get("_github_events", {})
         sv = st.get("_socks_validate", {})
-        return {"mem": mem, "services": services, "scheduler": {
+        return {"mem": host_memory(), "services": service_states(monitored_services()), "scheduler": {
             "rss_last_run": rss.get("last_run"), "rss_seen": len(rss.get("seen") or []),
             "rss_last_notified": rss.get("last_notified"), "rss_last_new": rss.get("last_new"),
             "keyleak_last_run": kl.get("last_run"), "keyleak_status": kl.get("last_status"),
@@ -757,29 +910,15 @@ class ReadOnlyControlPlane:
             pass
         return traj[:800]
 
-    def project_intakes(self) -> List[Dict[str, Any]]:
-        """列出 console 已提交的新建项目请求(只读投影;status=pending_review,非授权、不代表已开跑)。"""
-        d = self.state_dir / "project_intake"
-        out: List[Dict[str, Any]] = []
-        try:
-            files = sorted(d.glob("*.json"), key=lambda p: p.name, reverse=True)
-        except OSError:
-            return out
-        for p in files[:MAX_VISIBLE_ITEMS]:
-            j = self._read_json_file(p)
-            if not isinstance(j, dict) or j.get("schema") != "ProjectIntakeRequest/v1":
-                continue
-            tg = j.get("toggles") if isinstance(j.get("toggles"), dict) else {}
-            out.append({
-                "intake_id": _text(j.get("intake_id"), limit=64),
-                "target_url": _text(j.get("target_url"), limit=300),
-                "name": _text(j.get("name"), limit=120),
-                "engagement_profile": _text(j.get("engagement_profile"), limit=80),
-                "status": _text(j.get("status"), limit=32) or "pending_review",
-                "created_at": _number(j.get("created_at")),
-                "toggle_on": sorted(k for k, v in tg.items() if v is True)[:16],
-            })
-        return out
+    def pending_intakes(self) -> List[Dict[str, Any]]:
+        """待确认的建目标预览(提交队列)。读的是门自己的 target_intakes.jsonl。
+
+        这里以前扫 state_dir/project_intake/*.json —— 那是 console 旧路径写下的
+        请求文件,没有任何消费者。现在没有第二份列表:预览一旦被确认/放弃/过期,
+        它在这条队列里就消失了。
+        """
+        events, _status = self._read_events("target_intakes.jsonl")
+        return self._project_pending_intakes(events)
 
     def session_guidance_list(self, session_id: str = "") -> List[Dict[str, Any]]:
         """P5-e:列已提交的续跑指导(可按 session 过滤;只读投影,status=pending_review 非授权)。"""

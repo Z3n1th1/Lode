@@ -1,0 +1,561 @@
+// 次级页面的数据:SRC 黑板、发现、运行健康、项目/轨迹、成果浏览,以及共享弹窗。
+// 与对话无关,所以单独一个 store —— 旧版把这两类状态塞在同一个 405 行单例里。
+import { create } from 'zustand'
+
+import {
+  ApiError,
+  confirmProjectIntake,
+  discardProjectIntake,
+  loadFindings,
+  loadModelPool,
+  loadPendingIntake,
+  loadProject,
+  loadProjectIntakes,
+  loadProjectResults,
+  loadProjects,
+  loadProfiles,
+  loadReport,
+  loadSessionGuidance,
+  loadSrcAutopilot,
+  loadSystem,
+  loadTrajectory,
+  startProjectIntake,
+  submitSessionGuidance,
+  type FindingRow,
+  type IntakeConfirmResult,
+  type IntakePreview,
+  type ModelPool,
+  type PendingIntakeRow,
+  type ProjectCard,
+  type ProjectDetail,
+  type ProjectResults,
+  type SessionGuidanceRow,
+  type SrcAutopilotView,
+  type SystemInfo,
+  type TrajectoryEvent
+} from '../api'
+import { formatTimestamp } from '../dashboard'
+import { useAuth, type Route } from './auth'
+import { useChat } from './chat'
+
+const EMPTY_AUTOPILOT: SrcAutopilotView = {
+  schema: 'SrcAutopilotView/v1',
+  available: false,
+  run: {},
+  candidates: [],
+  intents: [],
+  claims: [],
+  dead_ends: [],
+  hints: []
+}
+
+/** intake 策略档解析:优先用户档;无效/缺失时回退第一个可用档,避免 400。 */
+export async function resolveIntakeProfile(preferred: string): Promise<string> {
+  try {
+    const profiles = await loadProfiles()
+    const valid = new Set<string>()
+    for (const profile of profiles) {
+      valid.add(profile.id)
+      for (const alias of profile.aliases || []) valid.add(alias)
+    }
+    if (preferred && valid.has(preferred)) return preferred
+    return profiles[0]?.id || ''
+  } catch {
+    return preferred // 读不到就按原值提交,由后端报错带出原因
+  }
+}
+
+export function projectStatusTone(status: string): 'ok' | 'accent' | 'neutral' {
+  if (status === 'running') return 'accent'
+  if (status === 'done') return 'ok'
+  return 'neutral'
+}
+
+export const TRAJ_KIND_LABEL: Record<string, string> = {
+  goal_created: '创建目标',
+  endpoint_audited: '接口核销',
+  finding_recorded: '记录发现',
+  task_status: '任务状态',
+  reasoning: '推理',
+  tool_call: '工具调用',
+  tool_result: '工具结果',
+  fingerprint: '指纹',
+  poc: 'PoC',
+  verifier: '复核',
+  human_gate: '人工门',
+  scope: 'Scope'
+}
+
+/** 门的 options key → 界面上那个开关的名字。队列与确认步共用一份。 */
+export const OPTION_LABEL: Record<string, string> = {
+  asset_inventory: '资产清单',
+  subdomain_enum: '子域枚举',
+  fingerprint: '精确指纹',
+  active_scan: '主动扫描',
+  nuclei: 'Nuclei 模板',
+  tscan: 'TScan',
+  intelligence: '情报关联',
+  poc_research: 'PoC 检索',
+  proxy_route: '代理路由',
+  network_gate: '出站门',
+  edge_human_gate: '边界人工门',
+  arl_next: 'ARL 资产'
+}
+
+/** 门返回的 options → 真开着的开关名。确认单与提交队列共用。 */
+export function enabledOptionLabels(options: Record<string, { enabled?: boolean }>): string[] {
+  return Object.keys(options)
+    .filter((key) => options[key]?.enabled === true)
+    .map((key) => OPTION_LABEL[key] ?? key)
+}
+
+/** 门的 4xx detail → 人话。后端只说英文短语,这里只翻译、不加解释。 */
+const INTAKE_HINT: Record<string, string> = {
+  invalid_target: '目标要是公网 http(s) 地址',
+  invalid_profile: '策略档无效',
+  empty_instruction: '请写一句这次要看什么',
+  brute_force_out_of_scope: '爆破不在当前授权范围内',
+  intake_option_unknown: '有个开关后端不认识(前后端没同步)'
+}
+
+export interface IntakeToggles {
+  scan_enabled: boolean
+  fingerprint_precise: boolean
+  nuclei: boolean
+  tscan: boolean
+  asset_inventory: boolean
+  subdomain_enum: boolean
+  intel: boolean
+  poc_research: boolean
+  proxy_route: boolean
+  network_gate: boolean
+  edge_human_gate: boolean
+}
+
+const DEFAULT_TOGGLES: IntakeToggles = {
+  scan_enabled: true,
+  fingerprint_precise: true,
+  nuclei: false,
+  tscan: false,
+  asset_inventory: true,
+  subdomain_enum: false,
+  intel: true,
+  poc_research: true,
+  proxy_route: false,
+  network_gate: true,
+  edge_human_gate: true
+}
+
+export interface IntakeForm {
+  target_url: string
+  instruction: string
+  engagement_profile: string
+  toggles: IntakeToggles
+}
+
+export interface ModalState {
+  open: boolean
+  title: string
+  meta: string
+  body: string
+  links: string[]
+  mono: boolean
+  loading: boolean
+}
+
+const CLOSED_MODAL: ModalState = {
+  open: false,
+  title: '',
+  meta: '',
+  body: '',
+  links: [],
+  mono: false,
+  loading: false
+}
+
+interface PanelState {
+  loading: boolean
+  srcAutopilot: SrcAutopilotView
+  findings: FindingRow[]
+  system: SystemInfo | null
+  models: ModelPool | null
+  projects: ProjectCard[]
+  projectDetail: ProjectDetail | null
+  selectedProjectId: string
+  selectedSessionId: string
+  trajectory: TrajectoryEvent[]
+  guidanceRows: SessionGuidanceRow[]
+  guidanceText: string
+  guidanceError: string
+  guidanceOk: string
+  intakes: PendingIntakeRow[]
+  intakeForm: IntakeForm
+  profileOptions: { label: string; value: string }[]
+  newProjectOpen: boolean
+  intakeSubmitting: boolean
+  intakeError: string
+  intakeOk: string
+  /** 待确认的预览。有它 = 弹窗停在确认步;确认/放弃后清空。 */
+  intakePreview: IntakePreview | null
+  /** 已落卡的确认结果,给操作者看 target_id 与卡文件。 */
+  intakeResult: IntakeConfirmResult | null
+  resultsOpen: boolean
+  results: ProjectResults | null
+  resultsLoading: boolean
+  modal: ModalState
+
+  load: (route: Route) => Promise<void>
+  selectProject: (id: string) => void
+  selectSession: (id: string) => Promise<void>
+  submitGuidance: () => Promise<void>
+  forkSession: () => Promise<void>
+  openNewProject: () => Promise<void>
+  setNewProjectOpen: (open: boolean) => void
+  patchIntakeForm: (patch: Partial<IntakeForm>) => void
+  submitIntake: () => Promise<void>
+  confirmIntake: () => Promise<void>
+  discardIntake: () => Promise<void>
+  openIntakeRun: () => Promise<void>
+  openResults: (projectId: string) => Promise<void>
+  setResultsOpen: (open: boolean) => void
+  openInfo: (title: string, body: string, links?: string[]) => void
+  openReport: (taskId: string) => Promise<void>
+  openFinding: (row: FindingRow) => void
+  closeModal: () => void
+  clearGuidance: () => void
+}
+
+export const usePanels = create<PanelState>()((set, get) => ({
+  loading: false,
+  srcAutopilot: EMPTY_AUTOPILOT,
+  findings: [],
+  system: null,
+  models: null,
+  projects: [],
+  projectDetail: null,
+  selectedProjectId: '',
+  selectedSessionId: '',
+  trajectory: [],
+  guidanceRows: [],
+  guidanceText: '',
+  guidanceError: '',
+  guidanceOk: '',
+  intakes: [],
+  intakeForm: { target_url: '', instruction: '', engagement_profile: '', toggles: DEFAULT_TOGGLES },
+  profileOptions: [],
+  newProjectOpen: false,
+  intakeSubmitting: false,
+  intakeError: '',
+  intakeOk: '',
+  intakePreview: null,
+  intakeResult: null,
+  resultsOpen: false,
+  results: null,
+  resultsLoading: false,
+  modal: CLOSED_MODAL,
+
+  async load(route) {
+    set({ loading: true })
+    try {
+      if (route === 'health') {
+        const [system, models] = await Promise.all([loadSystem(), loadModelPool()])
+        set({ system, models })
+      } else if (route === 'findings') {
+        set({ findings: await loadFindings() })
+      } else if (route === 'projects') {
+        const [projects, intakes] = await Promise.all([
+          loadProjects(),
+          loadProjectIntakes().catch(() => [] as PendingIntakeRow[])
+        ])
+        set({ projects, intakes })
+      } else if (route === 'settings') {
+        const profiles = await loadProfiles().catch(() => [])
+        set({
+          profileOptions: profiles.map((p) => ({ label: `${p.id} · ${p.label}`, value: p.id }))
+        })
+      } else if (route === 'blackboard') {
+        set({ srcAutopilot: await loadSrcAutopilot().catch(() => EMPTY_AUTOPILOT) })
+      }
+    } catch {
+      /* 单个页面读失败不打断整体;20s 轮询会重试 */
+    } finally {
+      set({ loading: false })
+    }
+  },
+
+  selectProject(projectId) {
+    void (async () => {
+      set({
+        selectedProjectId: projectId,
+        selectedSessionId: '',
+        projectDetail: null,
+        trajectory: [],
+        guidanceRows: []
+      })
+      try {
+        const detail = await loadProject(projectId)
+        set({ projectDetail: detail })
+        const first = detail.sessions[0]?.session_id
+        if (first) await get().selectSession(first)
+      } catch {
+        set({ projectDetail: null })
+      }
+    })()
+  },
+
+  async selectSession(sessionId) {
+    set({ selectedSessionId: sessionId })
+    const [trajectory, guidanceRows] = await Promise.all([
+      loadTrajectory(sessionId).catch(() => []),
+      loadSessionGuidance(sessionId).catch(() => [])
+    ])
+    set({ trajectory, guidanceRows })
+  },
+
+  clearGuidance() {
+    set({ guidanceText: '', guidanceError: '', guidanceOk: '' })
+  },
+
+  async submitGuidance() {
+    const { selectedSessionId, projectDetail, guidanceText } = get()
+    set({ guidanceError: '', guidanceOk: '' })
+    if (!selectedSessionId || !projectDetail) {
+      set({ guidanceError: '先选一个会话' })
+      return
+    }
+    if (!guidanceText.trim()) {
+      set({ guidanceError: '请输入指导' })
+      return
+    }
+    try {
+      const result = await submitSessionGuidance({
+        session_id: selectedSessionId,
+        target: projectDetail.target,
+        guidance: guidanceText.trim()
+      })
+      set({ guidanceOk: `已提交 ${result.id}`, guidanceText: '' })
+      set({ guidanceRows: await loadSessionGuidance(selectedSessionId).catch(() => []) })
+    } catch (error) {
+      set({
+        guidanceError:
+          error instanceof ApiError && error.status === 400 ? '目标非法 / 指导为空' : '提交失败'
+      })
+    }
+  },
+
+  async forkSession() {
+    const detail = get().projectDetail
+    if (!detail) return
+    const profile = await resolveIntakeProfile(detail.sessions[0]?.profile_name || '')
+    if (!profile) {
+      set({ guidanceError: '分叉失败:无可用策略档' })
+      return
+    }
+    // 分叉走的就是新建那条路:预填 + 铸预览,确认仍然由人点。
+    set({
+      intakeError: '',
+      guidanceError: '',
+      intakeForm: {
+        ...get().intakeForm,
+        target_url: detail.target,
+        instruction: `继续深挖 ${detail.target}`,
+        engagement_profile: profile
+      }
+    })
+    await get().openNewProject()
+    await get().submitIntake()
+  },
+
+  setNewProjectOpen(newProjectOpen) {
+    set({ newProjectOpen })
+  },
+
+  async openNewProject() {
+    // 重开弹窗时先把"已经在等确认"的预览捞回来:15 分钟内刷新页面不该丢掉它,
+    // 也不该让人重新填一遍表单 —— 那样会撞上 pending_intake_exists。
+    set({ intakeError: '', intakeOk: '', intakeResult: null, newProjectOpen: true })
+    if (!get().profileOptions.length) {
+      const profiles = await loadProfiles().catch(() => [])
+      set({
+        profileOptions: profiles.map((p) => ({ label: `${p.id} · ${p.label}`, value: p.id }))
+      })
+    }
+    const pending = await loadPendingIntake().catch(() => null)
+    if (pending?.preview) {
+      // 直接落在确认步:确认单本身就是"还有一个在等确认"的说明。
+      set({ intakePreview: pending.preview })
+    }
+    const { intakeForm, profileOptions } = get()
+    if (!intakeForm.engagement_profile && profileOptions.length) {
+      set({ intakeForm: { ...intakeForm, engagement_profile: profileOptions[0].value } })
+    }
+  },
+
+  patchIntakeForm(patch) {
+    set({ intakeForm: { ...get().intakeForm, ...patch } })
+  },
+
+  async submitIntake() {
+    const form = get().intakeForm
+    set({ intakeError: '', intakeOk: '' })
+    if (!form.target_url.trim()) {
+      set({ intakeError: '请填目标 URL' })
+      return
+    }
+    if (!form.instruction.trim()) {
+      set({ intakeError: '请写一句这次要看什么' })
+      return
+    }
+    if (!form.engagement_profile) {
+      set({ intakeError: '请选策略档' })
+      return
+    }
+    set({ intakeSubmitting: true })
+    try {
+      const preview = await startProjectIntake({
+        target_url: form.target_url.trim(),
+        instruction: form.instruction.trim(),
+        engagement_profile: form.engagement_profile,
+        toggles: form.toggles
+      })
+      // 停在确认步:到这里为止什么都没执行,也没落任何卡。
+      // 队列要一起刷 —— 预览刚进队列,不刷的话关掉弹窗看不到它。
+      set({
+        intakePreview: preview,
+        intakeOk: '',
+        intakes: await loadProjectIntakes().catch(() => get().intakes)
+      })
+    } catch (error) {
+      const conflict = error instanceof ApiError && error.status === 409
+      const pending = conflict
+        ? (error.body as { pending?: IntakePreview } | undefined)?.pending
+        : undefined
+      if (pending) {
+        // 已有待确认的预览:把它摆出来,由操作者决定确认还是放弃后重填。
+        set({ intakePreview: pending, intakeError: '已有一个待确认的预览,先确认或放弃它' })
+      } else {
+        set({
+          intakeError:
+            error instanceof ApiError && error.status === 400
+              ? INTAKE_HINT[(error.body as { detail?: string } | undefined)?.detail || ''] || '目标或策略档非法'
+              : '预览失败'
+        })
+      }
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  async confirmIntake() {
+    const preview = get().intakePreview
+    if (!preview) return
+    set({ intakeSubmitting: true, intakeError: '' })
+    try {
+      // 不带 session_id:由服务端为这次确认开一个新会话,运行流就落在那里,
+      // 不会混进操作者当前正在读的对话。
+      const result = await confirmProjectIntake({
+        intake_id: preview.intake_id,
+        options_digest: preview.options_digest
+      })
+      set({
+        intakeResult: result,
+        intakePreview: null,
+        intakeForm: { ...get().intakeForm, target_url: '', instruction: '' },
+        intakes: await loadProjectIntakes().catch(() => get().intakes)
+      })
+    } catch (error) {
+      set({
+        intakeError:
+          error instanceof ApiError && error.status === 410
+            ? '预览已失效,重新提交一次'
+            : `确认失败:${(error as Error).message}`
+      })
+      if (error instanceof ApiError && error.status === 410) set({ intakePreview: null })
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  async discardIntake() {
+    set({ intakeSubmitting: true, intakeError: '', intakeOk: '' })
+    try {
+      await discardProjectIntake()
+      set({
+        intakePreview: null,
+        intakes: await loadProjectIntakes().catch(() => get().intakes)
+      })
+    } catch {
+      set({ intakeError: '取消失败' })
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  async openIntakeRun() {
+    const run = get().intakeResult?.run
+    if (!run) return
+    // 切到这次运行自己的会话并跳过去 —— 运行流是 SSE,attach 之后就从 seq 0 回放。
+    await useChat.getState().attach(run.session_id)
+    useAuth.getState().setRoute('chat')
+    set({ newProjectOpen: false })
+  },
+
+  setResultsOpen(resultsOpen) {
+    set({ resultsOpen })
+  },
+
+  async openResults(projectId) {
+    set({ resultsOpen: true, results: null, resultsLoading: true })
+    try {
+      set({ results: await loadProjectResults(projectId) })
+    } catch {
+      set({ results: null })
+    } finally {
+      set({ resultsLoading: false })
+    }
+  },
+
+  openInfo(title, body, links = []) {
+    set({ modal: { open: true, title, meta: '', body, links, mono: false, loading: false } })
+  },
+
+  async openReport(taskId) {
+    set({
+      modal: {
+        open: true,
+        title: `报告 ${taskId}`,
+        meta: taskId,
+        body: '',
+        links: [],
+        mono: true,
+        loading: true
+      }
+    })
+    try {
+      const body = (await loadReport(taskId)) || '(该任务暂无报告文件)'
+      set((state) => ({ modal: { ...state.modal, body, loading: false } }))
+    } catch {
+      set((state) => ({ modal: { ...state.modal, body: '报告读取失败', loading: false } }))
+    }
+  },
+
+  openFinding(row) {
+    get().openInfo(
+      row.title || '候选发现',
+      [
+        `任务: ${row.task}`,
+        `目标: ${row.target || '—'}`,
+        `类型: ${row.rule || '—'}`,
+        `严重度: ${(row.severity || '?').toUpperCase()}`,
+        `时间: ${row.ts ? formatTimestamp(row.ts) : '—'}`,
+        '',
+        '(候选发现,需二次确认)'
+      ].join('\n'),
+      row.target ? [row.target] : []
+    )
+  },
+
+  closeModal() {
+    set({ modal: CLOSED_MODAL })
+  }
+}))

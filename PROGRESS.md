@@ -51,6 +51,18 @@ cd console; npm install; npm run build; cd ..
    黑板/DAG/候选队列在左侧「控制面板 → SRC 黑板」。
 4. **只读铁律**：agent 只发 GET/HEAD；任何写操作会停下来要人工确认。
 
+### 另一个入口：新建项目（先确认，再开跑）
+
+「项目」页 → **新建**：填目标 + 一句「这次要看什么」+ 策略档 + 动作开关。
+
+1. **预览确认单**：只铸一张 digest 绑定的预览，不执行、不落卡；同时进「待确认」队列（15 分钟有效）。
+2. **确认并开跑**：把 `intake_id` + `options_digest` 回显给门核对，核对上了才落 `TargetCard`
+   （`ai-pentest-evidence/projects/<target_id>/target.yaml`），然后按**卡上那一份 scope**起一轮
+   `target_run`，进度流进它自己的会话 —— 弹窗里点「去看运行」直接跳过去。
+3. 确认单绑的就是你当时看到的那张单：目标 / 主机 / 入口 / 策略档 / 说明 / 开关全在 `options_digest` 里。
+   卡在确认之后被改过，运行会拒绝启动（digest 不匹配），不会按改过的范围跑。
+4. 开关里没有爆破：门上直接 400 `brute_force_out_of_scope`，不会静默丢掉你拨的开关。
+
 命令行等价入口（不走 Console）：
 
 ```powershell
@@ -69,6 +81,7 @@ python lode.py sessions / progress / doctor
 | 技能包 | 7 个 | `.codebuddy/skills/**`，由 `core/skills.py` 每轮注入 system prompt |
 | SRC 黑板 | 可用 | facts/intents/dead_ends/hints/claims + 租约心跳，跨进程原子写 |
 | 任务层 | 可用 | 状态落盘、租约幂等、cooperative stop、重启后标记 interrupted |
+| 目标准入（intake 门） | 可用 | 预览 → 确认 → `TargetCard` 的 digest 绑定；确认后按卡起 `target_run` |
 | SRC surface | 可用，无授权即拒绝 | scope 内低频 GET + 候选提取，不提交表单、不爆破 |
 | 主动渗透（Strix） | **依赖外部 runner** | 缺 Strix / 私有 skill 时按设计阻断，不伪造成功 |
 | 飞书出站 | 已接脱敏路由 | **未做真实租户验收** |

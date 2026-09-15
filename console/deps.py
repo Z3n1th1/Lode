@@ -146,6 +146,24 @@ def _valid_profile(pid: str) -> str:
     return p if p in valid else ""
 
 
+def _brute_requested(raw: Any) -> bool:
+    """True when the browser asked for any brute-force capability.
+
+    Read from the raw payload (not from ``_sanitize_toggles``, which always
+    returns a zeroed ``brute``).  Callers that cannot honour brute force have to
+    *say so* rather than quietly drop the switch: silently discarding what the
+    operator turned on is the failure mode this whole gate exists to prevent.
+    """
+    if not isinstance(raw, dict):
+        return False
+    brute = raw.get("brute")
+    if not isinstance(brute, dict):
+        return False
+    if any(brute.get(key) for key in _INTAKE_BRUTE_FLAGS):
+        return True
+    return bool(brute.get("max_attempts") or brute.get("rate_limit_per_min"))
+
+
 def _sanitize_toggles(raw: Any) -> Dict[str, Any]:
     """Normalize intake feature flags and hard-disable brute-force controls.
 
@@ -171,17 +189,6 @@ def _sanitize_toggles(raw: Any) -> Dict[str, Any]:
         "rate_limit_per_min": 0,
     }
     return out
-
-
-def _write_intake(state_dir: Path, payload: Dict[str, Any]) -> None:
-    """原子落 intake 请求文件到 <state_dir>/project_intake/<intake_id>.json。"""
-    d = Path(state_dir) / "project_intake"
-    d.mkdir(parents=True, exist_ok=True)
-    iid = str(payload["intake_id"])
-    final = d / (iid + ".json")
-    tmp = d / ("." + iid + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    replace_with_retry(tmp, final)
 
 
 def _write_guidance(state_dir: Path, payload: Dict[str, Any]) -> None:

@@ -1,0 +1,247 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   腾讯体 —— 自己托管,不靠系统安装。
+
+   Win / macOS / Linux 三边都没有这个字体,所以只写字体栈等于让页面悄悄回落到
+   微软雅黑/苹方(实测本机就是雅黑)。字体文件在 console/public/fonts/,
+   由 build 复制到 dist/fonts/。
+
+   字重映射:腾讯体只有 W3/W7 两个字面,而 body 上是 font-synthesis-weight:none
+   —— 不允许合成假粗体。所以按区间声明:400/500 走 W3,600/700 走 W7,
+   font-medium / font-semibold 都落在真字面上。
+--------------------------------------------------------------------------- */
+@font-face {
+  font-family: "Tencent Sans";
+  src: url("/fonts/tencent-sans-w3.woff2") format("woff2");
+  font-weight: 400 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Tencent Sans";
+  src: url("/fonts/tencent-sans-w7.woff2") format("woff2");
+  font-weight: 600 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------------------------------------------------------------------------
+   令牌 —— 唯一写颜色的地方。
+   暗色是默认值,:root[data-theme="light"] 只换取值,不换名字。
+   组件里永远不要出现十六进制色值,否则浅色主题必坏。
+   data-theme 由 index.html 预置,applyTheme() 负责同步,首屏不闪。
+--------------------------------------------------------------------------- */
+@theme inline {
+  --color-bg: var(--app-bg);
+  --color-raised: var(--app-raised);
+  --color-surface: var(--app-surface);
+  --color-line: var(--app-line);
+  --color-line-strong: var(--app-line-strong);
+  --color-fg: var(--app-fg);
+  --color-fg-2: var(--app-fg-2);
+  --color-fg-3: var(--app-fg-3);
+  --color-fg-4: var(--app-fg-4);
+  --color-accent: var(--app-accent);
+  --color-accent-fg: var(--app-accent-fg);
+  --color-accent-soft: var(--app-accent-soft);
+  --color-danger: var(--app-danger);
+  --color-warn: var(--app-warn);
+  --color-ok: var(--app-ok);
+  --color-info: var(--app-info);
+  --color-hover: var(--app-hover);
+  --color-active: var(--app-active);
+
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+
+  /* 小圆角:这是控制台,不是消费级 app。大圆角 = AI 味 */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* 中性色带一点冷色偏移(色相 200 左右、饱和度极低),否则纯灰会读成"默认值"
+     而不是"选过的颜色" */
+  --app-bg: #0a0c0d;
+  --app-raised: #121517;
+  --app-surface: #171a1c;
+  --app-line: #24292b;
+  --app-line-strong: #363c3f;
+  --app-fg: #e9ebec;
+  --app-fg-2: #a6adb1;
+  --app-fg-3: #717a7e;
+  --app-fg-4: #4b5256;
+  --app-accent: #4da89f;
+  --app-accent-fg: #07100f;
+  --app-accent-soft: rgb(77 168 159 / 13%);
+  --app-danger: #e5484d;
+  --app-warn: #d29a35;
+  --app-ok: #46a758;
+  --app-info: #6e8ff0;
+  --app-hover: rgb(255 255 255 / 4.5%);
+  --app-active: rgb(255 255 255 / 9%);
+
+  /* 中文字体跟在等宽字体后面 —— 浏览器按字符回落,这样等宽上下文里的
+     中文走腾讯体而不是掉到点阵宋体 */
+  --app-font-sans: "Tencent Sans", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --app-font-mono: "JetBrainsMono NFM", "JetBrainsMono NF", "JetBrains Mono",
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono",
+    "Tencent Sans", "Microsoft YaHei", monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --app-bg: #fbfbfa;
+  --app-raised: #ffffff;
+  --app-surface: #ffffff;
+  --app-line: #e3e3e0;
+  --app-line-strong: #cbcbc7;
+  --app-fg: #16181a;
+  --app-fg-2: #55595e;
+  --app-fg-3: #83888e;
+  --app-fg-4: #a9aeb3;
+  --app-accent: #2f7f77;
+  --app-accent-fg: #ffffff;
+  --app-accent-soft: rgb(47 127 119 / 10%);
+  --app-danger: #cd2b31;
+  --app-warn: #a86a12;
+  --app-ok: #2b7a3d;
+  --app-info: #3b5bdb;
+  --app-hover: rgb(0 0 0 / 3.5%);
+  --app-active: rgb(0 0 0 / 6%);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--app-bg);
+    color: var(--app-fg);
+    font-family: var(--app-font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* 字重只认真字面:没有 500 字面的字体不要被合成为假粗体 */
+    font-synthesis-weight: none;
+    overscroll-behavior: none;
+  }
+
+  ::selection {
+    background: var(--app-accent-soft);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--app-accent);
+    outline-offset: 2px;
+  }
+
+  /* 细滚动条。默认那条在暗色里太抢眼 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--app-line-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+    background-color: var(--app-line-strong);
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--app-fg-4);
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+/* 事件行进场:短距离上浮,别做成弹跳 */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* JSON 高亮:chatTools.highlightJson 产出的 class 在这里上色,跟着主题走 */
+.tk-k {
+  color: var(--app-info);
+}
+.tk-s {
+  color: var(--app-ok);
+}
+.tk-b {
+  color: var(--app-warn);
+}
+.tk-n {
+  color: var(--app-accent);
+}
+
+/* 日志 gutter 的宽度是唯一来源:正文列的左边界由它推导,而输入框、空状态、
+   日志行都吃这一个值,所以它们永远在同一根竖线上 —— 不会再出现"改了 gutter
+   忘了改缩进"的错位。窄屏只留序号列,把宽度还给正文。 */
+:root {
+  --ledger-gutter: 3.25rem;
+}
+
+@media (min-width: 768px) {
+  :root {
+    --ledger-gutter: 7rem;
+  }
+}
+
+.ledger-indent {
+  padding-left: calc(var(--ledger-gutter) + 0.75rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

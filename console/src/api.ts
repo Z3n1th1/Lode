@@ -3,7 +3,9 @@ import type { DashboardSnapshot } from './dashboard'
 export class ApiError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    /** 解析成功的响应体;409 的冲突里带 pending 预览,界面据此切到确认步。 */
+    readonly body?: unknown
   ) {
     super(message)
   }
@@ -21,11 +23,14 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
   if (!response.ok) {
     // 热修:尽力带出后端 detail(如 invalid_profile/invalid_target),前端可直接展示失败原因
     let detail = ''
+    let body: unknown
     try {
-      const body = await response.clone().json() as { detail?: unknown }
-      if (typeof body?.detail === 'string') detail = body.detail
+      body = await response.clone().json() as { detail?: unknown }
+      if (typeof (body as { detail?: unknown })?.detail === 'string') {
+        detail = (body as { detail: string }).detail
+      }
     } catch { /* 非 JSON 响应 */ }
-    throw new ApiError(detail ? `${detail}(http ${response.status})` : `request_failed_${response.status}`, response.status)
+    throw new ApiError(detail ? `${detail}(http ${response.status})` : `request_failed_${response.status}`, response.status, body)
   }
   return response
 }
@@ -194,28 +199,58 @@ export async function loadSessionGuidance(id: string): Promise<SessionGuidanceRo
   return (await (await request(`/api/v1/session/guidance?id=${encodeURIComponent(id)}`, { cache: 'no-store' })).json()) as SessionGuidanceRow[]
 }
 
-// ---- P5-b 新建项目(受控写:只提交意图,执行仍走 agent 确认门) ----
-export interface ProjectIntakeBrute {
-  enabled?: boolean; path?: boolean; port?: boolean; password?: boolean
-  username?: boolean; sms?: boolean; subdomain?: boolean
-  max_attempts?: number; rate_limit_per_min?: number
-}
+// ---- P5-b 新建项目:预览 → 确认 → TargetCard ----
+// 走的是 core.intake_state 那套门:提交只铸一个 digest 绑定的预览(什么都不执行),
+// 确认时必须回显 intake_id + options_digest,门核对上了才落不可变的 TargetCard。
 export interface ProjectIntakeToggles {
   scan_enabled?: boolean; fingerprint_precise?: boolean; nuclei?: boolean; tscan?: boolean
   asset_inventory?: boolean; subdomain_enum?: boolean; intel?: boolean; poc_research?: boolean
   proxy_route?: boolean; network_gate?: boolean; edge_human_gate?: boolean
-  brute?: ProjectIntakeBrute
 }
-export interface ProjectIntakePayload { target_url: string; name?: string; engagement_profile: string; toggles: ProjectIntakeToggles }
-export interface ProjectIntakeRow {
-  intake_id: string; target_url: string; name: string; engagement_profile: string
-  status: string; created_at: number; toggle_on: string[]
+export interface ProjectIntakePayload {
+  target_url: string; instruction: string; engagement_profile: string; toggles: ProjectIntakeToggles
 }
-export async function submitProjectIntake(p: ProjectIntakePayload): Promise<{ ok: boolean; intake_id: string; status: string; note: string }> {
+/** 门里的 options 单开关形态(能力型带 mode,代理路由带 profile)。 */
+export interface IntakeOption { enabled?: boolean; mode?: string; profile?: string }
+export interface IntakePreview {
+  intake_id: string; target: string; canonical_host: string; entrypoint: string
+  instruction: string; instruction_digest: string
+  profile_name: string; goal_id: string
+  options: Record<string, IntakeOption>
+  options_digest: string; preview_digest: string; scope_digest: string
+  created_at: number; expires_at: number
+}
+export interface IntakePreviewResult extends IntakePreview { ok: boolean; status: string }
+export interface IntakeRun {
+  session_id: string; job_id: string
+  /** true = 这次确认的run早就在跑(重放/双击),没有第二次开跑。 */
+  reused: boolean
+}
+export interface IntakeConfirmResult {
+  ok: boolean; status: string
+  intake_id: string; target: string; canonical_host: string
+  profile_name: string; instruction: string; options_digest: string
+  target_id: string; target_card_digest: string; target_card_ref: string; note: string
+  run: IntakeRun | null
+}
+export interface PendingIntakeRow {
+  intake_id: string; target: string; profile_name: string
+  enabled_options: string[]; created_at: number; expires_at: number
+}
+export async function startProjectIntake(p: ProjectIntakePayload): Promise<IntakePreviewResult> {
   return (await (await request('/api/v1/project/intake', { method: 'POST', body: JSON.stringify(p) })).json())
 }
-export async function loadProjectIntakes(): Promise<ProjectIntakeRow[]> {
-  return (await (await request('/api/v1/project/intakes', { cache: 'no-store' })).json()) as ProjectIntakeRow[]
+export async function confirmProjectIntake(p: { intake_id: string; options_digest: string }): Promise<IntakeConfirmResult> {
+  return (await (await request('/api/v1/project/intake/confirm', { method: 'POST', body: JSON.stringify(p) })).json())
+}
+export async function discardProjectIntake(): Promise<{ ok: boolean; discarded: boolean }> {
+  return (await (await request('/api/v1/project/intake/discard', { method: 'POST' })).json())
+}
+export async function loadPendingIntake(): Promise<{ preview: IntakePreview | null; ttl_seconds: number }> {
+  return (await (await request('/api/v1/project/intake/pending', { cache: 'no-store' })).json())
+}
+export async function loadProjectIntakes(): Promise<PendingIntakeRow[]> {
+  return (await (await request('/api/v1/project/intakes', { cache: 'no-store' })).json()) as PendingIntakeRow[]
 }
 
 // ---- P5-c 成果一键浏览 ----

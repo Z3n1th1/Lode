@@ -42,10 +42,30 @@ class LoginRequest(BaseModel):
 
 
 class ProjectIntakeRequest(BaseModel):
+    """Step 1 of the intake gate: what the operator wants, before anything is bound.
+
+    ``toggles`` is the raw dialog state; the server normalizes it onto the gate's
+    options contract and refuses the switches it cannot honour.
+    """
+
     target_url: str
-    name: str = ""
+    instruction: str = ""
     engagement_profile: str = ""
     toggles: Dict[str, Any] = {}
+
+
+class ProjectIntakeConfirmRequest(BaseModel):
+    """Step 2: echo the preview binding back, unchanged.
+
+    ``session_id`` picks the conversation the run should stream into; empty means
+    the server mints one and returns it.  ``run`` can be turned off for a caller
+    that only wants the card.
+    """
+
+    intake_id: str
+    options_digest: str
+    session_id: str = ""
+    run: bool = True
 
 
 class SessionGuidanceRequest(BaseModel):

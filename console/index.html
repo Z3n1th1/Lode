@@ -1,14 +1,24 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- 默认暗色;applyTheme() 会在切换主题时同步更新这个值 -->
-    <meta name="theme-color" content="#0d1117" />
+    <meta name="theme-color" content="#0a0c0d" />
+    <!-- 腾讯体是自托管的 CJK 字体(约 3.9MB),比整个应用包还大。预载 W3
+         (正文用的那个字面,见 globals.css 的字重区间)让换字发生在首屏而不是
+         读完 CSS 之后;W7 只有标题/强调用到,交给 font-display:swap 正常加载。 -->
+    <link
+      rel="preload"
+      href="/fonts/tencent-sans-w3.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <title>Lode 控制台</title>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

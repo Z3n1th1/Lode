@@ -97,3 +97,85 @@ export function pendingApprovals(events: ChatEvent[]): ChatEvent[] {
 export function lastSeq(events: ChatEvent[]): number {
   return events.reduce((max, event) => Math.max(max, Number(event?.seq) || 0), 0)
 }
+
+// ---- 连续同工具调用折成一行 ----
+//
+// 1qps 的只读侦察里,"调用 fetch_url / 结果 200"会成对地刷上几百行,每行还各带一个
+// 折叠三角。账本按事件逐行渲染时这笔噪声会淹掉真正的发现与结论。这里把**连续**的同一
+// 工具调用(连同它们各自的结果)折成一个 run,由渲染层画成一行。
+
+/** 这些类型不单独成行(信息已折进子任务节点或所属行),所以不打断一个 run。 */
+const INVISIBLE_KINDS = new Set([
+  'assistant_delta',
+  'approval_resolved',
+  'subtask_progress',
+  'subtask_finished'
+])
+
+/** 少于这个次数的调用不值得折叠:折一行反而多一层点击。 */
+const RUN_MIN_CALLS = 2
+
+export interface ToolRunPair {
+  call: ChatEvent
+  result?: ChatEvent
+}
+
+export type LedgerItem =
+  | { type: 'event'; event: ChatEvent }
+  | { type: 'run'; tool: string; seq: number; ts: number; pairs: ToolRunPair[] }
+
+function nextSignificant(events: ChatEvent[], from: number): number {
+  let index = from
+  while (index < events.length && INVISIBLE_KINDS.has(String(events[index]?.kind))) index++
+  return index
+}
+
+/**
+ * 把事件序列折成渲染项:连续同工具的调用合成一个 run,其余原样。
+ * `subtask_started` 不允许被跳过 —— 它可能自己就占一行(见 Ledger 的 SUBTASK_KINDS),
+ * 所以它天然打断一个 run。
+ */
+export function groupToolRuns(events: ChatEvent[]): LedgerItem[] {
+  const items: LedgerItem[] = []
+  let index = 0
+
+  while (index < events.length) {
+    const head = events[index]
+    if (head?.kind !== 'tool_call') {
+      items.push({ type: 'event', event: head })
+      index++
+      continue
+    }
+
+    const tool = textOf(head.tool)
+    const pairs: ToolRunPair[] = []
+    let cursor = index
+
+    if (tool) {
+      while (cursor < events.length) {
+        const at = nextSignificant(events, cursor)
+        const call = events[at]
+        // 换了工具、或者被别的行打断了,run 就到此为止
+        if (!call || call.kind !== 'tool_call' || textOf(call.tool) !== tool) break
+        const after = nextSignificant(events, at + 1)
+        const result = events[after]?.kind === 'tool_result' ? events[after] : undefined
+        pairs.push({ call, result })
+        cursor = result ? after + 1 : at + 1
+      }
+    }
+
+    if (pairs.length >= RUN_MIN_CALLS) {
+      items.push({ type: 'run', tool, seq: pairs[0].call.seq,
+                   ts: Number(pairs[0].call.ts) || 0, pairs })
+      index = cursor
+      continue
+    }
+
+    // 单次调用:调用行 + 结果行各自成行,和以前一样
+    items.push({ type: 'event', event: head })
+    if (pairs[0]?.result) items.push({ type: 'event', event: pairs[0].result })
+    index = cursor > index ? cursor : index + 1
+  }
+
+  return items
+}

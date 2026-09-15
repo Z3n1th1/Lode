@@ -9,9 +9,21 @@ from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from console.deps import MIN_PASSWORD_LENGTH, MIN_SESSION_SECRET_LENGTH
-from console.projections import ConsoleStaticFiles, ReadOnlyControlPlane
+from console.projections import ConsoleStaticFiles, ReadOnlyControlPlane, static_media_type
 from console.routers import chat, dashboard, jobs, llm, meta, projects
 from console.routers.base import Ctx
+
+
+def _static_file(root: Path, path: str) -> Path | None:
+    """把 URL 路径映射到 static_dir 里的真实文件;越界或不存在返回 None。"""
+    try:
+        resolved = (root / path).resolve()
+        base = root.resolve()
+    except OSError:
+        return None
+    if not resolved.is_relative_to(base) or not resolved.is_file():
+        return None
+    return resolved
 
 def create_app(
     *,
@@ -81,6 +93,13 @@ def create_app(
         def spa_fallback(path: str) -> FileResponse:
             if path.startswith("api/"):
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+            # dist 根下真实存在的文件(public/ 里的字体、图标……)必须原样送出去。
+            # 只挂 /assets、其余全落 SPA 兜底的话,字体请求会拿到 200 + text/html,
+            # 浏览器拿 HTML 当字体解析直接失败,@font-face 变 status=error,
+            # 页面就悄悄回落到系统字体 —— 源码和网络面板里都看不出来。
+            asset = _static_file(resolved_static_dir, path)
+            if asset is not None:
+                return FileResponse(asset, media_type=static_media_type(asset))
             return FileResponse(resolved_static_dir / "index.html")
 
     return app

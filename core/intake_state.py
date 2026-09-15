@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
-from file_lock import AdvisoryFileLock
+try:  # package import (python -m console.server)
+    from core.file_lock import AdvisoryFileLock
+except ImportError:  # pragma: no cover - stripped checkout with core/ on sys.path
+    from file_lock import AdvisoryFileLock  # type: ignore
 
 try:
     import yaml
@@ -148,14 +151,30 @@ class IntakePreview:
         }
 
 
-def _default_options() -> Dict[str, Any]:
+def default_options() -> Dict[str, Any]:
+    """The canonical all-off options object.
+
+    Public because every caller that collects switches has to start from this
+    shape and flip ``enabled`` — deriving the modes independently is how a
+    caller ends up confirming something the gate does not recognise.  A switch
+    that a caller offers but this object has no key for is a switch that would be
+    silently dropped, so the two lists must stay in step.
+    """
     return {
+        # 能力型开关:mode 写的是"开着的时候最多做到哪一层",不随开关变化。
         "asset_inventory": {"enabled": False, "mode": "not_requested"},
         "fingerprint": {"enabled": False, "mode": "not_requested"},
         "arl_next": {"enabled": False, "mode": "not_available"},
         "intelligence": {"enabled": False, "mode": "metadata_only"},
         "poc_research": {"enabled": False, "mode": "metadata_only"},
         "proxy_route": {"enabled": False, "profile": ""},
+        # 纯开关:mode 只记"有没有人要过"。
+        "active_scan": {"enabled": False, "mode": "not_requested"},
+        "subdomain_enum": {"enabled": False, "mode": "not_requested"},
+        "nuclei": {"enabled": False, "mode": "not_requested"},
+        "tscan": {"enabled": False, "mode": "not_requested"},
+        "network_gate": {"enabled": False, "mode": "not_requested"},
+        "edge_human_gate": {"enabled": False, "mode": "not_requested"},
     }
 
 
@@ -277,7 +296,15 @@ class IntakeState:
         user_id: str,
         chat_id: str,
         message_id: str,
+        options: Optional[Dict[str, Any]] = None,
     ) -> IntakePreview:
+        """Build the one pending preview for this (user, chat).
+
+        ``options`` defaults to ``default_options()`` (everything off) — the callers
+        that have no toggle UI keep that.  A caller that *does* collect toggles passes
+        them here so they land in ``options_digest`` and the confirmation covers
+        exactly what the operator was shown, instead of being silently dropped.
+        """
         display_target, host, entrypoint = _normalized_target(target)
         profile_name = profile_name.strip()
         goal_id = goal_id.strip()
@@ -285,7 +312,7 @@ class IntakeState:
             raise IntakeStateError("intake_profile_and_goal_required")
         now = float(self._now())
         scope_digest = canonical_digest(self._scope(host))
-        options = _default_options()
+        options = dict(options) if isinstance(options, dict) and options else default_options()
         options_digest = canonical_digest(options)
         instruction_digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
         base = {
@@ -331,6 +358,7 @@ class IntakeState:
                     and existing.instruction_digest == preview.instruction_digest
                     and existing.profile_name == preview.profile_name
                     and existing.goal_id == preview.goal_id
+                    and existing.options_digest == preview.options_digest
                 ):
                     return existing
                 raise IntakeStateError("pending_intake_exists")
@@ -351,6 +379,22 @@ class IntakeState:
                 self._pending.pop((user_id, chat_id), None)
                 return None
             return preview
+
+    def discard_pending(self, *, user_id: str, chat_id: str) -> bool:
+        """Drop this (user, chat)'s pending preview without confirming it.
+
+        Answers "one pending preview per chat" without making a typo permanent: a
+        caller that has one pending and needs to submit a different target expires
+        it first.  Recorded as the same ``preview_expired`` event the TTL path
+        writes, so every reader sees one way for a preview to go away.
+        """
+        with self._lock():
+            self._reload()
+            if self._pending.pop((user_id, chat_id), None) is None:
+                return False
+            self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id,
+                          "ts": float(self._now())})
+            return True
 
     def confirmation_result(self, *, user_id: str, chat_id: str, message_id: str) -> Optional[Dict[str, Any]]:
         with self._lock():
@@ -583,7 +627,8 @@ class TargetCardStore:
         return dict(target_card)
 
     @staticmethod
-    def _read_existing(path: Path, *, expected_digest: str, target_id: str, relative_ref: str) -> Dict[str, Any]:
+    def _read_card(path: Path) -> Dict[str, Any]:
+        """Parse and schema-check one stored card; no opinion about digests."""
         if not path.is_file() or path.is_symlink():
             raise IntakeStateError("canonical_target_card_unavailable")
         try:
@@ -601,14 +646,37 @@ class TargetCardStore:
             except yaml.YAMLError as exc:
                 raise IntakeStateError("canonical_target_card_unavailable") from exc
         try:
-            existing_card = TargetCardStore._validate_target_card(existing)
+            return TargetCardStore._validate_target_card(existing)
         except IntakeStateError as exc:
             raise IntakeStateError("canonical_target_card_mismatch") from exc
+
+    @staticmethod
+    def _read_existing(path: Path, *, expected_digest: str, target_id: str, relative_ref: str) -> Dict[str, Any]:
+        existing_card = TargetCardStore._read_card(path)
         if canonical_digest(existing_card) != expected_digest:
             raise IntakeStateError("canonical_target_card_mismatch")
         return {
             "target_card": existing_card,
             "target_card_digest": expected_digest,
+            "target_id": target_id,
+            "target_card_ref": relative_ref,
+        }
+
+    def load(self, target_id: str, *, expected_digest: str = "") -> Dict[str, Any]:
+        """Resolve the stored card for ``target_id`` — how a run finds its scope.
+
+        ``expected_digest`` is the digest the caller confirmed.  A card that no
+        longer matches it is a **mismatch, not a newer version**: whoever re-reads
+        a card here is about to act on it, so drift has to fail.
+        """
+        relative_ref = _target_card_ref(target_id)
+        card = self._read_card(self.project_root / relative_ref)
+        digest = canonical_digest(card)
+        if expected_digest and digest != expected_digest:
+            raise IntakeStateError("canonical_target_card_mismatch")
+        return {
+            "target_card": card,
+            "target_card_digest": digest,
             "target_id": target_id,
             "target_card_ref": relative_ref,
         }

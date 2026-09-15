@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Optional
 
 from core.file_lock import replace_with_retry
 from core.event_log import EventLog
+from core.intake_state import IntakeStateError
 from core.job_registry import ACTIVE, JobRecord, JobRegistry
 from core.job_runner import JobContext, JobRunner
 
@@ -39,42 +40,28 @@ def get_log(state_dir: Path | str, session_id: str) -> EventLog:
 
 
 # -- job handlers ------------------------------------------------------------
-def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
-    """Full SRC pipeline: surface discovery + autopilot, then the LLM agent loop."""
+def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, target_url: str) -> Dict[str, Any]:
+    """The work itself: one autopilot round, then the LLM agent loop.
+
+    Split out of the handlers because *which* engagements are allowed is decided
+    by the caller (a URL typed into the conversation vs a confirmed TargetCard),
+    while what happens afterwards is the same.
+    """
     from agents.src_agent import run_src_agent
     from agents.src_autopilot import SrcAutopilot
-    from agents.surface_discovery import SurfaceScope
-    from urllib.parse import urlparse
 
     state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
-    run_id = str(ctx.job.payload.get("run_id") or job.job_id)
-    target_url = job.target
     out_dir = state_dir / "src-agent-runs" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     bb_path = out_dir / "src-blackboard.json"
-
-    parsed = urlparse(target_url)
-    host = (parsed.hostname or "").lower()
-    domains = [str(d).strip() for d in (job.payload.get("allowed_domains") or []) if str(d).strip()]
-    hosts = [str(h).strip().lower() for h in (job.payload.get("allowed_hosts") or []) if str(h).strip()]
-    if host and host not in domains and host not in hosts:
-        parts = host.split(".")
-        domains.append(".".join(parts[-2:]) if len(parts) >= 2 else host)
-
     reasoner = (job.payload.get("reasoner_prefer") or "").strip() or os.environ.get("SRC_REASONER_PREFER", "").strip()
     explorer = (job.payload.get("explorer_prefer") or "").strip() or os.environ.get("SRC_EXPLORER_PREFER", "").strip()
-    authorization = str(job.payload.get("authorization") or "")
 
-    scope = SurfaceScope(
-        program=f"console-{run_id}",
-        authorization=authorization or f"Console operator authorized scan of {target_url}",
-        allowed_domains=tuple(domains), allowed_hosts=tuple(hosts), delay_seconds=0.5,
-    )
     try:
         scope_doc = {
             "schema": "SrcRunScope/v1", "run_id": run_id, "program": scope.program,
-            "authorization": scope.authorization, "allowed_domains": domains,
-            "allowed_hosts": hosts, "reasoner_prefer": reasoner,
+            "authorization": scope.authorization, "allowed_domains": list(scope.allowed_domains),
+            "allowed_hosts": list(scope.allowed_hosts), "reasoner_prefer": reasoner,
             "explorer_prefer": explorer, "created_at": time.time(),
         }
         staged = out_dir / ".scope.json.tmp"
@@ -103,6 +90,133 @@ def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
         findings = int(summary.get("findings") or summary.get("total_findings") or 0)
     ctx.emit("subtask_progress", phase="done", findings=findings)
     return {"summary_ref": str(bb_path), "progress": {"phase": "done", "findings": findings}}
+
+
+def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """Full SRC pipeline for a target typed into the conversation.
+
+    The scope is widened to the target's registrable domain: here the operator
+    typed a URL and the engagement profile decides how far to go.  A confirmed
+    TargetCard must **not** take this path — see
+    :func:`_scope_from_confirmed_card`.
+    """
+    from agents.surface_discovery import SurfaceScope
+    from urllib.parse import urlparse
+
+    run_id = str(ctx.job.payload.get("run_id") or job.job_id)
+    target_url = job.target
+
+    parsed = urlparse(target_url)
+    host = (parsed.hostname or "").lower()
+    domains = [str(d).strip() for d in (job.payload.get("allowed_domains") or []) if str(d).strip()]
+    hosts = [str(h).strip().lower() for h in (job.payload.get("allowed_hosts") or []) if str(h).strip()]
+    if host and host not in domains and host not in hosts:
+        parts = host.split(".")
+        domains.append(".".join(parts[-2:]) if len(parts) >= 2 else host)
+
+    authorization = str(job.payload.get("authorization") or "")
+    scope = SurfaceScope(
+        program=f"console-{run_id}",
+        authorization=authorization or f"Console operator authorized scan of {target_url}",
+        allowed_domains=tuple(domains), allowed_hosts=tuple(hosts), delay_seconds=0.5,
+    )
+    return _run_scope(job, ctx, scope, run_id=run_id, target_url=target_url)
+
+
+TARGET_RUN_KIND = "target_run"
+
+
+def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: str) -> Any:
+    """Build the run scope from a confirmed TargetCard — strictly.
+
+    ``allowed_domains`` stays empty on purpose: a domain entry matches
+    descendants, so widening a one-host card to its registrable domain would let
+    the run reach hosts the operator never confirmed.  Non-wildcard
+    ``allowed_hosts`` entries match exactly, which is what a card carries.
+    """
+    from agents.surface_discovery import SurfaceScope
+
+    data = card.get("scope") if isinstance(card.get("scope"), dict) else {}
+    hosts = tuple(str(item).strip() for item in (data.get("allowed_hosts") or []) if str(item).strip())
+    forbidden = tuple(str(item).strip() for item in (data.get("forbidden_hosts") or []) if str(item).strip())
+    return SurfaceScope(
+        program=f"console-{run_id}",
+        authorization=f"confirmed_target_card:{target_id}",
+        allowed_domains=(),
+        allowed_hosts=hosts,
+        forbidden=forbidden,
+    )
+
+
+def _handler_target_run(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """Run one confirmed TargetCard.
+
+    The card defines the scope, and its digest is re-checked here: the operator
+    confirmed a specific object, so a card edited between confirmation and run
+    has to fail rather than quietly authorise something else.
+    """
+    from console import intake as _intake
+
+    target_id = str(job.payload.get("target_id") or "")
+    run_id = str(job.payload.get("run_id") or job.job_id)
+    stored = _intake.target_cards(None).load(
+        target_id, expected_digest=str(job.payload.get("target_card_digest") or ""))
+    if stored["target_card_ref"] != str(job.payload.get("target_card_ref") or ""):
+        raise IntakeStateError("target_card_ref_mismatch")
+    scope = _scope_from_confirmed_card(stored["target_card"], target_id=target_id, run_id=run_id)
+    # Belt and braces: the card has to cover the URL we are about to fetch.
+    allowed, reason = scope.check_url(job.target)
+    if not allowed:
+        raise IntakeStateError(f"target_not_in_confirmed_scope:{reason}")
+    return _run_scope(job, ctx, scope, run_id=run_id, target_url=job.target)
+
+
+def start_target_run(
+    state_dir: Path | str,
+    *,
+    confirmed: Dict[str, Any],
+    session_id: str = "",
+) -> Dict[str, Any]:
+    """Start the run a consumed confirmation authorises.  Idempotent per intake.
+
+    Only ever called with a receipt in hand, so the card this job re-reads and
+    digest-checks is already the confirmed one.  A repeated call — double click, a
+    replayed POST — returns the job that is already running instead of starting a
+    second run of the same confirmation.
+    """
+    registry = get_registry(state_dir)
+    intake_id = str(confirmed.get("intake_id") or "")
+    existing = next(
+        (record for record in registry.list(limit=0)
+         if record.kind == TARGET_RUN_KIND
+         and str(record.payload.get("intake_id") or "") == intake_id),
+        None,
+    )
+    if existing is not None:
+        return {"session_id": existing.session_id, "job_id": existing.job_id, "reused": True}
+
+    session_id = session_id or f"src-{secrets.token_hex(6)}"
+    instruction = str(confirmed.get("instruction") or "")
+    job = registry.create(
+        session_id=session_id, turn_id=f"T-{secrets.token_hex(4)}", kind=TARGET_RUN_KIND,
+        target=str(confirmed.get("target") or ""),
+        payload={
+            "_state_dir": str(state_dir),
+            "run_id": f"SL-{int(time.time())}-{secrets.token_hex(3)}",
+            "via": "console_intake",
+            "intake_id": intake_id,
+            "options_digest": str(confirmed.get("options_digest") or ""),
+            "target_id": str(confirmed.get("target_id") or ""),
+            "target_card_ref": str(confirmed.get("target_card_ref") or ""),
+            "target_card_digest": str(confirmed.get("target_card_digest") or ""),
+            "instruction": instruction,
+            # The conversation card shows the operator's own words, so the run is
+            # identifiable without opening the job record.
+            "title": instruction[:120],
+        },
+    )
+    get_runner(state_dir).submit(job)
+    return {"session_id": session_id, "job_id": job.job_id, "reused": False}
 
 
 def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
@@ -171,7 +285,7 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 
 
 HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan,
-            "chat_turn": _handler_chat_turn}
+            "chat_turn": _handler_chat_turn, TARGET_RUN_KIND: _handler_target_run}
 
 
 # -- notify (best effort) ----------------------------------------------------
@@ -264,6 +378,7 @@ def shutdown_all(*, wait: bool = False) -> None:
 
 
 __all__ = [
-    "HANDLERS", "active_jobs", "events_path", "get_log", "get_registry",
-    "get_runner", "recover", "session_dir", "shutdown_all", "ACTIVE",
+    "HANDLERS", "TARGET_RUN_KIND", "active_jobs", "events_path", "get_log",
+    "get_registry", "get_runner", "recover", "session_dir", "shutdown_all",
+    "start_target_run", "ACTIVE",
 ]

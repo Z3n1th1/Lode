@@ -66,6 +66,18 @@ export function toolCallSummary(toolName: string | undefined, rawArgs?: string):
   return t ? `${name}  ${oneLine(t)}` : name
 }
 
+// tool_call 主参数原文(不带工具名与计数):连续调用折成一行时用它显示区间
+export function toolCallPrimaryArg(rawArgs?: string, max = 88): string {
+  const obj = tryParseObj(rawArgs)
+  if (obj) {
+    const keys = Object.keys(obj)
+    if (!keys.length) return ''
+    const k = PRIMARY_ARG_KEYS.find(x => x in obj) ?? keys[0]
+    return oneLine(valStr(obj[k]), max)
+  }
+  return oneLine((rawArgs || '').trim(), max)
+}
+
 // tool_call 展开判定:参数必须比摘要一行信息量更多(否则前端不渲染折叠按钮)
 export function toolCallHasMore(rawArgs: string | undefined): boolean {
   const obj = tryParseObj(rawArgs)

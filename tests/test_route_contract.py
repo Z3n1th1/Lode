@@ -26,7 +26,9 @@ SESSION_SECRET = "session-secret-for-test-0123456789"
 # /socks, /egress, /evolve, /proxy/subscriptions), the /dsh + /arl proxies and
 # the intel routes. P5 removed the whole /src-agent/* surface (run + session
 # management + chat, plus the H1 LLM intake) now that the unified conversation
-# drives the same durable jobs. Deliberately 37 entries.
+# drives the same durable jobs. P5-b turned /project/intake into the real gate,
+# which needs three more routes (confirm / discard / pending). Deliberately 40
+# entries.
 ROUTE_CONTRACT = frozenset({
     ("*", "/assets"),
     ("GET", "/"),
@@ -57,6 +59,9 @@ ROUTE_CONTRACT = frozenset({
     ("POST", "/api/v1/session/guidance"),
     ("GET", "/api/v1/session/guidance"),
     ("POST", "/api/v1/project/intake"),
+    ("POST", "/api/v1/project/intake/confirm"),
+    ("POST", "/api/v1/project/intake/discard"),
+    ("GET", "/api/v1/project/intake/pending"),
     ("GET", "/api/v1/project/intakes"),
     ("GET", "/api/v1/project/results"),
     # durable jobs + unified conversation stream (P3)
