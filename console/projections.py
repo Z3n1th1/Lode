@@ -635,7 +635,7 @@ class ReadOnlyControlPlane:
         return out[:limit]
 
     def profiles_detail(self) -> List[Dict[str, Any]]:
-        """7 档 EngagementProfile 明细(镜像 canonical operation_profile 注册表),给 Profiles 页。"""
+        """6 档 EngagementProfile 明细(镜像 canonical operation_profile 注册表),给 Profiles 页。"""
         out: List[Dict[str, Any]] = []
         for pid, p in list_profiles().items():
             out.append({
@@ -910,15 +910,19 @@ class ReadOnlyControlPlane:
             pass
         return traj[:800]
 
-    def pending_intakes(self) -> List[Dict[str, Any]]:
+    def pending_intakes(self) -> Dict[str, Any]:
         """待确认的建目标预览(提交队列)。读的是门自己的 target_intakes.jsonl。
 
         这里以前扫 state_dir/project_intake/*.json —— 那是 console 旧路径写下的
         请求文件,没有任何消费者。现在没有第二份列表:预览一旦被确认/放弃/过期,
         它在这条队列里就消失了。
+
+        把读取状态一起返回:空队列有两种意思 —— "确实没有待确认的预览"和"那个
+        台账文件(或它的锁)不在",以前两者在界面上长得一模一样。调用方需要能说
+        清是哪一种。
         """
-        events, _status = self._read_events("target_intakes.jsonl")
-        return self._project_pending_intakes(events)
+        events, status = self._read_events("target_intakes.jsonl")
+        return {"intakes": self._project_pending_intakes(events), "status": status}
 
     def session_guidance_list(self, session_id: str = "") -> List[Dict[str, Any]]:
         """P5-e:列已提交的续跑指导(可按 session 过滤;只读投影,status=pending_review 非授权)。"""

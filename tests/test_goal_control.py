@@ -20,7 +20,6 @@ class ProfileContractTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "ctf-fast-score",
                 "redteam",
                 "offense-high-value",
                 "standard-pentest",
@@ -55,16 +54,16 @@ class ProfileContractTests(unittest.TestCase):
     def test_explicit_profile_starts_without_another_prompt(self) -> None:
         from operation_profile import resolve_request
 
-        decision = resolve_request("/goal ctf https://example.test/challenge")
+        decision = resolve_request("/goal redteam https://example.test/challenge")
 
-        self.assertEqual("ctf-fast-score", decision.profile_name)
+        self.assertEqual("redteam", decision.profile_name)
         self.assertFalse(decision.requires_profile_choice)
         self.assertFalse(decision.goal_exempt)
 
     def test_conflicting_explicit_profiles_require_a_choice(self) -> None:
         from operation_profile import resolve_request
 
-        decision = resolve_request("/goal ctf src https://example.test/challenge")
+        decision = resolve_request("/goal redteam src https://example.test/challenge")
 
         self.assertIsNone(decision.profile_name)
         self.assertTrue(decision.requires_profile_choice)
@@ -99,7 +98,7 @@ class ProfileContractTests(unittest.TestCase):
 
         self.assertEqual(
             "192.0.2.10",
-            extract_target("/goal ctf 192.0.2.10 再测试 https://example.test/path"),
+            extract_target("/goal redteam 192.0.2.10 再测试 https://example.test/path"),
         )
 
 
@@ -278,7 +277,7 @@ class GoalControlTests(unittest.TestCase):
             )
 
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"确认 {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             started = control.consume_intake_confirmation(
@@ -326,7 +325,7 @@ class GoalControlTests(unittest.TestCase):
                 project_root=root,
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"confirm {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             first = control.consume_intake_confirmation(
@@ -375,7 +374,7 @@ class GoalControlTests(unittest.TestCase):
                 project_root=root,
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             from intake_state import target_card_from_preview
 
@@ -420,7 +419,7 @@ class GoalControlTests(unittest.TestCase):
                 project_root=root,
             )
             first_preview = control.accept_goal_request(
-                "/goal ctf https://example.test/first", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test/first", user_id="u1", chat_id="c1", message_id="m1"
             )
             first = control.consume_intake_confirmation(
                 f"confirm {first_preview['preview']['intake_id']} {first_preview['preview']['options_digest']}",
@@ -432,7 +431,7 @@ class GoalControlTests(unittest.TestCase):
             original_card = target_card_path.read_bytes()
             now[0] += 1
             second_preview = control.accept_goal_request(
-                "/goal ctf https://example.test/second", user_id="u1", chat_id="c1", message_id="m3"
+                "/goal redteam https://example.test/second", user_id="u1", chat_id="c1", message_id="m3"
             )
 
             second = control.consume_intake_confirmation(
@@ -470,7 +469,7 @@ class GoalControlTests(unittest.TestCase):
                 project_root=root,
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             expected_id = "example-test-" + __import__("hashlib").sha256(
                 b"example.test"
@@ -525,7 +524,7 @@ class GoalControlTests(unittest.TestCase):
                 intake_ttl_seconds=10,
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             now[0] += 11
 
@@ -563,7 +562,7 @@ class GoalControlTests(unittest.TestCase):
                 intake_ttl_seconds=10,
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"confirm {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             first = control.consume_intake_confirmation(
@@ -593,7 +592,7 @@ class GoalControlTests(unittest.TestCase):
                 intake_path=root / "target_intakes.jsonl",
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
 
             mismatch = control.consume_intake_confirmation(
@@ -633,7 +632,7 @@ class GoalControlTests(unittest.TestCase):
                 intake_path=root / "target_intakes.jsonl",
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test 订单接口", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test 订单接口", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"确认 {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             first = control.consume_intake_confirmation(
@@ -670,7 +669,7 @@ class GoalControlTests(unittest.TestCase):
                 intake_path=root / "target_intakes.jsonl",
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"confirm {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             first = control.consume_intake_confirmation(
@@ -864,10 +863,10 @@ class GoalControlTests(unittest.TestCase):
                 pending_path=Path(tmp) / "pending_profiles.jsonl",
             )
             first = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             duplicate = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
 
             self.assertEqual("intake_preview", first["state"])
@@ -986,7 +985,7 @@ class GoalControlTests(unittest.TestCase):
                 pending_path=Path(tmp) / "pending_profiles.jsonl",
             )
             preview = control.accept_goal_request(
-                "/goal ctf https://example.test", user_id="u1", chat_id="c1", message_id="m1"
+                "/goal redteam https://example.test", user_id="u1", chat_id="c1", message_id="m1"
             )
             confirmation = f"confirm {preview['preview']['intake_id']} {preview['preview']['options_digest']}"
             first = threading.Thread(

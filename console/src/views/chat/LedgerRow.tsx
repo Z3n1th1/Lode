@@ -31,9 +31,7 @@ const SEVERITY_RULE: Record<string, string> = {
  * 就顺手改这里,否则同一件事会在两处叫两个名字。
  */
 const SUBTASK_LABEL: Record<string, string> = {
-  src_loop: '黑盒漏洞挖掘',
-  ctf_solve: 'CTF',
-  code_audit: '代码审计',
+  src_loop: '挖洞',
   surface_scan: '攻击面侦察',
   target_run: '确认单运行',
   chat_turn: '对话'

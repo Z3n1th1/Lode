@@ -10,16 +10,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "core"))
 
+from agents import tool_registry  # noqa: E402
 from core import intent_router, modes, skills  # noqa: E402
 
 
 class ModesTests(unittest.TestCase):
     def test_loads_the_shipped_modes(self) -> None:
         table = modes.modes()
-        for name in ("chat", "ctf", "src_blackbox", "code_audit"):
-            self.assertIn(name, table)
-        self.assertEqual("CTF", table["ctf"].title)
-        self.assertTrue(table["ctf"].may_escalate)
+        self.assertEqual(["chat", "pentest"], list(table))
+        self.assertEqual("挖洞", table["pentest"].title)
+        self.assertEqual("pentest", table["pentest"].skill)
+        self.assertTrue(table["pentest"].may_escalate)
         self.assertFalse(table["chat"].may_escalate)
 
     def test_unknown_mode_falls_back_to_default(self) -> None:
@@ -38,15 +39,51 @@ class ModesTests(unittest.TestCase):
         self.assertIn("chat", table)
 
 
+class ModeToolDeclarationTests(unittest.TestCase):
+    """A mode's declared tools are a promise; these are the only two ways it breaks."""
+
+    def test_the_hunting_mode_declares_only_implemented_tools(self) -> None:
+        declared = modes.get_mode("pentest").tools
+        schemas, dispatch, missing = tool_registry.resolve(declared)
+        self.assertEqual([], missing)
+        self.assertEqual(len(declared), len(schemas))
+        self.assertIn("scan_target", dispatch)
+
+    def test_yaml_and_fallback_agree_on_tools(self) -> None:
+        """config/modes.yaml wins, so editing a tool list in only one place is a bug."""
+        from_yaml = {name: list(mode.tools) for name, mode in modes.load_modes().items()}
+        fallback = {name: [str(tool) for tool in body["tools"]]
+                    for name, body in modes._FALLBACK.items()}
+        self.assertEqual(fallback, from_yaml)
+
+
 class IntentRouterTests(unittest.TestCase):
     def test_mode_command_replies_and_switches(self) -> None:
-        decision = intent_router.route("进入 CTF 模式", mode=modes.get_mode("chat"))
+        decision = intent_router.route("进入挖洞模式", mode=modes.get_mode("chat"))
         self.assertEqual(intent_router.REPLY, decision.action)
-        self.assertEqual("ctf", decision.mode)
+        self.assertEqual("pentest", decision.mode)
         self.assertEqual("mode_command", decision.reason)
 
-    def test_url_plus_action_escalates_in_blackbox_mode(self) -> None:
-        decision = intent_router.route("扫描一下 https://target.example.com", mode=modes.get_mode("src_blackbox"))
+    def test_other_spellings_of_the_hunting_mode_resolve(self) -> None:
+        for command in ("切换到渗透模式", "用 SRC 模式", "开启黑盒模式"):
+            with self.subTest(command=command):
+                decision = intent_router.route(command, mode=modes.get_mode("chat"))
+                self.assertEqual("pentest", decision.mode)
+
+    def test_a_removed_mode_command_is_inert(self) -> None:
+        """CTF / code-audit left the product: their commands must not land somewhere.
+
+        They fall through to a plain reply, and an unknown mode name resolves to
+        the default mode rather than raising.
+        """
+        decision = intent_router.route("进入 CTF 模式", mode=modes.get_mode("pentest"))
+        self.assertEqual(intent_router.REPLY, decision.action)
+        self.assertEqual("default_reply", decision.reason)
+        self.assertEqual(modes.DEFAULT_MODE, modes.get_mode("ctf").name)
+        self.assertEqual(modes.DEFAULT_MODE, modes.get_mode("code_audit").name)
+
+    def test_url_plus_action_escalates_in_the_hunting_mode(self) -> None:
+        decision = intent_router.route("扫描一下 https://target.example.com", mode=modes.get_mode("pentest"))
         self.assertTrue(decision.escalates)
         self.assertEqual("src_loop", decision.subtask_kind)
         self.assertEqual("https://target.example.com", decision.target)
@@ -57,34 +94,35 @@ class IntentRouterTests(unittest.TestCase):
         self.assertEqual("autonomy_none", decision.reason)
 
     def test_plain_question_replies(self) -> None:
-        decision = intent_router.route("什么是 SSRF？", mode=modes.get_mode("src_blackbox"))
+        decision = intent_router.route("什么是 SSRF？", mode=modes.get_mode("pentest"))
         self.assertEqual(intent_router.REPLY, decision.action)
 
     def test_url_without_verb_replies(self) -> None:
-        decision = intent_router.route("https://example.com 这个站好看吗", mode=modes.get_mode("src_blackbox"))
+        decision = intent_router.route("https://example.com 这个站好看吗", mode=modes.get_mode("pentest"))
         self.assertEqual(intent_router.REPLY, decision.action)
 
-    def test_ctf_mode_routes_to_ctf_subtask(self) -> None:
-        decision = intent_router.route("扫描一下 http://ctf.local/challenge", mode=modes.get_mode("ctf"))
+    def test_the_hunting_mode_always_routes_to_the_blackbox_loop(self) -> None:
+        decision = intent_router.route("扫描一下 http://target.local/app",
+                                       mode=modes.get_mode("pentest"))
         self.assertTrue(decision.escalates)
-        self.assertEqual("ctf_solve", decision.subtask_kind)
+        self.assertEqual("src_loop", decision.subtask_kind)
 
     def test_ambiguous_uses_llm_then_fails_safe(self) -> None:
         # verb without URL -> optional LLM; a None/empty answer must not escalate
-        decision = intent_router.route("帮我找找漏洞", mode=modes.get_mode("src_blackbox"),
+        decision = intent_router.route("帮我找找漏洞", mode=modes.get_mode("pentest"),
                                       llm_complete=lambda *a, **k: None)
         self.assertEqual(intent_router.REPLY, decision.action)
 
     def test_llm_may_escalate_when_confident(self) -> None:
         decision = intent_router.route(
-            "帮我找找漏洞", mode=modes.get_mode("src_blackbox"),
+            "帮我找找漏洞", mode=modes.get_mode("pentest"),
             llm_complete=lambda *a, **k: '{"action":"escalate","target":"http://t.local","reason":"ask"}')
         self.assertTrue(decision.escalates)
         self.assertEqual("http://t.local", decision.target)
 
     def test_empty_text_replies(self) -> None:
         self.assertEqual(intent_router.REPLY,
-                         intent_router.route("   ", mode=modes.get_mode("ctf")).action)
+                         intent_router.route("   ", mode=modes.get_mode("pentest")).action)
 
 
 class SkillsTests(unittest.TestCase):
@@ -124,8 +162,7 @@ class SkillsTests(unittest.TestCase):
 class ShippedSkillsTests(unittest.TestCase):
     """The packs on disk are what actually primes each mode's turn."""
 
-    EXPECTED = ("chat", "ctf", "src-blackbox", "code-audit",
-                "frontend-dev", "backend-dev", "refactor-guard")
+    EXPECTED = ("chat", "pentest", "frontend-dev", "backend-dev", "refactor-guard")
 
     def test_expected_packs_are_present(self) -> None:
         packs = skills.discover()
@@ -156,21 +193,24 @@ class ShippedSkillsTests(unittest.TestCase):
                 self.assertNotIn(marker, text)
 
     def test_modules_are_lazy(self) -> None:
-        base = skills.compose_prompt("src-blackbox")
+        base = skills.compose_prompt("pentest")
         self.assertNotIn("A unlocks B", base)
-        with_chain = skills.compose_prompt("src-blackbox", modules=("chains",))
+        with_chain = skills.compose_prompt("pentest", modules=("chains",))
         self.assertIn("A unlocks B", with_chain)
 
-    def test_src_blackbox_carries_the_operating_doctrine(self) -> None:
+    def test_pentest_pack_carries_the_operating_doctrine(self) -> None:
         # SRC_SYSTEM_PROMPT now lives in the pack, not in agents/src_chat.py.
-        text = skills.compose_prompt("src-blackbox")
+        text = skills.compose_prompt("pentest")
         for phrase in ("授权安全研究员", "SQLi 识别", "IDOR 识别", "不挖 CORS"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
     def test_module_names_are_listed(self) -> None:
-        self.assertEqual(["auth", "chains", "idor", "injection", "recon", "ssrf"],
-                         skills.module_names("src-blackbox"))
+        self.assertEqual(
+            ["auth", "chains", "evidence", "idor", "injection", "mobile", "recon",
+             "ssrf", "url-trust"],
+            skills.module_names("pentest"),
+        )
         self.assertEqual(["components", "store", "testing", "ui-lib"],
                          skills.module_names("frontend-dev"))
 

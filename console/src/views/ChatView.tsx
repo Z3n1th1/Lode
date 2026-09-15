@@ -13,19 +13,23 @@ const STARTERS = [
   {
     label: '资产侦察',
     text: '在授权范围内对 https://example.com 做只读侦察,先摸清端点,再挑高价值面',
-    mode: 'src_blackbox'
+    mode: 'pentest'
   },
   {
     label: '越权测试',
     text: '先抓一个带 id 的接口做基线,再替换 id 比对响应差异',
-    mode: 'src_blackbox'
+    mode: 'pentest'
   },
   {
     label: '注入链追踪',
-    text: '从外部输入一路追到危险 sink,给出可达的注入链与证据',
-    mode: 'code_audit'
+    text: '挑一个带参数的接口,先出基线再改参数比对差异,确认注入类型与可控点',
+    mode: 'pentest'
   },
-  { label: 'CTF 解题', text: '先做文件指纹,再按题型决定切入点', mode: 'ctf' }
+  {
+    label: '授权渗透',
+    text: '这是授权范围:先从外围资产收集开始,拿到入口后逐点验证,写操作前先问我',
+    mode: 'pentest'
+  }
 ]
 
 export default function ChatView() {
@@ -36,6 +40,7 @@ export default function ChatView() {
   const draft = useChat((state) => state.draft)
   const echo = useChat((state) => state.echo)
   const turnJobId = useChat((state) => state.turnJobId)
+  const runAttached = useChat((state) => state.runAttached)
   const loading = useChat((state) => state.loading)
   const notice = useChat((state) => state.notice)
   const streamError = useChat((state) => state.streamError)
@@ -44,6 +49,12 @@ export default function ChatView() {
 
   const running = Boolean(turnJobId)
   const blocked = pendingApprovals(events).length > 0
+  /**
+   * 这一轮不是本次在对话里发的,而是 attach 进来时发现还在跑(典型:intake 确认后
+   * 起的 target_run)。这种情况要挡住输入并直接给停止按钮 —— 否则用户打完字才撞
+   * 一个 409 turn_already_running,还不知道那轮是哪来的。
+   */
+  const attachedRun = running && runAttached
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
@@ -98,6 +109,11 @@ export default function ChatView() {
           {streamError}
         </p>
       ) : null}
+      {attachedRun ? (
+        <p className="shrink-0 border-b border-line bg-raised px-4 py-1.5 text-[12.5px] text-fg-2">
+          这条运行流不是本次发的,它还在跑。等它结束,或者点停止 —— 跑完会把结论写回这条对话。
+        </p>
+      ) : null}
 
       {loading ? null : events.length === 0 ? (
         <Opening />
@@ -118,6 +134,7 @@ export default function ChatView() {
         onStop={() => void useChat.getState().stop()}
         running={running}
         blocked={blocked}
+        locked={attachedRun}
       />
     </section>
   )

@@ -15,7 +15,7 @@ const STICK_SLACK = 56
  *  新加一种任务 kind 时要同步这里,否则那一整轮事件在对话里什么都不渲染 ——
  *  `subtask_progress` / `subtask_finished` 是折进节点里的,不会自己成行。
  *  `target_run` = 从「新建项目」的确认单开出来的那一轮,它没有对话回合可依附。 */
-const SUBTASK_KINDS = new Set(['src_loop', 'ctf_solve', 'code_audit', 'surface_scan', 'target_run'])
+const SUBTASK_KINDS = new Set(['src_loop', 'surface_scan', 'target_run'])
 
 function clockOf(ts: unknown): string {
   const value = Number(ts)

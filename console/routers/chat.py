@@ -66,7 +66,17 @@ def build(ctx: Ctx) -> APIRouter:
 
         log = _jobs.get_log(ctx.state_dir, session_id)
         events = log.since(int(since), limit=max(1, min(2000, int(limit))))
-        return JSONResponse(content={"events": events, "max_seq": log.max_seq()}, headers=_NOSTORE)
+        # 这条会话上还在跑的 job。attach 到一条已经在跑的运行流（比如 intake 起的
+        # target_run）时，前端靠它认出"这一轮不是我发的、而且不能往里发"，从而直接
+        # 给出停止按钮和明确提示，而不是等用户打完字撞一个 409 turn_already_running。
+        active = [
+            {"job_id": record.job_id, "kind": record.kind, "target": record.target}
+            for record in _jobs.active_jobs(ctx.state_dir, session_id=session_id)
+        ]
+        return JSONResponse(
+            content={"events": events, "max_seq": log.max_seq(), "active_jobs": active},
+            headers=_NOSTORE,
+        )
 
     @router.post("/api/v1/chat/sessions/{session_id}/messages", status_code=status.HTTP_202_ACCEPTED)
     def post_message(session_id: str, payload: ChatMessageRequest, request: Request) -> JSONResponse:

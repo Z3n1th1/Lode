@@ -1,7 +1,7 @@
 """Deterministic-first intent router for the unified conversation.
 
 Decides, for one user turn, whether to just reply or to escalate into a subtask
-(CTF solve / SRC black-box scan / code audit). Rules run first — they are cheap,
+(one black-box hunt against an authorized target). Rules run first — they are cheap,
 testable and never block — and only genuinely ambiguous text falls through to a
 single cheap LLM classification (which fails safe to ``reply``).
 
@@ -26,24 +26,22 @@ _ACTION_WORDS = (
     "审计", "看漏洞", "找漏洞", "漏洞", "利用", "打点", "信息收集", "侦察",
     "scan", "hunt", "audit", "fuzz", "exploit", "recon", "pentest",
 )
-# "进入 CTF 模式" / "切换到挖洞模式" / "用代码审计模式"
+# "进入挖洞模式" / "切换到渗透模式"
 _MODE_CMD_RE = re.compile(
     r"(?:进入|切换到|切到|使用|用|开启)\s*([A-Za-z_\u4e00-\u9fa5]{1,12}?)\s*模式"
 )
 
 # Chinese/alias -> canonical mode name
 _MODE_ALIASES: Dict[str, str] = {
-    "ctf": "ctf", "CTF": "ctf", "比赛": "ctf",
-    "挖洞": "src_blackbox", "黑盒": "src_blackbox", "src": "src_blackbox",
-    "src黑盒": "src_blackbox", "sr_c黑盒": "src_blackbox", "src_blackbox": "src_blackbox",
-    "代码审计": "code_audit", "审计": "code_audit", "code_audit": "code_audit",
+    "挖洞": "pentest", "黑盒": "pentest", "黑盒挖洞": "pentest", "打点": "pentest",
+    "渗透": "pentest", "渗透测试": "pentest", "pentest": "pentest",
+    "src": "pentest", "SRC": "pentest", "src黑盒": "pentest", "sr_c黑盒": "pentest",
+    "src_blackbox": "pentest",
     "闲聊": "chat", "聊天": "chat", "对话": "chat", "chat": "chat",
 }
 
 SUBTASK_FOR_MODE: Dict[str, str] = {
-    "ctf": "ctf_solve",
-    "src_blackbox": "src_loop",
-    "code_audit": "code_audit",
+    "pentest": "src_loop",
 }
 
 
@@ -100,7 +98,7 @@ def route(user_text: str, *, mode: Mode, llm_complete: Optional[Callable[..., Op
     if not text:
         return RouteDecision(action=REPLY, mode=mode.name, reason="empty")
 
-    # 1. explicit mode switch ("进入 CTF 模式") — reply + mode_changed
+    # 1. explicit mode switch ("进入挖洞模式") — reply + mode_changed
     requested = _mode_command(text)
     if requested:
         return RouteDecision(action=REPLY, mode=requested, reason="mode_command")

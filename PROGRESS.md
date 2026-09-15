@@ -77,8 +77,8 @@ python lode.py sessions / progress / doctor
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | Console（统一对话） | 可用 | 模式 + 持久化任务 + SSE 事件流 + 卡片渲染；单一主视图 |
-| 对话模式 | 4 个 | `chat` / `ctf` / `src_blackbox` / `code_audit`，配置在 `config/modes.yaml` |
-| 技能包 | 7 个 | `.codebuddy/skills/**`，由 `core/skills.py` 每轮注入 system prompt |
+| 对话模式 | 2 个 | `chat` / `pentest`（挖洞），配置在 `config/modes.yaml` |
+| 技能包 | 6 个 | `.codebuddy/skills/**`，由 `core/skills.py` 每轮注入 system prompt |
 | SRC 黑板 | 可用 | facts/intents/dead_ends/hints/claims + 租约心跳，跨进程原子写 |
 | 任务层 | 可用 | 状态落盘、租约幂等、cooperative stop、重启后标记 interrupted |
 | 目标准入（intake 门） | 可用 | 预览 → 确认 → `TargetCard` 的 digest 绑定；确认后按卡起 `target_run` |

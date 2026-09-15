@@ -1,7 +1,15 @@
 # Conversation modes. A mode bundles: which skill pack primes the turn, which
 # model tier to prefer, how much autonomy the agent has, and which tools are
 # offered. Preset via the UI selector, a new-session default, or natural
-# language ("进入 CTF 模式").
+# language ("进入挖洞模式").
+#
+# One action mode on purpose. Black-box SRC and authorized pentest are the same
+# posture on the same kind of target — recon, validate, chain, report against a
+# scope you were given — so they share one pack and one toolset instead of two
+# near-identical modes. CTF solving and white-box code audit are not that: they
+# act on a challenge artifact / a source tree rather than a live authorized
+# asset, and they have been moved out of the product (code + skill packs now live
+# outside this repo, in E:\LLM\Lode-parked\).
 modes:
   chat:
     title: 对话
@@ -10,24 +18,10 @@ modes:
     autonomy: none
     tools: []
     system_fragment: "纯对话模式：只讨论与推理，不主动发起任何扫描或请求。"
-  ctf:
-    title: CTF
-    skill: ctf
-    tier: reasoner
-    autonomy: auto
-    tools: [shell, fetch, decode, submit_flag]
-    system_fragment: "CTF 模式：工程化构造攻击链，先侦察再逐点利用，优先给出可直接运行的 payload/exploit。"
-  src_blackbox:
-    title: 黑盒漏洞挖掘
-    skill: src-blackbox
+  pentest:
+    title: 挖洞
+    skill: pentest
     tier: reasoner
     autonomy: ask
     tools: [scan_target, run_agent_analysis, fetch_url, show_blackboard, add_candidates, show_progress, auto_scan]
-    system_fragment: "SRC 黑盒模式：严格限定在授权范围内做只读侦察与漏洞验证，任何写操作先要人工确认。"
-  code_audit:
-    title: 代码审计
-    skill: code-audit
-    tier: reasoner
-    autonomy: ask
-    tools: [read_file, grep_scan, taint_trace, sink_lookup]
-    system_fragment: "代码审计模式：从 source 到 sink 追踪数据流，先给证据链再给结论。"
+    system_fragment: "挖洞模式：黑盒 SRC 与授权渗透同一套打法，只在授权范围内动手，先侦察再逐点验证，写操作先要人工确认。"

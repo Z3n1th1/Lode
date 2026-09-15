@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from console import jobs as console_jobs  # noqa: E402
 from console.app import create_app  # noqa: E402
 from agents import src_chat as agents_src_chat  # noqa: E402
+from core import intent_router  # noqa: E402
 
 PASSWORD = "strong-local-password"
 SECRET = "session-secret-for-test-0123456789"
@@ -67,14 +68,38 @@ class ChatApiTests(_ChatCase):
         client = self.start_client()
         body = client.get("/api/v1/modes").json()
         names = [m["name"] for m in body["modes"]]
-        self.assertIn("ctf", names)
+        # one action mode: black-box hunting and authorized pentest share it
+        self.assertEqual(["chat", "pentest"], names)
         self.assertEqual("chat", body["default"])
 
     def test_create_session_mints_an_id(self) -> None:
         client = self.start_client()
-        body = client.post("/api/v1/chat/sessions", json={"mode": "ctf"}).json()
+        body = client.post("/api/v1/chat/sessions", json={"mode": "pentest"}).json()
         self.assertTrue(body["session_id"].startswith("src-"))
-        self.assertEqual("ctf", body["mode"])
+        self.assertEqual("pentest", body["mode"])
+
+    def test_events_report_a_job_that_is_still_running(self) -> None:
+        """attach 到一条已经在跑的会话时,前端靠 active_jobs 认出"这一轮不是我发的、
+        而且不能往里发" —— 不然用户打完字才撞一个 409 turn_already_running。"""
+        client = self.start_client()
+        session_id = "src-abc1234567"
+
+        idle = client.get(f"/api/v1/chat/sessions/{session_id}/events").json()
+        self.assertEqual([], idle["active_jobs"])
+
+        # queued 也算 active,所以造一个 job 就够,不必真的起 runner。
+        console_jobs.get_registry(self.state_dir).create(
+            session_id=session_id, turn_id="T-run", kind="target_run",
+            target="https://run.example.test", payload={},
+        )
+
+        busy = client.get(f"/api/v1/chat/sessions/{session_id}/events").json()
+        self.assertEqual(["target_run"], [job["kind"] for job in busy["active_jobs"]])
+        self.assertEqual("https://run.example.test", busy["active_jobs"][0]["target"])
+
+        # 别的会话不该被牵连。
+        other = client.get("/api/v1/chat/sessions/src-ffffffffff/events").json()
+        self.assertEqual([], other["active_jobs"])
 
     def test_turn_emits_events_inline(self) -> None:
         def fake_turn(job, ctx):
@@ -176,7 +201,7 @@ class EscalationTests(_ChatCase):
         seen: list = []
         client = self._client_with_stubbed_loop(seen)
         resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
-                           json={"text": "扫描一下 http://example.com", "mode": "src_blackbox"})
+                           json={"text": "扫描一下 http://example.com", "mode": "pentest"})
         self.assertEqual(202, resp.status_code, resp.text)
         turn_job = resp.json()["job_id"]
 
@@ -208,7 +233,7 @@ class EscalationTests(_ChatCase):
         self.assertEqual("http://example.com", announce["target"])
         # the announcement carries the mode's own title (core/modes.py), so a
         # rename there shows up here on purpose
-        self.assertEqual("黑盒漏洞挖掘", announce["title"])
+        self.assertEqual("挖洞", announce["title"])
         self.assertEqual(loop["job_id"], announce["job_id"])
         # the subtask shares the turn's turn_id, so it renders inside that turn
         self.assertEqual(events[0]["turn_id"], announce["turn_id"])
@@ -232,15 +257,91 @@ class EscalationTests(_ChatCase):
         jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
         self.assertEqual(["chat_turn"], [j["kind"] for j in jobs])
 
+    def test_an_invented_subtask_kind_does_not_launch_a_job(self) -> None:
+        """The subtask kind can come from the classifier's own JSON, so it is untrusted.
+
+        A kind with no executor would mint a job that always fails
+        ``no_handler:<kind>`` — a red row for a capability that does not exist. The
+        turn says so in the conversation instead of launching it.
+        """
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        invented = intent_router.RouteDecision(
+            action=intent_router.ESCALATE, subtask_kind="recon", target="http://example.com",
+            mode="pentest", reason="llm")
+        with patch.object(intent_router, "route", return_value=invented):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": "看看 http://example.com", "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual([], seen)
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        self.assertEqual(["chat_turn"], [j["kind"] for j in jobs])
+
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        reply = next(e for e in events if e["kind"] == "assistant_message")["text"]
+        self.assertIn("recon", reply)
+        self.assertIn("已收到", reply)
+        # nothing was announced: no subtask_started beyond the turn job itself
+        started = [e for e in events if e["kind"] == "subtask_started"]
+        self.assertEqual(["chat_turn"], [e["job_kind"] for e in started])
+
+    def test_the_hunting_turn_offers_the_modes_own_tools(self) -> None:
+        """The real turn must advertise ``mode.tools``, resolved to real schemas.
+
+        Everything else here stubs ``chat``; this one runs it, with only the LLM
+        completion seam faked, so it pins the mode -> registry -> tool-loop wiring.
+        """
+        captured: dict = {}
+
+        def fake_src_loop(job, ctx):
+            return {"summary_ref": "loop-done"}
+
+        def fake_complete(messages, *, tools=None, timeout=90.0):
+            captured["tools"] = [s["function"]["name"] for s in (tools or [])]
+            return {"content": "已收到", "tool_calls": []}
+
+        patcher = patch.object(agents_src_chat, "_llm_call", fake_complete)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        client = self.start_client({"src_loop": fake_src_loop})
+
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "先说下思路", "mode": "pentest"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual(["scan_target", "run_agent_analysis", "fetch_url", "show_blackboard",
+                          "add_candidates", "show_progress", "auto_scan"], captured["tools"])
+
+    def test_chat_mode_turn_offers_no_tools(self) -> None:
+        """A declared-empty tool list means nothing is advertised, not the hunting set."""
+        captured: dict = {}
+
+        def fake_complete(messages, *, tools=None, timeout=90.0):
+            captured["tools"] = tools
+            return {"content": "已收到", "tool_calls": []}
+
+        patcher = patch.object(agents_src_chat, "_llm_call", fake_complete)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        client = self.start_client({"src_loop": lambda job, ctx: {}})
+
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "只聊聊", "mode": "chat"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual([], captured["tools"])
+
     def test_mode_command_switches_the_mode_and_says_so(self) -> None:
         seen: list = []
         client = self._client_with_stubbed_loop(seen)
         client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
-                    json={"text": "进入 CTF 模式", "mode": "chat"})
+                    json={"text": "进入挖洞模式", "mode": "chat"})
         self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
         events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
         changed = next(e for e in events if e["kind"] == "mode_changed")
-        self.assertEqual("ctf", changed["mode"])
+        self.assertEqual("pentest", changed["mode"])
         # a mode switch alone must not launch anything
         self.assertEqual([], seen)
 

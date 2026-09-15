@@ -49,6 +49,20 @@ const EMPTY_AUTOPILOT: SrcAutopilotView = {
   hints: []
 }
 
+/** 读提交队列。空队列有两种意思——真的没有待确认,还是台账文件/锁读不到——
+ *  所以状态一起带回来,由界面说清是哪种,而不是让两种都长成一张空表。 */
+async function readIntakeQueue(
+  fallback: PendingIntakeRow[],
+  fallbackStatus: string
+): Promise<{ intakes: PendingIntakeRow[]; intakeQueueStatus: string }> {
+  try {
+    const queue = await loadProjectIntakes()
+    return { intakes: queue.intakes, intakeQueueStatus: queue.status }
+  } catch {
+    return { intakes: fallback, intakeQueueStatus: fallbackStatus }
+  }
+}
+
 /** intake 策略档解析:优先用户档;无效/缺失时回退第一个可用档,避免 400。 */
 export async function resolveIntakeProfile(preferred: string): Promise<string> {
   try {
@@ -115,7 +129,10 @@ const INTAKE_HINT: Record<string, string> = {
   invalid_profile: '策略档无效',
   empty_instruction: '请写一句这次要看什么',
   brute_force_out_of_scope: '爆破不在当前授权范围内',
-  intake_option_unknown: '有个开关后端不认识(前后端没同步)'
+  intake_option_unknown: '有个开关后端不认识(前后端没同步)',
+  intake_confirmation_binding_mismatch: '确认单对不上号:这张单不是当前这条预览的',
+  intake_receipt_invalid: '确认收据不完整,重新确认一次',
+  canonical_target_card_mismatch: '落盘的卡和确认单不一致,没有开跑'
 }
 
 export interface IntakeToggles {
@@ -189,6 +206,8 @@ interface PanelState {
   guidanceError: string
   guidanceOk: string
   intakes: PendingIntakeRow[]
+  /** 队列台账的读取状态:ok / missing / unavailable。空队列时用来区分原因。 */
+  intakeQueueStatus: string
   intakeForm: IntakeForm
   profileOptions: { label: string; value: string }[]
   newProjectOpen: boolean
@@ -241,6 +260,7 @@ export const usePanels = create<PanelState>()((set, get) => ({
   guidanceError: '',
   guidanceOk: '',
   intakes: [],
+  intakeQueueStatus: '',
   intakeForm: { target_url: '', instruction: '', engagement_profile: '', toggles: DEFAULT_TOGGLES },
   profileOptions: [],
   newProjectOpen: false,
@@ -263,11 +283,11 @@ export const usePanels = create<PanelState>()((set, get) => ({
       } else if (route === 'findings') {
         set({ findings: await loadFindings() })
       } else if (route === 'projects') {
-        const [projects, intakes] = await Promise.all([
+        const [projects, queue] = await Promise.all([
           loadProjects(),
-          loadProjectIntakes().catch(() => [] as PendingIntakeRow[])
+          readIntakeQueue(get().intakes, get().intakeQueueStatus)
         ])
-        set({ projects, intakes })
+        set({ projects, ...queue })
       } else if (route === 'settings') {
         const profiles = await loadProfiles().catch(() => [])
         set({
@@ -423,7 +443,7 @@ export const usePanels = create<PanelState>()((set, get) => ({
       set({
         intakePreview: preview,
         intakeOk: '',
-        intakes: await loadProjectIntakes().catch(() => get().intakes)
+        ...(await readIntakeQueue(get().intakes, get().intakeQueueStatus))
       })
     } catch (error) {
       const conflict = error instanceof ApiError && error.status === 409
@@ -461,16 +481,18 @@ export const usePanels = create<PanelState>()((set, get) => ({
         intakeResult: result,
         intakePreview: null,
         intakeForm: { ...get().intakeForm, target_url: '', instruction: '' },
-        intakes: await loadProjectIntakes().catch(() => get().intakes)
+        ...(await readIntakeQueue(get().intakes, get().intakeQueueStatus))
       })
     } catch (error) {
+      const api = error instanceof ApiError ? error : null
+      const detail = String((api?.body as { detail?: string } | undefined)?.detail || '')
+      const expired = api?.status === 410
       set({
-        intakeError:
-          error instanceof ApiError && error.status === 410
-            ? '预览已失效,重新提交一次'
-            : `确认失败:${(error as Error).message}`
+        intakeError: expired
+          ? '预览已失效,重新提交一次'
+          : INTAKE_HINT[detail] || `确认失败:${(error as Error).message}`
       })
-      if (error instanceof ApiError && error.status === 410) set({ intakePreview: null })
+      if (expired) set({ intakePreview: null })
     } finally {
       set({ intakeSubmitting: false })
     }
@@ -482,7 +504,7 @@ export const usePanels = create<PanelState>()((set, get) => ({
       await discardProjectIntake()
       set({
         intakePreview: null,
-        intakes: await loadProjectIntakes().catch(() => get().intakes)
+        ...(await readIntakeQueue(get().intakes, get().intakeQueueStatus))
       })
     } catch {
       set({ intakeError: '取消失败' })
@@ -493,7 +515,13 @@ export const usePanels = create<PanelState>()((set, get) => ({
 
   async openIntakeRun() {
     const run = get().intakeResult?.run
-    if (!run) return
+    if (!run) {
+      // 以前这里静默 return:按下去什么都不发生,操作者只能反复按。没起运行是
+      // 有原因的(门确认了、卡落盘了,但服务端没起 run),就该把原因说出来。
+      set({ intakeError: '这次确认没有起运行(卡已落盘),所以没有可跳的运行流。' })
+      return
+    }
+    set({ intakeError: '', intakeOk: '' })
     // 切到这次运行自己的会话并跳过去 —— 运行流是 SSE,attach 之后就从 seq 0 回放。
     await useChat.getState().attach(run.session_id)
     useAuth.getState().setRoute('chat')

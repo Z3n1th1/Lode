@@ -92,7 +92,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                         "message_id": "message-should-not-leak",
                         "target": "https://pending.example.test",
                         "instruction": SECRET_SENTINEL,
-                        "profile_ids": ["standard-pentest", "ctf-fast-score"],
+                        "profile_ids": ["standard-pentest", "redteam"],
                         "goal_id": "G-002",
                         "created_at": 1_020.0,
                         "expires_at": 1_920.0,
@@ -225,7 +225,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 "external_tool_runner_unconfigured",
                 snapshot["tasks"][0]["blocked_reason"],
             )
-            self.assertEqual(["standard-pentest", "ctf-fast-score"], snapshot["pending_profiles"][0]["profiles"])
+            self.assertEqual(["standard-pentest", "redteam"], snapshot["pending_profiles"][0]["profiles"])
             self.assertEqual("I-001", snapshot["pending_intakes"][0]["intake_id"])
             self.assertEqual("https://intake.example.test", snapshot["pending_intakes"][0]["target"])
             self.assertFalse(snapshot["pending_intakes"][0]["asset_inventory_enabled"])

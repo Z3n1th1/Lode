@@ -79,6 +79,7 @@ const INTAKE_COLUMNS: Column<PendingIntakeRow>[] = [
 export default function ProjectsView() {
   const projects = usePanels((state) => state.projects)
   const intakes = usePanels((state) => state.intakes)
+  const intakeQueueStatus = usePanels((state) => state.intakeQueueStatus)
   const loading = usePanels((state) => state.loading)
 
   return (
@@ -117,7 +118,8 @@ export default function ProjectsView() {
 
         <ProjectDetailPane />
 
-        {/* 队列空的时候整段不出现:常态是空的,占着一屏没信息 */}
+        {/* 队列空的时候整段不出现:常态是空的,占着一屏没信息。—— 但"台账读不到"
+            不是常态。那种空要说出来,否则同一个空界面同时代表两件事。 */}
         {intakes.length ? (
           <>
             <h2 className="border-y border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
@@ -130,6 +132,14 @@ export default function ProjectsView() {
               empty="暂无待确认的建目标预览"
             />
           </>
+        ) : intakeQueueStatus && intakeQueueStatus !== 'available' ? (
+          <p className="border-t border-line px-4 py-2 text-[12.5px] text-warn">
+            提交队列的台账读不到
+            {intakeQueueStatus === 'missing'
+              ? '(target_intakes.jsonl 还没有:提交第一个预览时才会建)'
+              : '(文件或它的锁不可用)'}
+            ,所以这里可能是空的、也可能有内容没显示出来。
+          </p>
         ) : null}
       </div>
     </section>

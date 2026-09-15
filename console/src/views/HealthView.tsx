@@ -87,8 +87,7 @@ export default function HealthView() {
   ]
 
   const scheduler = system?.scheduler
-  const services = Object.entries(system?.services ?? {}).filter(([, status]) => isReported(status))
-  /**
+  const services = Object.entries(system?.services ?? {}).filter(([, status]) => isReported(status))  /**
    * 内存指标是宿主机的事实,读不到(比如 Windows)就整条不摆 —— 一排 "—" 不是信息。
    * 模型池是这台机器自己的状态,无论有没有值都留着:它是这一页的主角。
    */
@@ -106,6 +105,13 @@ export default function HealthView() {
     { label: 'gh events', value: scheduler?.gh_events_status ?? '' },
     { label: 'socks', value: scheduler?.socks_status ?? '' }
   ].filter((task) => hasValue(task.value))
+  /**
+   * 这一页的数据几乎全是「运行侧」写的:计划任务来自 scheduler_state.json,模型上游
+   * 来自 model_pool_status.json,服务来自 LODE_MONITORED_SERVICES —— 都是 agent 侧
+   * 循环产生的。那些循环在 Windows 上不跑,所以第一次打开这页基本只有宿主机内存。
+   * 空不等于坏,但要说清是哪一种:一排空表格看起来就像这页崩了。
+   */
+  const hostOnly = !services.length && !tasks.length && poolTotal === 0
 
   return (
     <section className="flex h-full min-h-0 flex-col">
@@ -138,6 +144,19 @@ export default function HealthView() {
           />
           <Stat label="活跃模型" value={models?.active_model || '—'} />
         </div>
+
+        {hostOnly ? (
+          <div className="border-b border-line px-4 py-3">
+            <p className="text-[12.5px] text-fg-2">
+              这台机器上还没有运行侧的数据,所以这里只有宿主机的内存。
+            </p>
+            <ul className="mt-2 grid gap-1 text-[12px] leading-relaxed text-fg-4">
+              <li>计划任务:调度器写过 scheduler_state.json 之后出现。</li>
+              <li>服务:配了 LODE_MONITORED_SERVICES 之后出现。</li>
+              <li>模型上游:模型池探测一次、写入 model_pool_status.json 之后出现。</li>
+            </ul>
+          </div>
+        ) : null}
 
         {/* 全是 n/a 的时候整段不出现:这台机器上没有这些服务,列出来只是噪声 */}
         {services.length ? (

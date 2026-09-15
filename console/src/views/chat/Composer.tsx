@@ -13,9 +13,11 @@ interface Props {
   onStop: () => void
   running: boolean
   blocked: boolean
+  /** attach 到别人起的运行流:输入被锁住,只能停止。 */
+  locked: boolean
 }
 
-export default function Composer({ draft, onDraft, onSend, onStop, running, blocked }: Props) {
+export default function Composer({ draft, onDraft, onSend, onStop, running, blocked, locked }: Props) {
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
@@ -33,9 +35,15 @@ export default function Composer({ draft, onDraft, onSend, onStop, running, bloc
           onChange={(event) => onDraft(event.target.value)}
           onKeyDown={onKeyDown}
           rows={Math.min(8, Math.max(1, draft.split('\n').length))}
-          disabled={blocked}
+          disabled={blocked || locked}
           aria-label="输入"
-          placeholder={blocked ? '等待人工确认,当前不可输入' : '输入目标或下一步动作'}
+          placeholder={
+            locked
+              ? '这条运行流还在跑,等它结束或点停止'
+              : blocked
+                ? '等待人工确认,当前不可输入'
+                : '输入目标或下一步动作'
+          }
           className={cn(
             'block w-full resize-none bg-transparent text-[14px] leading-[1.7] text-fg',
             'placeholder:text-fg-4 focus:outline-none disabled:cursor-not-allowed'
@@ -57,6 +65,7 @@ export default function Composer({ draft, onDraft, onSend, onStop, running, bloc
           {blocked ? (
             <span className="font-mono text-[11px] text-warn">等待人工确认</span>
           ) : null}
+          {locked ? <span className="font-mono text-[11px] text-fg-4">运行中</span> : null}
 
           {running ? (
             <Tooltip label="停止本轮">

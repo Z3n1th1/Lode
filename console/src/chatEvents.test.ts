@@ -19,7 +19,7 @@ describe('isSubtaskEvent', () => {
 describe('foldSubtasks', () => {
   it('folds one job\'s started/progress/finished into a single node', () => {
     const nodes = foldSubtasks([
-      ev(1, 'subtask_started', { job_id: 'J-1', job_kind: 'src_loop', target: 'https://t.example', title: 'SRC 黑盒' }),
+      ev(1, 'subtask_started', { job_id: 'J-1', job_kind: 'src_loop', target: 'https://t.example', title: '挖洞' }),
       ev(2, 'subtask_progress', { job_id: 'J-1', phase: 'autopilot' }),
       ev(3, 'subtask_progress', { job_id: 'J-1', phase: 'done', findings: 2 }),
       ev(4, 'subtask_finished', { job_id: 'J-1', status: 'completed' })
@@ -28,7 +28,7 @@ describe('foldSubtasks', () => {
     expect(node).toBeDefined()
     expect(node?.kind).toBe('src_loop')
     expect(node?.target).toBe('https://t.example')
-    expect(node?.title).toBe('SRC 黑盒')
+    expect(node?.title).toBe('挖洞')
     expect(node?.status).toBe('completed')
     expect(node?.findings).toBe(2)
     expect(node?.startedAt).toBe(1001)
@@ -37,8 +37,8 @@ describe('foldSubtasks', () => {
 
   it('keeps separate jobs separate and preserves first-seen order', () => {
     const nodes = foldSubtasks([
-      ev(1, 'subtask_started', { job_id: 'J-A', job_kind: 'ctf_solve' }),
-      ev(2, 'subtask_started', { job_id: 'J-B', job_kind: 'code_audit' }),
+      ev(1, 'subtask_started', { job_id: 'J-A', job_kind: 'surface_scan' }),
+      ev(2, 'subtask_started', { job_id: 'J-B', job_kind: 'src_loop' }),
       ev(3, 'subtask_finished', { job_id: 'J-A', status: 'failed', error: 'boom' })
     ])
     expect([...nodes.keys()]).toEqual(['J-A', 'J-B'])

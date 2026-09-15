@@ -51,14 +51,6 @@ _FALLBACK_REGISTRY_PROFILES: Dict[str, Dict[str, Any]] = {
             "targets": {"endpoint_assessment_coverage": 1.0},
         },
     },
-    "ctf-fast-score": {
-        "aliases": [],
-        "completion_scope": "challenge_path",
-        "coverage_policy": {
-            "endpoint_coverage_objective_enabled": False,
-            "targets": {"endpoint_assessment_coverage": 0.0},
-        },
-    },
     "offense-high-value": {
         "aliases": [],
         "completion_scope": "high_value_paths",
@@ -98,7 +90,6 @@ _FALLBACK_REGISTRY_PROFILES: Dict[str, Dict[str, Any]] = {
 PROFILE_SELECTION_ORDER: Tuple[str, ...] = (
     "standard-pentest",
     "redteam",
-    "ctf-fast-score",
     "offense-high-value",
     "daily-deliverable",
     "batch-asset-sweep",
@@ -106,7 +97,6 @@ PROFILE_SELECTION_ORDER: Tuple[str, ...] = (
 )
 
 _DESCRIPTIONS = {
-    "ctf-fast-score": "CTF 快速得分",
     "redteam": "红队演练",
     "offense-high-value": "高价值 SRC/专项测试",
     "standard-pentest": "标准授权渗透",
@@ -116,7 +106,6 @@ _DESCRIPTIONS = {
 }
 
 _EXTRA_ALIASES = {
-    "ctf-fast-score": ("ctf", "flag"),
     "redteam": ("red team", "红队"),
     "offense-high-value": ("高价值", "src", "h1"),
     "standard-pentest": ("标准渗透", "标准"),
@@ -317,7 +306,7 @@ def prompt_strategy_selection(profile_ids: Optional[Iterable[str]] = None) -> st
 def _self_test() -> int:
     assert set(profile_names()) == set(_REGISTRY_PROFILES)
     assert resolve_request("/goal https://example.test").requires_profile_choice
-    assert resolve_request("/goal ctf https://example.test").profile_name == "ctf-fast-score"
+    assert resolve_request("/goal redteam https://example.test").profile_name == "redteam"
     assert resolve_request("只分析 https://example.test 的 HAR 流量").goal_exempt
     print("operation_profile self-test ok")
     return 0

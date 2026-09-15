@@ -122,7 +122,11 @@ class IntakeGateTests(_GateCase):
         pending = client.get("/api/v1/project/intake/pending").json()
         self.assertEqual(preview["intake_id"], pending["preview"]["intake_id"])
         self.assertGreater(pending["ttl_seconds"], 0)
-        self.assertEqual(preview["intake_id"], client.get("/api/v1/project/intakes").json()[0]["intake_id"])
+        queue = client.get("/api/v1/project/intakes").json()
+        self.assertEqual(preview["intake_id"], queue["intakes"][0]["intake_id"])
+        # The ledger is readable, so an empty queue means "nothing pending" rather
+        # than "the file is gone" — the two used to look identical.
+        self.assertEqual("available", queue["status"])
 
         confirmed = client.post("/api/v1/project/intake/confirm", json={
             "intake_id": preview["intake_id"], "options_digest": preview["options_digest"],
@@ -140,7 +144,9 @@ class IntakeGateTests(_GateCase):
         self.assertEqual("TargetCard/v1", card["schema"])
         self.assertEqual(["target.example.test"], card["scope"]["allowed_hosts"])
         # The queue drains the moment the preview stops being confirmable.
-        self.assertEqual([], client.get("/api/v1/project/intakes").json())
+        drained = client.get("/api/v1/project/intakes").json()
+        self.assertEqual([], drained["intakes"])
+        self.assertEqual("available", drained["status"])
         self.assertIsNone(client.get("/api/v1/project/intake/pending").json()["preview"])
 
     def test_confirmation_must_match_what_was_shown(self) -> None:

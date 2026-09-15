@@ -35,7 +35,7 @@ python lode.py console
 | 端点 | 作用 |
 |------|------|
 | `POST /api/v1/session` | 登录 |
-| `GET /api/v1/modes` | 对话模式（对话 / CTF / 黑盒漏洞挖掘 / 代码审计） |
+| `GET /api/v1/modes` | 对话模式（对话 / 挖洞） |
 | `POST /api/v1/chat/sessions` | 新建会话 |
 | `POST /api/v1/chat/sessions/{id}/messages` | 发一轮对话（202，作为持久化任务执行） |
 | `GET /api/v1/chat/sessions/{id}/stream` | 事件流（SSE，`since` 游标续传） |

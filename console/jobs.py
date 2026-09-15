@@ -262,24 +262,38 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
         mode = modes.get_mode(decision.mode)
         ctx.emit("mode_changed", mode=mode.name)
 
+    unimplemented = ""
     if decision.escalates and decision.target:
-        # Subtask node: a blackboard intent + a durable job (DAG/lease handled there).
-        # The runner announces it (subtask_started) — don't emit a second copy here.
-        run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
-        subtask = get_registry(state_dir).create(
-            session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
-            target=decision.target,
-            payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
-                     "reason": decision.reason, "title": mode.title},
-        )
-        get_runner(state_dir).submit(subtask)
+        if decision.subtask_kind not in HANDLERS:
+            # The router proposes a kind nothing can run — an existing kind whose
+            # executor was pulled, or (more often) one the LLM classifier invented.
+            # Launching it would only mint a job that fails ``no_handler:<kind>``,
+            # so the turn says so in the conversation instead.
+            unimplemented = (f"（未启动后台任务:{decision.subtask_kind} 还没有执行器,"
+                             f"本轮只在对话里分析。）")
+        else:
+            # Subtask node: a blackboard intent + a durable job (DAG/lease handled there).
+            # The runner announces it (subtask_started) — don't emit a second copy here.
+            run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
+            subtask = get_registry(state_dir).create(
+                session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
+                target=decision.target,
+                payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
+                         "reason": decision.reason, "title": mode.title},
+            )
+            get_runner(state_dir).submit(subtask)
 
     prompt = skills.compose_prompt(mode.skill)
     if mode.system_fragment:
         prompt = (prompt + "\n\n" + mode.system_fragment).strip()
     session = src_chat._get_or_create_session(session_id, state_dir=state_dir)
-    reply = src_chat.chat(session, text, system_prompt=prompt or None)
-    ctx.emit("assistant_message", text=reply)
+    # ``mode.tools`` is what the model may call inline *in this turn* -- a different
+    # axis from ``HANDLERS`` above, which is which background executors exist. They
+    # are deliberately independent: a kind can be declared in ``SUBTASK_FOR_MODE``
+    # with no executor, and a mode can carry inline tools with no executor at all.
+    reply = src_chat.chat(session, text, system_prompt=prompt or None,
+                          tool_names=mode.tools, fallback_prompt=mode.system_fragment or None)
+    ctx.emit("assistant_message", text=f"{unimplemented}\n\n{reply}" if unimplemented else reply)
     return {"summary_ref": f"session:{session_id}", "progress": {"mode": mode.name,
                                                                 "routed": decision.action}}
 

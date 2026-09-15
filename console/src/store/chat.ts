@@ -150,6 +150,8 @@ interface ChatState {
   /** 已发出但还没回显到日志里的那句话(乐观回显)。 */
   echo: string
   turnJobId: string
+  /** turnJobId 是 attach 时从服务端认出来的(不是本次 send 发的)。 */
+  runAttached: boolean
   loading: boolean
   notice: string
   connected: boolean
@@ -183,6 +185,7 @@ export const useChat = create<ChatState>()((set, get) => {
           String(event.job_id ?? '') === state.turnJobId
         ) {
           patch.turnJobId = ''
+          patch.runAttached = false
           patch.echo = ''
         }
         return patch
@@ -211,6 +214,7 @@ export const useChat = create<ChatState>()((set, get) => {
     draft: '',
     echo: '',
     turnJobId: '',
+    runAttached: false,
     loading: true,
     notice: '',
     connected: false,
@@ -228,12 +232,23 @@ export const useChat = create<ChatState>()((set, get) => {
     async attach(id, fresh = false) {
       stopStream()
       cursor = 0
-      set({ sessionId: id, freshSession: fresh, events: [], echo: '', notice: '', streamError: '' })
+      set({
+        sessionId: id, freshSession: fresh, events: [], echo: '', notice: '',
+        streamError: '', turnJobId: '', runAttached: false
+      })
       try {
         const page = await loadChatEvents(id, 0, 500)
         const events = [...page.events].sort((a, b) => a.seq - b.seq)
         cursor = lastSeq(events)
-        set({ events })
+        // 这条会话上还有 job 在跑(通常是 intake 起的运行)。认出来,它才会显示成
+        // "运行中"并直接给停止按钮,而且发不出去 —— 否则用户打完字才撞一个
+        // 409 turn_already_running,还不知道那轮是哪来的。
+        const active = page.active_jobs?.[0]
+        set({
+          events,
+          turnJobId: active ? active.job_id : '',
+          runAttached: Boolean(active)
+        })
       } catch (err) {
         set({ notice: `读取历史失败:${(err as Error).message}` })
       }
@@ -271,13 +286,15 @@ export const useChat = create<ChatState>()((set, get) => {
       set({ draft: '', echo: text })
       try {
         const turn = await sendChatTurn(sessionId, text, get().mode)
-        set({ turnJobId: turn.job_id, notice: '' })
+        set({ turnJobId: turn.job_id, runAttached: false, notice: '' })
       } catch (err) {
         const failure = err as ApiError
         set({
           echo: '',
           notice:
-            failure.status === 409 ? '上一轮还在跑,先等它结束' : `发送失败:${failure.message}`
+            failure.status === 409
+              ? '这条会话还有一轮在跑(可能是 intake 起的运行):等它结束,或点停止。'
+              : `发送失败:${failure.message}`
         })
       }
     },

@@ -249,8 +249,16 @@ export async function discardProjectIntake(): Promise<{ ok: boolean; discarded: 
 export async function loadPendingIntake(): Promise<{ preview: IntakePreview | null; ttl_seconds: number }> {
   return (await (await request('/api/v1/project/intake/pending', { cache: 'no-store' })).json())
 }
-export async function loadProjectIntakes(): Promise<PendingIntakeRow[]> {
-  return (await (await request('/api/v1/project/intakes', { cache: 'no-store' })).json()) as PendingIntakeRow[]
+/** 提交队列。status 区分"确实没有待确认"和"台账文件/锁不在"——空队列有两种意思。
+ *  取值与后端 _read_events 一致:available / partial / missing / unavailable。 */
+export interface PendingIntakeQueue { intakes: PendingIntakeRow[]; status: string }
+
+export async function loadProjectIntakes(): Promise<PendingIntakeQueue> {
+  const body = (await (await request('/api/v1/project/intakes', { cache: 'no-store' })).json()) as
+    | PendingIntakeQueue
+    | PendingIntakeRow[]
+  // 兼容旧形态:后端没给 status 时按"可读"处理,不把一个老响应说成故障。
+  return Array.isArray(body) ? { intakes: body, status: 'available' } : body
 }
 
 // ---- P5-c 成果一键浏览 ----
@@ -319,7 +327,15 @@ export interface ChatEvent {
   gate?: string; message?: string
   [key: string]: unknown
 }
-export interface ChatEventsPage { events: ChatEvent[]; max_seq: number }
+export interface ActiveJob {
+  job_id: string; kind: string; target: string
+}
+export interface ChatEventsPage {
+  events: ChatEvent[]
+  max_seq: number
+  /** 这条会话上还在跑的 job。attach 到一条已经在跑的运行流时,靠它认出不能往里发。 */
+  active_jobs?: ActiveJob[]
+}
 
 export async function loadChatModes(): Promise<ChatModesView> {
   return (await (await request('/api/v1/modes', { cache: 'no-store' })).json()) as ChatModesView
