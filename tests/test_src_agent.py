@@ -19,6 +19,8 @@ from agents.src_agent import (
     ExploreResult,
     SrcAgentLoop,
     AgentConfig,
+    EXPLORER_SYSTEM,
+    REASONER_SYSTEM,
     _blackboard_to_context,
     _fetch_for_analysis,
     _parse_json_response,
@@ -475,6 +477,44 @@ class TestKnowledgeActivation(unittest.TestCase):
             self.assertIn("已激活的打法", systems[1])      # 第二轮带着它上路
 
         self.assertEqual(["mobile"], list(loop._activated))
+
+
+class TestSingleDoctrineCopy(unittest.TestCase):
+    """doctrine 只留一份(技能包)。角色提示和最后兜底各留一份副本,迟早会漂 —— 而且
+    没有任何东西会提醒你它们已经不一致了。这组测试就是那个提醒。
+    """
+
+    DOCTRINE = ("授权安全研究员", "真价值优先", "不挖 CORS")
+
+    def test_the_pack_is_where_the_doctrine_lives(self):
+        from core import skills
+
+        text = skills.compose_prompt("pentest")
+        for phrase in self.DOCTRINE:
+            self.assertIn(phrase, text)
+
+    def test_the_role_prompts_do_not_restate_it(self):
+        for name, text in (("reasoner", REASONER_SYSTEM), ("explorer", EXPLORER_SYSTEM)):
+            for phrase in self.DOCTRINE:
+                self.assertNotIn(phrase, text, f"{name} 又抄了一份 doctrine")
+
+    def test_the_last_resort_fallback_is_not_a_persona(self):
+        """pack 读不到时它要说明"没拿到规范",不是假装自己就是规范。"""
+        from agents.src_chat import SRC_SYSTEM_PROMPT
+
+        for phrase in self.DOCTRINE:
+            self.assertNotIn(phrase, SRC_SYSTEM_PROMPT)
+        self.assertLess(len(SRC_SYSTEM_PROMPT), 500)
+
+    def test_the_hunt_still_gets_the_doctrine_at_runtime(self):
+        """收成一份的前提是它真的被拼进去了 —— 不是被删了。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            SrcBlackboard(bb_path)
+            loop = SrcAgentLoop(AgentConfig(blackboard_path=bb_path, scope=_make_scope()))
+            system = loop._system(REASONER_SYSTEM)
+        self.assertIn("授权安全研究员", system)      # 来自技能包
+        self.assertIn("你是 SRC Reasoner", system)   # 角色契约也还在
 
 
 class TestSelfTest(unittest.TestCase):

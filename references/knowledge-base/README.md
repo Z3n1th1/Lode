@@ -33,6 +33,7 @@
 | `401-403-bypass.md` | **禁开磨登录 HTML**（已收成一行）；业务 API 401 现场自己打 |
 | `api-gateway-test.md` | API 网关 |
 | `agent-tool-exec-test.md` | 对话口工具真执行（不是越狱、不是云 IDE RPC） |
+| `anon-id-chain-test.md` | 匿名总线吐 id → 详情不校验归属；坐席/管理端 JS 里的后台接口 |
 | `authbypass-test.md` | 认证绕过（未登录改密/IDaaS + 短表指针；英文字典已砍） |
 | `cache-poisoning-test.md` | 缓存投毒/欺骗（原有+补充） |
 | `clickjacking-test.md` | 缺头不写（已收成一行） |
@@ -60,15 +61,18 @@
 | `injection-test.md` | 注入（OR+total / 邮件订阅 iframe / SSTI 探测；英文百科已砍） |
 | `insecure-scm-test.md` | 专题知识（hack-skills 导入或融合） |
 | `jndi-injection-test.md` | 专题知识（hack-skills 导入或融合） |
+| `js-context-xss-bypass-test.md` | XSS 落在 JS 字符串里：闭合数学 / 禁用词替代（模板串调用、`*` 代 `+`）/ 哨兵闭合 |
 | `js-reverse-guide.md` | JS 逆向 |
 | `llm-security-test.md` | **禁开越狱教材**（已收成一行）；对话工具走 `agent-tool-exec-test.md` |
 | `logic-test.md` | 业务逻辑（支付/流程 + 商家促销绑定） |
+| `no-param-target-test.md` | 整站找不到参数：登录取 JS → 路由名反推参数 → fuzz 参数名（`order_by` 优先） |
 | `oauth-jwt-test.md` | OAuth/JWT/SAML/OIDC（原有+多源补充） |
 | `open-redirect-test.md` | 专题知识（hack-skills 导入或融合） |
 | `path-traversal-lfi-test.md` | 专题知识（hack-skills 导入或融合） |
 | `prototype-pollution-test.md` | 专题知识（hack-skills 导入或融合） |
 | `race-condition-test.md` | 竞态（原有+补充） |
 | `recon-methodology.md` | 侦察方法论 |
+| `signing-oracle-test.md` | 签名预言机：客户端提交完整待签串、服务端拿生产密钥代签；含 403/206 正负控与 IAM 收敛 |
 | `ssrf-test.md` | SSRF（IMDS 路径差 / GOPROXY / 对象存储回源） |
 | `subdomain-takeover-test.md` | 专题知识（hack-skills 导入或融合） |
 | `type-juggling-test.md` | 专题知识（hack-skills 导入或融合） |
@@ -78,4 +82,7 @@
 | `xss-test.md` | XSS（中文开场 + 冷门事件 + XSS→RCE / 自定义协议） |
 | `xxe-test.md` | 专题知识（hack-skills 导入或融合） |
 
-**合计：48 个知识文件**（不含本 README）。SRC 报告版式不在本库：见 `~/.grok/rules/vuln-report-format.md`。定级只认 format，本库不定级。
+**合计：52 个知识文件**（不含本 README）。其中 4 张是从 SRC 报告集蒸出来的
+（`signing-oracle-test` / `anon-id-chain-test` / `js-context-xss-bypass-test` /
+`no-param-target-test`）—— 只留打法，不带客户名。SRC 报告版式不在本库：见
+`~/.grok/rules/vuln-report-format.md`。定级只认 format，本库不定级。

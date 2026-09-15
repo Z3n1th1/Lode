@@ -76,18 +76,12 @@ def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
 # Prompt templates
 # ---------------------------------------------------------------------------
 
+# 这两个是**角色**提示,不是 doctrine。身份、真价值优先、协作姿态、响应启发式、禁止项
+# 都在技能包里(`.codebuddy/skills/<pack>/SKILL.md`),运行时由 `_doctrine()` 拼在前面。
+# 这里只留这个角色自己那份契约:它负责什么、输出长什么样。以前这两段各自抄了一份
+# doctrine,和 SKILL.md 三份并存 —— 抄本早晚会漂,所以收成一份。
 REASONER_SYSTEM = """\
-你是 SRC Reasoner，授权安全研究员的决策层。你读黑板，决定下一步挖什么。
-
-身份：不是扫描器，是理解业务意图后找认知盲区的研究员。
-思路：真价值优先 — 能打到高危/严重的才值得投入。
-
-## 力气分配（先打更容易出高危的）
-1. 未登录出他人数据 → 未授权访问
-2. 换 ID 出别人数据 → IDOR
-3. 认证接管 → 重置/改绑/换票
-4. 注入(SQLi) / SSRF / XSS / RCE → 有差分面就打
-5. JS 钥匙 → 硬编码 key、内部 API
+你是 SRC Reasoner，这次运行的决策层。你读黑板，决定下一步挖什么。
 
 ## 规则
 1. status="queued" 的 intent 是未验证的表面观察，不是漏洞。
@@ -139,28 +133,10 @@ Output JSON only.\
 """
 
 EXPLORER_SYSTEM = """\
-你是 SRC Explorer，授权安全研究员的执行层。你分析 HTTP 响应，找真实漏洞证据。
+你是 SRC Explorer，这次运行的执行层。你分析 HTTP 响应，找真实漏洞证据。
 
-## 分析决策树（收到响应后按序检查）
-
-1. **Status code**
-   200+JSON → 检查多余字段、内部 ID、敏感数据、换 ID 响应差异
-   200+HTML → 错误信息、注释、JS 内联、debug 输出
-   403 → 记录；检查 body 是否泄露信息
-   500 → 高价值：可能注入、unhandled exception 泄露
-   301/302 → 记录重定向目标（可能泄露内部 URL）
-
-2. **Headers**
-   Server/X-Powered-By → 版本 → CVE 关联
-   X-Debug/X-Trace → debug 模式
-   缺少 CSP/HSTS/X-Frame-Options → 记录
-
-3. **Body**
-   SQL 错误关键词 → SQLi 证据（SQL syntax/mysql_fetch/ORA-/pg_query/SQLSTATE）
-   Stack trace → 信息泄露（路径、版本、库）
-   JSON 多余字段 → 可能的 IDOR/过度暴露
-   内网 IP (10.x/172.16-31.x/192.168.x) → 信息泄露
-   凭据 pattern (AKIA/sk-/bearer/password=) → 敏感数据泄露
+响应该怎么读(status / headers / body 的启发式、SQLi 与 IDOR 的识别特征)在本次运行
+的作业规范里,已经拼在你的上下文前面;这里只重复一条底线:
 
 ## 规则
 - 每个 finding 必须引用响应中的具体内容（行号/header 名/JSON key）
@@ -480,6 +456,8 @@ class SrcAgentLoop:
         # 已激活的打法:name -> 正文。只在第一次激活时读盘,之后每轮复用。
         self._activated: Dict[str, str] = {}
         self._activation_log: List[Dict[str, Any]] = []
+        # 作业规范(技能包 dispatcher)只读一次,之后每轮复用。
+        self._doctrine_text: Optional[str] = None
         if config.knowledge_seed:
             self.activate(config.knowledge_seed, source="seed")
 
@@ -530,10 +508,20 @@ class SrcAgentLoop:
             parts.append(f"### {name}\n{text}")
         return "\n\n".join(parts)
 
+    def _doctrine(self) -> str:
+        """The pack's dispatcher — the single copy of identity, priorities and rules."""
+        if self._doctrine_text is None:
+            self._doctrine_text = _skills.compose_prompt(self.config.skill_pack)
+        return self._doctrine_text
+
     def _system(self, base: str) -> str:
-        """Role prompt + whatever is activated. This is the 'specialise' half."""
-        section = self._activated_section()
-        return f"{base}\n\n{section}" if section else base
+        """作业规范 + 角色契约 + 已激活的打法。
+
+        这三段合起来才是模型看到的 system prompt:doctrine 只有一份(技能包),角色只带
+        自己那份输出契约,激活的卡是这一趟临时加上去的专家。
+        """
+        parts = [part for part in (self._doctrine(), base, self._activated_section()) if part]
+        return "\n\n".join(parts)
 
     def run(self) -> Dict[str, Any]:
         """Main agent loop. Returns a summary dict."""
