@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.file_lock import replace_with_retry
 from core.event_log import EventLog
@@ -288,6 +288,106 @@ HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan
             "chat_turn": _handler_chat_turn, TARGET_RUN_KIND: _handler_target_run}
 
 
+# -- report back into the conversation ---------------------------------------
+# A run that ends silently is the worst outcome: the operator launched it from
+# the conversation, so the conversation is where its answer belongs.  The runner
+# already emits subtask_finished, but that is a machine event — this turns the
+# run's own blackboard into one assistant message so the turn is actually closed.
+#
+# The blackboard holds findings as *hints* (see SrcAgentLoop._process_explorer_result):
+# high confidence marks the intent blocked for human review, medium completes it.
+#
+# Every handler that leaves a blackboard behind, i.e. every one but ``chat_turn`` —
+# that turn already emits its own assistant_message, and reporting on it would just
+# echo the reply back.  Derived from HANDLERS so a new run kind cannot be forgotten.
+RUN_KINDS = frozenset(HANDLERS) - {"chat_turn"}
+
+REPORT_SYSTEM = """\
+你是 SRC 挖洞的执行总结者。只根据给定材料说话:不要推测,不要补充材料里没有的漏洞。
+中文,三句以内,直接给结论——发现了什么、置信度如何、下一步建议做什么。
+材料里没有发现就直说没有发现。不要复述任务数量,不要客套话。"""
+
+_REPORT_STATE: Dict[str, Any] = {"tried": False, "fn": None}
+
+
+def _report_llm() -> Optional[Callable[[str, str], Optional[str]]]:
+    """The completion seam for the report; ``None`` when no transport is available."""
+    if _REPORT_STATE["tried"]:
+        return _REPORT_STATE["fn"]
+    _REPORT_STATE["tried"] = True
+    try:
+        from core.llm_client import complete_messages
+    except Exception:  # noqa: BLE001 - a report is optional
+        _REPORT_STATE["fn"] = None
+        return None
+
+    def _complete(system: str, user: str) -> Optional[str]:
+        try:
+            message = complete_messages(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                timeout=60.0, max_tokens=800, temperature=0.2,
+            )
+        except Exception:  # noqa: BLE001 - a report must never fail a job
+            return None
+        if not message:
+            return None
+        return str(message.get("content") or "").strip() or None
+
+    _REPORT_STATE["fn"] = _complete
+    return _complete
+
+
+def _blackboard_digest(doc: Dict[str, Any]) -> str:
+    """Compact, factual digest of a finished run. Facts only, no interpretation."""
+    workmem = doc.get("workmem") if isinstance(doc.get("workmem"), dict) else {}
+    intents = [i for i in (doc.get("intents") or []) if isinstance(i, dict)]
+    hints = [h for h in (doc.get("hints") or []) if isinstance(h, dict)]
+    dead_ends = [d for d in (doc.get("dead_ends") or []) if isinstance(d, dict)]
+
+    def count(status: str) -> int:
+        return sum(1 for i in intents if str(i.get("status") or "") == status)
+
+    lines: List[str] = []
+    goal = str(workmem.get("goal") or "").strip()
+    if goal:
+        lines.append(f"目标:{goal}")
+    lines.append(
+        f"任务 {len(intents)} 个:完成 {count('completed')}、"
+        f"待人工复核 {count('blocked')}、死路 {len(dead_ends)}"
+    )
+    if hints:
+        lines.append("发现(explorer 给出,未经验证):")
+        for h in hints[-12:]:
+            lines.append(f"- {str(h.get('hint') or '')[:300]}")
+    else:
+        lines.append("发现:无")
+    focus = str(workmem.get("focus") or "").strip()
+    if focus:
+        lines.append(f"最后的推理焦点:{focus[:300]}")
+    return "\n".join(lines)
+
+
+def _report_back(state_dir: Path | str, job: JobRecord) -> None:
+    """Close the loop: turn a finished run's blackboard into one assistant message."""
+    if job.kind not in RUN_KINDS or not job.summary_ref:
+        return
+    try:
+        doc = json.loads(Path(job.summary_ref).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(doc, dict):
+        return
+    complete = _report_llm()
+    if complete is None:
+        return
+    text = complete(REPORT_SYSTEM, _blackboard_digest(doc))
+    if not text:
+        # No model, or it produced nothing: stay silent. A canned line would be
+        # noise dressed up as analysis.
+        return
+    _emit(state_dir, job.session_id, "assistant_message", {"text": text, "job_id": job.job_id})
+
+
 # -- notify (best effort) ----------------------------------------------------
 def _notify_hook() -> Optional[Callable[..., Any]]:
     if _NOTIFY_STATE["tried"]:
@@ -302,25 +402,42 @@ def _notify_hook() -> Optional[Callable[..., Any]]:
 
 
 def _on_terminal(job_id: str, status: str) -> None:
+    """A job reached a terminal state: close the loop, then notify.
+
+    The two steps are independent on purpose — the Feishu hook used to return
+    early when no broadcaster could be imported, which would have swallowed the
+    report for every installation without one.
+    """
+    state_dir = ""
+    job: Optional[JobRecord] = None
+    for key, entry in _ENTRIES.items():
+        found = entry["registry"].get(job_id)
+        if found is not None:
+            state_dir, job = key, found
+            break
+    if job is None:
+        return
+    # Only a completed run has a blackboard worth summarising; a failed one is
+    # already visible as a failed subtask row and its error text is internal.
+    if status == "completed":
+        _report_back(state_dir, job)
+    _notify_terminal(job, status)
+
+
+def _notify_terminal(job: JobRecord, status: str) -> None:
     """Feishu notification when a job finishes while the operator is away."""
     broadcaster = _notify_hook()
     if broadcaster is None:
         return
-    for entry in _ENTRIES.values():
-        registry: JobRegistry = entry["registry"]
-        job = registry.get(job_id)
-        if job is None:
-            continue
-        elapsed = max(0.0, (job.finished_at or time.time()) - (job.started_at or job.created_at))
-        label = {"completed": "finished", "failed": "failed", "interrupted": "interrupted"}.get(status, status)
-        try:
-            broadcaster.broadcast_task_terminal(
-                job.target or job.job_id, task_id=job_id, status=label,
-                elapsed=f"{int(elapsed)}s", report_ready=bool(job.summary_ref),
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        return
+    elapsed = max(0.0, (job.finished_at or time.time()) - (job.started_at or job.created_at))
+    label = {"completed": "finished", "failed": "failed", "interrupted": "interrupted"}.get(status, status)
+    try:
+        broadcaster.broadcast_task_terminal(
+            job.target or job.job_id, task_id=job.job_id, status=label,
+            elapsed=f"{int(elapsed)}s", report_ready=bool(job.summary_ref),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # -- singletons --------------------------------------------------------------
