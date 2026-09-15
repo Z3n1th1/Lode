@@ -55,7 +55,7 @@ export default function ChatView() {
             w7.woff2,再抬字重不会有任何变化,而 body 上 font-synthesis-weight:none
             禁止合成假粗体 —— 所以"更粗"只能靠字号和颜色,不是靠字重数字。 */}
         {freshSession ? (
-          <span className="text-[13.5px] font-bold tracking-wide text-fg" title={sessionId}>
+          <span className="text-[16px] font-bold tracking-wide text-fg" title={sessionId}>
             {sessionId}
           </span>
         ) : null}
