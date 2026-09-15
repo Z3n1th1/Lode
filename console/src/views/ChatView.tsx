@@ -50,10 +50,12 @@ export default function ChatView() {
       <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-4">
         <span className="text-[13px] font-semibold tracking-wide text-fg">对话</span>
         {/* 会话 id 只在"刚新建的这个会话"上出现:恢复的旧会话、从项目预览进来的
-            运行流都不带它。字面走 600,落到腾讯体真字面 W7 —— 浅色下 11px 的
-            W3 灰字读不出来。 */}
+            运行流都不带它。
+            font-bold 就是腾讯体的天花板:实测 600/700/800/900 全部落到同一个
+            w7.woff2,再抬字重不会有任何变化,而 body 上 font-synthesis-weight:none
+            禁止合成假粗体 —— 所以"更粗"只能靠字号和颜色,不是靠字重数字。 */}
         {freshSession ? (
-          <span className="text-[12.5px] font-semibold tracking-wide text-fg-2" title={sessionId}>
+          <span className="text-[13.5px] font-bold tracking-wide text-fg" title={sessionId}>
             {sessionId}
           </span>
         ) : null}
