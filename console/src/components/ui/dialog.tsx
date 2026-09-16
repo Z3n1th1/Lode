@@ -61,7 +61,7 @@ export function DialogDescription({
 }: ComponentProps<typeof DialogPrimitive.Description>) {
   return (
     <DialogPrimitive.Description
-      className={cn('font-mono text-[11px] text-fg-3', className)}
+      className={cn('font-mono text-xs text-fg-3', className)}
       {...props}
     />
   )

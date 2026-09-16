@@ -29,22 +29,22 @@ export default function ResultsModal() {
 
         <DialogBody>
           {loading ? (
-            <p className="text-[13px] text-fg-3">读取中…</p>
+            <p className="text-sm text-fg-3">读取中…</p>
           ) : !results ? (
-            <p className="text-[13px] text-fg-3">暂无成果数据。</p>
+            <p className="text-sm text-fg-3">暂无成果数据。</p>
           ) : (
             <div className="grid gap-5">
               <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
-                <span className="font-mono text-[10.5px] text-fg-4">会话 {results.session_count}</span>
+                <span className="font-mono text-2xs text-fg-4">会话 {results.session_count}</span>
                 {severity.length ? (
                   severity.map(([level, count]) => (
                     <span key={level} className="flex items-baseline gap-1.5">
                       <Badge tone={severityTone(level)}>{level}</Badge>
-                      <span className="font-mono text-[12px] text-fg tabular-nums">{count}</span>
+                      <span className="font-mono text-xs text-fg tabular-nums">{count}</span>
                     </span>
                   ))
                 ) : (
-                  <span className="text-[13px] text-fg-3">无发现</span>
+                  <span className="text-sm text-fg-3">无发现</span>
                 )}
               </div>
 
@@ -57,9 +57,9 @@ export default function ResultsModal() {
                     >
                       <div className="flex items-baseline gap-2.5">
                         <Badge tone={severityTone(finding.severity)}>{finding.severity || '?'}</Badge>
-                        <span className="text-[13px] text-fg">{finding.title}</span>
+                        <span className="text-sm text-fg">{finding.title}</span>
                       </div>
-                      <p className="mt-1 font-mono text-[11px] break-all text-fg-3">
+                      <p className="mt-1 font-mono text-xs break-all text-fg-3">
                         {finding.target || '—'} · {finding.rule}
                       </p>
                     </li>
@@ -69,7 +69,7 @@ export default function ResultsModal() {
 
               {results.attack_graph?.chains?.length ? (
                 <section>
-                  <h3 className="font-mono text-[10.5px] text-fg-3">攻击链</h3>
+                  <h3 className="font-mono text-2xs text-fg-3">攻击链</h3>
                   <ul className="mt-2 border-t border-line">
                     {results.attack_graph.chains.map((chain, index) => (
                       <li key={index} className="border-b border-line/60 py-2">
@@ -77,13 +77,13 @@ export default function ResultsModal() {
                           <Badge tone={chain.status === 'satisfied' ? 'ok' : 'warn'}>
                             {chain.status}
                           </Badge>
-                          <span className="text-[13px] text-fg">{chain.goal}</span>
-                          <span className="font-mono text-[11px] text-fg-4 tabular-nums">
+                          <span className="text-sm text-fg">{chain.goal}</span>
+                          <span className="font-mono text-xs text-fg-4 tabular-nums">
                             价值 {chain.value}
                           </span>
                         </div>
                         {chain.missing.length ? (
-                          <p className="mt-1 font-mono text-[11px] text-fg-3">
+                          <p className="mt-1 font-mono text-xs text-fg-3">
                             缺失:{chain.missing.join(' ')}
                           </p>
                         ) : null}
@@ -95,13 +95,13 @@ export default function ResultsModal() {
 
               {results.reports.length ? (
                 <section>
-                  <h3 className="font-mono text-[10.5px] text-fg-3">报告</h3>
+                  <h3 className="font-mono text-2xs text-fg-3">报告</h3>
                   <ul className="mt-2 border-t border-line">
                     {results.reports.map((report) => (
                       <li key={report.task_id} className="border-b border-line/60 py-1.5">
                         <button
                           type="button"
-                          className="font-mono text-[11.5px] text-accent hover:underline"
+                          className="font-mono text-xs text-accent hover:underline"
                           onClick={() => void usePanels.getState().openReport(report.task_id)}
                         >
                           {report.task_id}

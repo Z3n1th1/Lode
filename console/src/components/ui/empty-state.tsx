@@ -27,9 +27,9 @@ export default function EmptyState({
         className
       )}
     >
-      <p className="text-[13px] text-fg-2">{title}</p>
+      <p className="text-sm text-fg-2">{title}</p>
       {hint ? (
-        <p className="max-w-[46ch] font-mono text-[11.5px] leading-relaxed text-fg-4">{hint}</p>
+        <p className="max-w-[46ch] font-mono text-xs leading-relaxed text-fg-4">{hint}</p>
       ) : null}
       {action}
     </div>

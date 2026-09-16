@@ -80,7 +80,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
   if (kind === 'user_message') {
     return (
       <RowShell seq={event.seq} clock={clock} tint>
-        <p className="text-[14px] leading-[1.7] font-medium text-fg whitespace-pre-wrap">
+        <p className="text-base leading-[1.7] font-medium text-fg whitespace-pre-wrap">
           {event.text}
         </p>
       </RowShell>
@@ -90,7 +90,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
   if (kind === 'assistant_message') {
     return (
       <RowShell seq={event.seq} clock={clock}>
-        <p className="max-w-[68ch] text-[14px] leading-[1.75] whitespace-pre-wrap text-fg">
+        <p className="max-w-[68ch] text-base leading-[1.75] whitespace-pre-wrap text-fg">
           {event.text}
         </p>
       </RowShell>
@@ -113,7 +113,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
     const args = event.args ? String(event.args) : undefined
     return (
       <RowShell seq={event.seq} clock={clock}>
-        <p className="font-mono text-[11.5px] leading-6 text-fg-2">
+        <p className="font-mono text-xs leading-6 text-fg-2">
           <span className="mr-2 inline-block text-fg-4 select-none">调用</span>
           {toolCallSummary(event.tool, args)}
         </p>
@@ -133,7 +133,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
     const summary = summarizeToolResult(raw)
     return (
       <RowShell seq={event.seq} clock={clock}>
-        <p className="font-mono text-[11.5px] leading-6 text-fg-2">
+        <p className="font-mono text-xs leading-6 text-fg-2">
           <span className="mr-2 inline-block text-fg-4 select-none">结果</span>
           {summary || '（空）'}
         </p>
@@ -156,17 +156,17 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
         <Slab rule={SEVERITY_RULE[tone] ?? SEVERITY_RULE.neutral}>
           <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
             <Badge tone={tone}>{String(event.severity ?? '?')}</Badge>
-            <p className="text-[13.5px] leading-6 font-medium text-fg">{event.title}</p>
+            <p className="text-base leading-6 font-medium text-fg">{event.title}</p>
           </div>
           {event.endpoint || event.confidence ? (
-            <p className="mt-1 font-mono text-[11px] break-all text-fg-3">
+            <p className="mt-1 font-mono text-xs break-all text-fg-3">
               {event.endpoint}
               {event.endpoint && event.confidence ? '  ·  ' : ''}
               {event.confidence ? `置信度 ${event.confidence}` : ''}
             </p>
           ) : null}
           {event.detail ? (
-            <p className="mt-1.5 max-w-[68ch] text-[13px] leading-relaxed text-fg-2">
+            <p className="mt-1.5 max-w-[68ch] text-sm leading-relaxed text-fg-2">
               {String(event.detail)}
             </p>
           ) : null}
@@ -194,19 +194,19 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
               node.status === 'failed' && 'bg-danger'
             )}
           />
-          <p className="text-[13.5px] leading-6 font-medium text-fg">{title}</p>
+          <p className="text-base leading-6 font-medium text-fg">{title}</p>
           {node.target ? (
-            <code className="font-mono text-[11px] break-all text-fg-3">{node.target}</code>
+            <code className="font-mono text-xs break-all text-fg-3">{node.target}</code>
           ) : null}
           <span className="flex-1" />
           {node.findings ? (
-            <span className="font-mono text-[11px] text-fg-2 tabular-nums">
+            <span className="font-mono text-xs text-fg-2 tabular-nums">
               {node.findings} 个发现
             </span>
           ) : null}
           <span
             className={cn(
-              'text-[11.5px]',
+              'text-xs',
               node.status === 'running' && 'text-accent',
               node.status === 'failed' && 'text-danger',
               node.status === 'completed' && 'text-fg-3'
@@ -216,7 +216,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
           </span>
         </div>
         {node.updates.length ? (
-          <p className="mt-1 font-mono text-[11px] leading-6 break-all text-fg-4">
+          <p className="mt-1 font-mono text-xs leading-6 break-all text-fg-4">
             {node.updates.map((update, index) => (
               <span key={index}>
                 {index ? <span className="mx-1.5 text-fg-4/60">›</span> : null}
@@ -228,7 +228,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
           </p>
         ) : null}
         {node.error ? (
-          <p className="mt-1 text-[12px] break-words text-danger">{node.error}</p>
+          <p className="mt-1 text-xs break-words text-danger">{node.error}</p>
         ) : null}
       </RowShell>
     )
@@ -242,10 +242,10 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
         <Slab rule="border-l-warn">
           <div className="flex flex-wrap items-start gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-[13.5px] leading-6 font-medium text-fg">
+              <p className="text-base leading-6 font-medium text-fg">
                 需要人工确认:{gate}
               </p>
-              <p className="mt-1 max-w-[68ch] text-[13px] leading-relaxed text-fg-2">
+              <p className="mt-1 max-w-[68ch] text-sm leading-relaxed text-fg-2">
                 {event.message || '该动作需确认后才会继续。'}
               </p>
             </div>
@@ -254,7 +254,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
                 停止本轮
               </Button>
             ) : (
-              <span className="font-mono text-[11px] text-fg-4">已放行</span>
+              <span className="font-mono text-xs text-fg-4">已放行</span>
             )}
           </div>
         </Slab>
@@ -266,7 +266,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
     const title = modes.find((item) => item.name === event.mode)?.title ?? event.mode
     return (
       <RowShell seq={event.seq} clock={clock}>
-        <p className="font-mono text-[11.5px] text-fg-3">
+        <p className="font-mono text-xs text-fg-3">
           已切到「{title}」
         </p>
       </RowShell>
@@ -276,7 +276,7 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
   if (kind === 'error') {
     return (
       <RowShell seq={event.seq} clock={clock}>
-        <p className="max-w-[68ch] text-[13px] break-words text-danger">
+        <p className="max-w-[68ch] text-sm break-words text-danger">
           {String(event.message ?? event.detail ?? '出错了')}
         </p>
       </RowShell>

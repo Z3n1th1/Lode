@@ -38,7 +38,7 @@ export default function LoginView() {
         <div className="mt-5 h-px bg-line" />
 
         <form onSubmit={submit} className="mt-5">
-          <label htmlFor="password" className="block font-mono text-[10.5px] tracking-wide text-fg-4">
+          <label htmlFor="password" className="block font-mono text-2xs tracking-wide text-fg-4">
             口令
           </label>
           <div className="mt-2 flex items-center gap-2">
@@ -67,7 +67,7 @@ export default function LoginView() {
           <p
             id="password-error"
             role={loginError ? 'alert' : undefined}
-            className="mt-2 h-5 text-[12px] text-danger"
+            className="mt-2 h-5 text-xs text-danger"
           >
             {loginError}
           </p>

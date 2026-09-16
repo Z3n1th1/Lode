@@ -29,13 +29,13 @@ export default function InfoModal() {
 
         <DialogBody>
           {modal.loading ? (
-            <p className="text-[13px] text-fg-3">读取中…</p>
+            <p className="text-sm text-fg-3">读取中…</p>
           ) : modal.mono ? (
-            <pre className="overflow-x-auto rounded-sm border border-line bg-raised p-3 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-fg-2">
+            <pre className="overflow-x-auto rounded-sm border border-line bg-raised p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-fg-2">
               {modal.body}
             </pre>
           ) : (
-            <p className="max-w-[68ch] text-[13px] leading-relaxed whitespace-pre-wrap text-fg-2">
+            <p className="max-w-[68ch] text-sm leading-relaxed whitespace-pre-wrap text-fg-2">
               {modal.body}
             </p>
           )}
@@ -48,7 +48,7 @@ export default function InfoModal() {
                     href={link}
                     target="_blank"
                     rel="noreferrer noopener"
-                    className="font-mono text-[11.5px] break-all text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+                    className="font-mono text-xs break-all text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
                   >
                     {link}
                   </a>

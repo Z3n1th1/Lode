@@ -37,8 +37,8 @@ const TOGGLES: { key: keyof IntakeToggles; label: string }[] = [
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="grid grid-cols-[76px_minmax(0,1fr)] items-baseline gap-3">
-      <span className="font-mono text-[10.5px] text-fg-4">{label}</span>
-      <span className="min-w-0 break-all font-mono text-[12px] text-fg">{children}</span>
+      <span className="font-mono text-2xs text-fg-4">{label}</span>
+      <span className="min-w-0 break-all font-mono text-xs text-fg">{children}</span>
     </div>
   )
 }
@@ -76,7 +76,7 @@ export default function NewProjectModal() {
                   <ShieldCheck size={11} />
                   已落盘
                 </Badge>
-                <span className="text-[12.5px] text-fg-3">确认单已写进不可变的 TargetCard</span>
+                <span className="text-sm text-fg-3">确认单已写进不可变的 TargetCard</span>
               </div>
               <Row label="目标">{result.target}</Row>
               <Row label="target_id">{result.target_id}</Row>
@@ -88,7 +88,7 @@ export default function NewProjectModal() {
                   <Row label="任务">{result.run.job_id}</Row>
                 </>
               ) : null}
-              <p className="text-[12.5px] text-fg-4">{result.note}</p>
+              <p className="text-sm text-fg-4">{result.note}</p>
             </div>
           ) : preview ? (
             <div className="grid gap-3">
@@ -113,14 +113,14 @@ export default function NewProjectModal() {
                 </Row>
                 <Row label="确认单">{preview.options_digest.slice(0, 16)}…</Row>
               </div>
-              <p className="text-[12.5px] text-fg-4">
+              <p className="text-sm text-fg-4">
                 到这里为止什么都没跑。确认后按这张单落卡并立刻开跑,{formatTimestamp(preview.expires_at)} 之前有效。
               </p>
             </div>
           ) : (
             <div className="grid gap-3.5">
               <label className="block">
-                <span className="font-mono text-[10.5px] text-fg-4">目标 URL</span>
+                <span className="font-mono text-2xs text-fg-4">目标 URL</span>
                 <MonoInput
                   className="mt-1.5"
                   value={form.target_url}
@@ -133,7 +133,7 @@ export default function NewProjectModal() {
               </label>
 
               <label className="block">
-                <span className="font-mono text-[10.5px] text-fg-4">这次要看什么</span>
+                <span className="font-mono text-2xs text-fg-4">这次要看什么</span>
                 <Input
                   className="mt-1.5"
                   value={form.instruction}
@@ -145,12 +145,12 @@ export default function NewProjectModal() {
               </label>
 
               <div>
-                <span className="font-mono text-[10.5px] text-fg-4">策略档</span>
+                <span className="font-mono text-2xs text-fg-4">策略档</span>
                 <Popover open={profileOpen} onOpenChange={setProfileOpen}>
                   <PopoverTrigger asChild>
                     <button
                       type="button"
-                      className="mt-1.5 flex h-9 w-full items-center gap-2 rounded-md border border-line px-2.5 text-left font-mono text-[12px] text-fg-2 transition-colors hover:border-line-strong"
+                      className="mt-1.5 flex h-9 w-full items-center gap-2 rounded-md border border-line px-2.5 text-left font-mono text-xs text-fg-2 transition-colors hover:border-line-strong"
                     >
                       {selected?.label || form.engagement_profile || '未选择'}
                       <span className="flex-1" />
@@ -175,10 +175,10 @@ export default function NewProjectModal() {
               </div>
 
               <div>
-                <span className="font-mono text-[10.5px] text-fg-4">动作开关</span>
+                <span className="font-mono text-2xs text-fg-4">动作开关</span>
                 <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 md:grid-cols-3">
                   {TOGGLES.map(({ key, label }) => (
-                    <label key={key} className="flex items-center gap-2 text-[12.5px] text-fg-2">
+                    <label key={key} className="flex items-center gap-2 text-sm text-fg-2">
                       <Switch checked={form.toggles[key]} onCheckedChange={(value) => toggle(key, value)} />
                       {label}
                     </label>
@@ -188,7 +188,7 @@ export default function NewProjectModal() {
 
               <p
                 className={cn(
-                  'min-h-5 text-[12.5px]',
+                  'min-h-5 text-sm',
                   error ? 'text-danger' : ok ? 'text-ok' : 'text-fg-4'
                 )}
                 role={error ? 'alert' : undefined}
@@ -200,7 +200,7 @@ export default function NewProjectModal() {
 
           {preview || result ? (
             <p
-              className={cn('mt-3 min-h-5 text-[12.5px]', error ? 'text-danger' : 'text-fg-4')}
+              className={cn('mt-3 min-h-5 text-sm', error ? 'text-danger' : 'text-fg-4')}
               role={error ? 'alert' : undefined}
             >
               {error}

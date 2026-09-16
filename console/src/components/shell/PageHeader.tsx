@@ -21,8 +21,8 @@ export default function PageHeader({
         className
       )}
     >
-      <h1 className="text-[13px] font-semibold tracking-wide text-fg">{title}</h1>
-      {meta ? <span className="truncate font-mono text-[11px] text-fg-3">{meta}</span> : null}
+      <h1 className="text-sm font-semibold tracking-wide text-fg">{title}</h1>
+      {meta ? <span className="truncate font-mono text-xs text-fg-3">{meta}</span> : null}
       <span className="flex-1" />
       {actions}
     </header>

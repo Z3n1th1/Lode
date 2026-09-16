@@ -30,14 +30,14 @@ export default function RowShell({
       <div className="flex w-[var(--ledger-gutter)] shrink-0 items-start gap-2.5 border-r border-line/50 py-2 pr-2 pl-2 md:pl-4">
         <span
           className={cn(
-            'w-9 text-right font-mono text-[10.5px] tabular-nums select-none',
+            'w-9 text-right font-mono text-2xs tabular-nums select-none',
             tint ? 'text-accent' : 'text-fg-4'
           )}
         >
           {seq}
         </span>
         {/* 窄屏没有时间列的余地:序号是脊椎,时间可以省 */}
-        <span className="hidden font-mono text-[10.5px] text-fg-4 tabular-nums select-none md:inline">
+        <span className="hidden font-mono text-2xs text-fg-4 tabular-nums select-none md:inline">
           {clock}
         </span>
       </div>

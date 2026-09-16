@@ -45,7 +45,7 @@ export default function Composer({ draft, onDraft, onSend, onStop, running, bloc
                 : '输入目标或下一步动作'
           }
           className={cn(
-            'block w-full resize-none bg-transparent text-[14px] leading-[1.7] text-fg',
+            'block w-full resize-none bg-transparent text-base leading-[1.7] text-fg',
             'placeholder:text-fg-4 focus:outline-none disabled:cursor-not-allowed'
           )}
         />
@@ -53,7 +53,7 @@ export default function Composer({ draft, onDraft, onSend, onStop, running, bloc
         <div className="mt-1.5 flex items-center gap-2">
           <ModeSelect />
 
-          <span className="hidden flex-1 items-center gap-1 font-mono text-[10.5px] text-fg-4 sm:flex">
+          <span className="hidden flex-1 items-center gap-1 font-mono text-2xs text-fg-4 sm:flex">
             <kbd className="rounded-sm border border-line px-1 leading-4">Enter</kbd>
             发送
             <kbd className="ml-1.5 rounded-sm border border-line px-1 leading-4">Shift</kbd>
@@ -63,9 +63,9 @@ export default function Composer({ draft, onDraft, onSend, onStop, running, bloc
           <span className="flex-1 sm:hidden" />
 
           {blocked ? (
-            <span className="font-mono text-[11px] text-warn">等待人工确认</span>
+            <span className="font-mono text-xs text-warn">等待人工确认</span>
           ) : null}
-          {locked ? <span className="font-mono text-[11px] text-fg-4">运行中</span> : null}
+          {locked ? <span className="font-mono text-xs text-fg-4">运行中</span> : null}
 
           {running ? (
             <Tooltip label="停止本轮">

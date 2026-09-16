@@ -11,8 +11,8 @@ import { usePanels } from '../store/panels'
 function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-[10.5px] text-fg-4">{label}</span>
-      <span className={cn('font-mono text-[13px] tabular-nums', tone ?? 'text-fg')}>{value}</span>
+      <span className="font-mono text-2xs text-fg-4">{label}</span>
+      <span className={cn('font-mono text-sm tabular-nums', tone ?? 'text-fg')}>{value}</span>
     </div>
   )
 }
@@ -161,10 +161,10 @@ export default function HealthView() {
 
         {hostOnly ? (
           <div className="border-b border-line px-4 py-3">
-            <p className="text-[12.5px] text-fg-2">
+            <p className="text-sm text-fg-2">
               这台机器上还没有运行侧的数据,所以这里只有宿主机的内存。
             </p>
-            <ul className="mt-2 grid gap-1 text-[12px] leading-relaxed text-fg-4">
+            <ul className="mt-2 grid gap-1 text-xs leading-relaxed text-fg-4">
               <li>计划任务:调度器写过 scheduler_state.json 之后出现。</li>
               <li>服务:配了 LODE_MONITORED_SERVICES 之后出现。</li>
               <li>模型上游:模型池探测一次、写入 model_pool_status.json 之后出现。</li>
@@ -175,7 +175,7 @@ export default function HealthView() {
         {/* 全是 n/a 的时候整段不出现:这台机器上没有这些服务,列出来只是噪声 */}
         {services.length ? (
           <>
-            <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
+            <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
               服务
             </h2>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] border-b border-line">
@@ -187,9 +187,9 @@ export default function HealthView() {
                     className="flex items-center gap-2 border-r border-b border-line/60 px-4 py-2"
                   >
                     <span aria-hidden="true" className={cn('size-1.5 rounded-full', state.dot)} />
-                    <span className="truncate font-mono text-[11.5px] text-fg-2">{name}</span>
+                    <span className="truncate font-mono text-xs text-fg-2">{name}</span>
                     <span className="flex-1" />
-                    <span className="font-mono text-[11px] text-fg-4">{state.label}</span>
+                    <span className="font-mono text-xs text-fg-4">{state.label}</span>
                   </div>
                 )
               })}
@@ -199,7 +199,7 @@ export default function HealthView() {
 
         {tasks.length ? (
           <>
-            <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
+            <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
               计划任务
             </h2>
             <div className="flex flex-wrap gap-x-8 gap-y-2 border-b border-line px-4 py-3">
@@ -210,7 +210,7 @@ export default function HealthView() {
           </>
         ) : null}
 
-        <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
+        <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
           模型上游
         </h2>
         <Table

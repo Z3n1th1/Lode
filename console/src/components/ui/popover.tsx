@@ -53,7 +53,7 @@ export function MenuItem({
 export function MenuLabel({ className, ...props }: ComponentProps<'div'>) {
   return (
     <div
-      className={cn('px-2.5 pt-2 pb-1 font-mono text-[10.5px] tracking-wide text-fg-4', className)}
+      className={cn('px-2.5 pt-2 pb-1 font-mono text-2xs tracking-wide text-fg-4', className)}
       {...props}
     />
   )

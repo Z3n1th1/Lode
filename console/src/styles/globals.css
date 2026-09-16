@@ -56,6 +56,23 @@
   --font-sans: var(--app-font-sans);
   --font-mono: var(--app-font-mono);
 
+  /* 字号刻度:全站只有这五档。10.5/11/11.5/12/12.5/13/13.5/14 这种相邻 0.5px 的
+     分档收掉了 —— 差半像素眼睛看不出来,只是让"哪一档是正文"变得说不清。
+     组件里不要写 text-[11px] 这种一次性尺寸,取这里的档位,想整体调就动
+     --app-type-scale。 */
+  --text-2xs: var(--app-text-2xs);
+  --text-xs: var(--app-text-xs);
+  --text-sm: var(--app-text-sm);
+  --text-base: var(--app-text-base);
+  --text-lg: var(--app-text-lg);
+
+  /* 行高显式给:否则新档位会去继承父级行高,同一档在不同容器里长得不一样 */
+  --text-2xs--line-height: 1.5;
+  --text-xs--line-height: 1.55;
+  --text-sm--line-height: 1.65;
+  --text-base--line-height: 1.75;
+  --text-lg--line-height: 1.3;
+
   /* 小圆角:这是控制台,不是消费级 app。大圆角 = AI 味 */
   --radius-sm: 3px;
   --radius-md: 5px;
@@ -73,9 +90,13 @@
   --app-line: #24292b;
   --app-line-strong: #363c3f;
   --app-fg: #e9ebec;
+  /* 文字灰阶的每一档都必须过 WCAG AA(4.5:1)。fg-4 原来只有 2.46:1 —— 那是
+     "装饰性灰",却拿了 56 处当正文标签用,暗色下直接看不见(2026-09-16)。
+     色相不动:只把亮度抬到目标对比度,冷偏移沿用原值。实测算出来的比例:
+     fg 16.4 / fg-2 8.6 / fg-3 6.3 / fg-4 4.7 */
   --app-fg-2: #a6adb1;
-  --app-fg-3: #717a7e;
-  --app-fg-4: #4b5256;
+  --app-fg-3: #8b9397;
+  --app-fg-4: #757d81;
   --app-accent: #4da89f;
   --app-accent-fg: #07100f;
   --app-accent-soft: rgb(77 168 159 / 13%);
@@ -93,6 +114,16 @@
   --app-font-mono: "JetBrainsMono NFM", "JetBrainsMono NF", "JetBrains Mono",
     ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono",
     "Tencent Sans", "Microsoft YaHei", monospace;
+
+  /* 排版刻度 —— 全站字号唯一的调节处。
+     正文 16px 是中文能连续读的下限;腾讯体笔画细,再小一档就糊了。
+     觉得还要更大/更小:只改 --app-type-scale 一个数。 */
+  --app-type-scale: 1;
+  --app-text-2xs: calc(12.5px * var(--app-type-scale)); /* 字段名、表头、徽标、账本序号 */
+  --app-text-xs: calc(13.5px * var(--app-type-scale)); /* 元信息、等宽摘要、折叠标题 */
+  --app-text-sm: calc(14.5px * var(--app-type-scale)); /* 次级说明、表格行 */
+  --app-text-base: calc(16px * var(--app-type-scale)); /* 正文:消息、输入框、标题 */
+  --app-text-lg: calc(18px * var(--app-type-scale)); /* 页面级标题 */
 }
 
 :root[data-theme="light"] {
@@ -104,9 +135,10 @@
   --app-line: #e3e3e0;
   --app-line-strong: #cbcbc7;
   --app-fg: #16181a;
-  --app-fg-2: #55595e;
-  --app-fg-3: #83888e;
-  --app-fg-4: #a9aeb3;
+  /* 同暗色:四档全部过 4.5:1(17.2 / 9.0 / 6.3 / 4.7),否则浅色下一样读不出来 */
+  --app-fg-2: #40484c;
+  --app-fg-3: #575f63;
+  --app-fg-4: #6b7377;
   --app-accent: #2f7f77;
   --app-accent-fg: #ffffff;
   --app-accent-soft: rgb(47 127 119 / 10%);
@@ -130,8 +162,8 @@
     background: var(--app-bg);
     color: var(--app-fg);
     font-family: var(--app-font-sans);
-    font-size: 14px;
-    line-height: 1.6;
+    font-size: var(--app-text-base);
+    line-height: 1.7;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     /* 字重只认真字面:没有 500 字面的字体不要被合成为假粗体 */
@@ -225,9 +257,11 @@
   --ledger-gutter: 3.25rem;
 }
 
+/* 宽屏才够同时放序号和时间 —— 7.5rem 是按 13.5px 等宽下 "23:27" 的实际宽度
+   留的余量(7rem 会被时钟顶到边上),再窄就只剩序号 */
 @media (min-width: 768px) {
   :root {
-    --ledger-gutter: 7rem;
+    --ledger-gutter: 7.5rem;
   }
 }
 

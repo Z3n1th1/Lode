@@ -113,7 +113,7 @@ export default function SettingsView() {
         <p
           role={notice.tone === 'danger' ? 'alert' : undefined}
           className={cn(
-            'shrink-0 border-b border-line px-4 py-1.5 text-[12.5px]',
+            'shrink-0 border-b border-line px-4 py-1.5 text-sm',
             notice.tone === 'ok' ? 'bg-ok/8 text-ok' : 'bg-danger/8 text-danger'
           )}
         >
@@ -122,7 +122,7 @@ export default function SettingsView() {
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
+        <h2 className="border-b border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
           模型上游
         </h2>
 
@@ -130,7 +130,7 @@ export default function SettingsView() {
           providers.map((provider) => (
             <div key={provider.name} className="border-b border-line px-4 py-4">
               <div className="flex items-center gap-3">
-                <span className="font-mono text-[12.5px] text-fg">{provider.name}</span>
+                <span className="font-mono text-sm text-fg">{provider.name}</span>
                 <span className="flex-1" />
                 <Button
                   variant="quiet"
@@ -168,7 +168,7 @@ export default function SettingsView() {
                   />
                 </Field>
                 <Field label="清除已存 Key">
-                  <label className="flex h-9 items-center gap-2 text-[13px] text-fg-2">
+                  <label className="flex h-9 items-center gap-2 text-sm text-fg-2">
                     <Switch
                       checked={Boolean(provider.clear_key)}
                       onCheckedChange={(checked) => patch(provider.name, { clear_key: checked })}
@@ -183,7 +183,7 @@ export default function SettingsView() {
           <EmptyState title="暂无上游配置" hint="加一个上游后才能给分层模型选具体模型" />
         )}
 
-        <h2 className="border-y border-line bg-raised/60 px-4 py-1.5 font-mono text-[10.5px] tracking-wide text-fg-3">
+        <h2 className="border-y border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
           分层模型
         </h2>
         <div className="grid gap-3 px-4 py-4 md:grid-cols-2">
@@ -193,7 +193,7 @@ export default function SettingsView() {
                 <PopoverTrigger asChild>
                   <button
                     type="button"
-                    className="flex h-9 w-full items-center gap-2 rounded-md border border-line px-2.5 text-left font-mono text-[12px] text-fg-2 transition-colors hover:border-line-strong"
+                    className="flex h-9 w-full items-center gap-2 rounded-md border border-line px-2.5 text-left font-mono text-xs text-fg-2 transition-colors hover:border-line-strong"
                   >
                     {tiers[tier] || '未指定'}
                     <span className="flex-1" />
@@ -224,8 +224,8 @@ export default function SettingsView() {
         {/* 路径是"东西存在哪"的元信息,属于页脚;放在页头只是噪音 */}
         {settingsPath ? (
           <footer className="border-t border-line px-4 py-3">
-            <span className="font-mono text-[10.5px] text-fg-4">配置路径</span>
-            <span className="ml-2 font-mono text-[10.5px] break-all text-fg-3">{settingsPath}</span>
+            <span className="font-mono text-2xs text-fg-4">配置路径</span>
+            <span className="ml-2 font-mono text-2xs break-all text-fg-3">{settingsPath}</span>
           </footer>
         ) : null}
       </div>
@@ -245,8 +245,8 @@ function Field({
   return (
     <label className="block">
       <span className="flex items-baseline gap-2">
-        <span className="font-mono text-[10.5px] text-fg-4">{label}</span>
-        {hint ? <span className="text-[11px] text-fg-4">{hint}</span> : null}
+        <span className="font-mono text-2xs text-fg-4">{label}</span>
+        {hint ? <span className="text-xs text-fg-4">{hint}</span> : null}
       </span>
       <span className="mt-1.5 block">{children}</span>
     </label>

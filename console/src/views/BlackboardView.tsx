@@ -12,8 +12,8 @@ import type { SrcCandidate, SrcIntent } from '../api'
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="flex items-baseline gap-2">
-      <span className="font-mono text-[10.5px] text-fg-4">{label}</span>
-      <span className="font-mono text-[13px] text-fg tabular-nums">{value}</span>
+      <span className="font-mono text-2xs text-fg-4">{label}</span>
+      <span className="font-mono text-sm text-fg tabular-nums">{value}</span>
     </div>
   )
 }
@@ -99,18 +99,18 @@ export default function BlackboardView() {
             <ul className="px-4 pb-4">
               {view.dead_ends.map((row) => (
                 <li key={`d-${row.intent_id}-${row.created_at}`} className="border-b border-line/60 py-2">
-                  <p className="font-mono text-[11.5px] text-danger">{row.reason}</p>
-                  <p className="mt-0.5 text-[12.5px] text-fg-2">{row.detail}</p>
+                  <p className="font-mono text-xs text-danger">{row.reason}</p>
+                  <p className="mt-0.5 text-sm text-fg-2">{row.detail}</p>
                 </li>
               ))}
               {view.hints.map((row) => (
                 <li key={`h-${row.intent_id}-${row.created_at}`} className="border-b border-line/60 py-2">
-                  <p className="font-mono text-[11.5px] text-fg-4">{row.source}</p>
-                  <p className="mt-0.5 text-[12.5px] text-fg-2">{row.hint}</p>
+                  <p className="font-mono text-xs text-fg-4">{row.source}</p>
+                  <p className="mt-0.5 text-sm text-fg-2">{row.hint}</p>
                 </li>
               ))}
               {!view.dead_ends.length && !view.hints.length ? (
-                <li className="py-6 text-center text-[13px] text-fg-3">暂无记录</li>
+                <li className="py-6 text-center text-sm text-fg-3">暂无记录</li>
               ) : null}
             </ul>
           </Section>
@@ -132,8 +132,8 @@ function Section({
   return (
     <section className="shrink-0">
       <h2 className="flex items-baseline gap-2 border-b border-line bg-raised/60 px-4 py-1.5">
-        <span className="font-mono text-[10.5px] tracking-wide text-fg-3">{title}</span>
-        <span className="font-mono text-[10.5px] text-fg-4 tabular-nums">{count}</span>
+        <span className="font-mono text-2xs tracking-wide text-fg-3">{title}</span>
+        <span className="font-mono text-2xs text-fg-4 tabular-nums">{count}</span>
       </h2>
       {children}
     </section>

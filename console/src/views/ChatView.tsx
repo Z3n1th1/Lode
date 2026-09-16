@@ -59,19 +59,19 @@ export default function ChatView() {
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
       <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-4">
-        <span className="text-[13px] font-semibold tracking-wide text-fg">对话</span>
+        <span className="text-sm font-semibold tracking-wide text-fg">对话</span>
         {/* 会话 id 只在"刚新建的这个会话"上出现:恢复的旧会话、从项目预览进来的
             运行流都不带它。
             font-bold 就是腾讯体的天花板:实测 600/700/800/900 全部落到同一个
             w7.woff2,再抬字重不会有任何变化,而 body 上 font-synthesis-weight:none
             禁止合成假粗体 —— 所以"更粗"只能靠字号和颜色,不是靠字重数字。 */}
         {freshSession ? (
-          <span className="text-[16px] font-bold tracking-wide text-fg" title={sessionId}>
+          <span className="text-lg font-bold tracking-wide text-fg" title={sessionId}>
             {sessionId}
           </span>
         ) : null}
         <span className="flex-1" />
-        <span className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+        <span className="flex items-center gap-1.5 text-xs text-fg-3">
           <span
             aria-hidden="true"
             className={cn(
@@ -99,18 +99,18 @@ export default function ChatView() {
       {notice ? (
         <p
           role="alert"
-          className="shrink-0 border-b border-line bg-danger/8 px-4 py-1.5 text-[12.5px] text-danger"
+          className="shrink-0 border-b border-line bg-danger/8 px-4 py-1.5 text-sm text-danger"
         >
           {notice}
         </p>
       ) : null}
       {streamError ? (
-        <p className="shrink-0 border-b border-line bg-warn/8 px-4 py-1.5 text-[12.5px] text-warn">
+        <p className="shrink-0 border-b border-line bg-warn/8 px-4 py-1.5 text-sm text-warn">
           {streamError}
         </p>
       ) : null}
       {attachedRun ? (
-        <p className="shrink-0 border-b border-line bg-raised px-4 py-1.5 text-[12.5px] text-fg-2">
+        <p className="shrink-0 border-b border-line bg-raised px-4 py-1.5 text-sm text-fg-2">
           这条运行流不是本次发的,它还在跑。等它结束,或者点停止 —— 跑完会把结论写回这条对话。
         </p>
       ) : null}
@@ -144,8 +144,8 @@ function Opening() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div className="ledger-indent m-auto w-full py-10 pr-4">
-        <p className="font-mono text-[10.5px] tracking-wide text-fg-4">起点</p>
-        <p className="mt-2 max-w-[58ch] text-[13.5px] leading-relaxed text-fg-2">
+        <p className="font-mono text-sm tracking-wide text-fg-3">起点</p>
+        <p className="mt-2 max-w-[58ch] text-base leading-relaxed text-fg-2">
           一句话给出目标和动作,即可升级为一个子任务。执行过程与发现记录在同一条时间线上。
         </p>
 
@@ -160,8 +160,8 @@ function Opening() {
                 }}
                 className="grid w-full grid-cols-[7.5rem_minmax(0,1fr)] items-baseline gap-4 py-3 text-left transition-colors hover:bg-hover"
               >
-                <span className="text-[13.5px] font-medium text-fg">{starter.label}</span>
-                <span className="truncate text-[13px] text-fg-3">{starter.text}</span>
+                <span className="text-base font-medium text-fg">{starter.label}</span>
+                <span className="truncate text-sm text-fg-3">{starter.text}</span>
               </button>
             </li>
           ))}

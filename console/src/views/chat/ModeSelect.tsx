@@ -24,7 +24,7 @@ export default function ModeSelect() {
         <button
           type="button"
           aria-label="对话模式"
-          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-fg-2 transition-colors hover:bg-hover hover:text-fg"
+          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-sm text-fg-2 transition-colors hover:bg-hover hover:text-fg"
         >
           <span className={cn('size-1.5 rounded-full', autonomy.dot)} aria-hidden="true" />
           <span className="font-medium">{current?.title ?? '对话'}</span>
@@ -43,7 +43,7 @@ export default function ModeSelect() {
             >
               <span className={cn('size-1.5 shrink-0 rounded-full', meta.dot)} aria-hidden="true" />
               <span className="flex-1 truncate font-medium">{item.title}</span>
-              <span className="font-mono text-[10.5px] text-fg-3">{meta.label}</span>
+              <span className="font-mono text-2xs text-fg-3">{meta.label}</span>
               {item.name === mode ? <Check size={13} className="text-accent" /> : null}
             </MenuItem>
           )

@@ -199,12 +199,12 @@ export default function Ledger({ events, modes, busy, echo, onStop }: Props) {
           {echo ? (
             <div className="flex items-stretch border-b border-line/60 bg-accent-soft">
               <div className="flex w-[var(--ledger-gutter)] shrink-0 items-start gap-2.5 border-r border-line/50 py-2 pr-2 pl-2 md:pl-4">
-                <span className="w-9 text-right font-mono text-[10.5px] text-accent select-none">
+                <span className="w-9 text-right font-mono text-2xs text-accent select-none">
                   ·
                 </span>
               </div>
               <div className="min-w-0 max-w-[52rem] flex-1 px-3 py-2">
-                <p className="text-[14px] leading-[1.7] font-medium text-fg/60 whitespace-pre-wrap">
+                <p className="text-base leading-[1.7] font-medium text-fg/60 whitespace-pre-wrap">
                   {echo}
                 </p>
               </div>
@@ -214,7 +214,7 @@ export default function Ledger({ events, modes, busy, echo, onStop }: Props) {
           {busy ? (
             <div className="flex items-stretch border-b border-line/60">
               <div className="w-[var(--ledger-gutter)] shrink-0 border-r border-line/50 py-2 pr-2 pl-2 md:pl-4" />
-              <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 font-mono text-[11.5px] text-fg-3">
+              <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 font-mono text-xs text-fg-3">
                 <span className="flex gap-1" aria-hidden="true">
                   <i className="size-1 animate-[pulse-dot_1.2s_ease-in-out_infinite] rounded-full bg-accent" />
                   <i className="size-1 animate-[pulse-dot_1.2s_ease-in-out_.2s_infinite] rounded-full bg-accent" />

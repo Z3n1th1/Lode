@@ -41,7 +41,7 @@ export default function Table<T>({
 
   return (
     <div className={cn('min-h-0 flex-1 overflow-auto', className)}>
-      <table className="w-full border-collapse text-[13px]">
+      <table className="w-full border-collapse text-sm">
         <thead className="sticky top-0 z-10 bg-bg">
           <tr className="border-b border-line">
             {columns.map((column) => (
@@ -50,7 +50,7 @@ export default function Table<T>({
                 scope="col"
                 style={column.width ? { width: column.width } : undefined}
                 className={cn(
-                  'px-3 py-2 text-left font-mono text-[10.5px] font-normal tracking-wide text-fg-4',
+                  'px-3 py-2 text-left font-mono text-2xs font-normal tracking-wide text-fg-4',
                   column.align === 'right' && 'text-right'
                 )}
               >
@@ -76,7 +76,7 @@ export default function Table<T>({
                   style={column.width ? { width: column.width } : undefined}
                   className={cn(
                     'px-3 py-2 align-top text-fg-2',
-                    column.mono && 'font-mono text-[11.5px]',
+                    column.mono && 'font-mono text-xs',
                     column.align === 'right' && 'text-right tabular-nums'
                   )}
                 >

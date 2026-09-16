@@ -28,7 +28,7 @@ export default function Wordmark({ className, size = 22 }: { className?: string;
   return (
     <span className={cn('inline-flex items-center gap-2.5 text-fg', className)}>
       <GemMark size={size} />
-      <span className="font-mono text-[15px] leading-none font-medium tracking-[-.01em]">Lode</span>
+      <span className="font-mono text-base leading-none font-medium tracking-[-.01em]">Lode</span>
     </span>
   )
 }

@@ -27,13 +27,13 @@ export default function ToolRunRow({
 
   return (
     <RowShell seq={seq} clock={clock}>
-      <p className="font-mono text-[11.5px] leading-6 text-fg-2">
+      <p className="font-mono text-xs leading-6 text-fg-2">
         <span className="mr-2 inline-block text-fg-4 select-none">调用</span>
         {tool}
         <span className="ml-2 tabular-nums text-fg-4">×{pairs.length}</span>
       </p>
       {first ? (
-        <p className="font-mono text-[11px] leading-5 break-all text-fg-3">
+        <p className="font-mono text-xs leading-5 break-all text-fg-3">
           {first}
           {last && last !== first ? (
             <>
@@ -44,7 +44,7 @@ export default function ToolRunRow({
         </p>
       ) : null}
       {missing ? (
-        <p className="font-mono text-[11px] leading-5 text-fg-4">{missing} 次没有结果</p>
+        <p className="font-mono text-xs leading-5 text-fg-4">{missing} 次没有结果</p>
       ) : null}
 
       <Fold label={`明细 ${pairs.length}`}>
@@ -55,16 +55,16 @@ export default function ToolRunRow({
             const arg = toolCallPrimaryArg(call.args)
             return (
               <li key={call.seq} className="flex gap-3 px-2.5 py-1.5">
-                <span className="w-8 shrink-0 text-right font-mono text-[10.5px] text-fg-4 tabular-nums select-none">
+                <span className="w-8 shrink-0 text-right font-mono text-2xs text-fg-4 tabular-nums select-none">
                   {call.seq}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="font-mono text-[11px] leading-5 break-all text-fg-2">
+                  <p className="font-mono text-xs leading-5 break-all text-fg-2">
                     {arg || '—'}
                   </p>
                   <p
                     className={cn(
-                      'font-mono text-[11px] leading-5 break-all',
+                      'font-mono text-xs leading-5 break-all',
                       result ? 'text-fg-3' : 'text-fg-4'
                     )}
                   >
