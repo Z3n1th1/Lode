@@ -40,6 +40,7 @@
 | `authbypass-test.md` | 认证绕过（未登录改密/IDaaS + 短表指针；英文字典已砍） |
 | `cache-poisoning-test.md` | 缓存投毒/欺骗（原有+补充） |
 | `clickjacking-test.md` | 缺头不写（已收成一行） |
+| `client-trust-response-test.md` | 授权结论由响应字段决定：改校验回包即放行；密码由另一个响应下发 |
 | `cloud-ide-codex-rce-chain.md` | 云 IDE/Codex 系：弱口令→RPC RCE→集群/API Key 链（短表有指针） |
 | `cors-test.md` | **不挖勿开**（已收成一行） |
 | `crlf-injection-test.md` | 几乎不交（已收成一行） |
@@ -53,6 +54,7 @@
 | `el-injection-test.md` | 专题知识（hack-skills 导入或融合） |
 | `email-header-injection-test.md` | 几乎不交（已收成一行） |
 | `file-upload-test.md` | 文件上传（STS/列桶/分享鉴权等指针） |
+| `forwardable-ticket-test.md` | 签发物不绑定使用者：换别人的 ticket 即跨用户，含判据四件与"别写成完全匿名" |
 | `ghost-bits-cast-test.md` | Ghost Bits 原理+常用字+公式；逐字节两套表已砍 |
 | `graphql-test.md` | GraphQL（原有+补充） |
 | `hpp-test.md` | 几乎不交（已收成一行） |
@@ -68,9 +70,12 @@
 | `js-reverse-guide.md` | JS 逆向 |
 | `llm-security-test.md` | **禁开越狱教材**（已收成一行）；对话工具走 `agent-tool-exec-test.md` |
 | `logic-test.md` | 业务逻辑（支付/流程 + 商家促销绑定） |
-| `no-param-target-test.md` | 整站找不到参数：登录取 JS → 路由名反推参数 → fuzz 参数名（`order_by` 优先） |
+| `miniprogram-crypto-test.md` | 小程序解包与两层密钥（`g()` 再解一次）+ burp 自动解密；密文不是访问控制 |
+| `no-param-target-test.md` | 整站找不到参数：登录取 JS（含 chunk 补齐）→ 路由名反推参数 → fuzz 参数名（`order_by` 优先） |
 | `oauth-jwt-test.md` | OAuth/JWT/SAML/OIDC（原有+多源补充） |
 | `open-redirect-test.md` | 专题知识（hack-skills 导入或融合） |
+| `orderby-sqli-test.md` | 排序参数注入：报错语义判列、`\u0027` 过 JSON 层、两个排序参拆 payload、elt/decode 造 bool |
+| `orphan-origin-test.md` | 孤儿后端：域名死了源站还在，`--resolve`/Host 直打；401 是活后端不是死 |
 | `path-traversal-lfi-test.md` | 专题知识（hack-skills 导入或融合） |
 | `prototype-pollution-test.md` | 专题知识（hack-skills 导入或融合） |
 | `race-condition-test.md` | 竞态（原有+补充） |
@@ -85,8 +90,10 @@
 | `xss-test.md` | XSS（中文开场 + 冷门事件 + XSS→RCE / 自定义协议） |
 | `xxe-test.md` | 专题知识（hack-skills 导入或融合） |
 
-**合计：55 个知识文件**（不含本 README）。其中 7 张是从 SRC 报告集蒸出来的
+**合计：60 个知识文件**（不含本 README）。其中 12 张是从 SRC 报告集蒸出来的
 （`signing-oracle-test` / `anon-id-chain-test` / `js-context-xss-bypass-test` /
 `no-param-target-test` / `android-provider-test` / `android-broadcast-leak-test` /
-`android-intent-redirect-test`）—— 只留打法，不带客户名。SRC 报告版式不在本库：见
+`android-intent-redirect-test` / `orderby-sqli-test` / `orphan-origin-test` /
+`forwardable-ticket-test` / `miniprogram-crypto-test` / `client-trust-response-test`）
+—— 只留打法，不带客户名。SRC 报告版式不在本库：见
 `~/.grok/rules/vuln-report-format.md`。定级只认 format，本库不定级。
