@@ -21,6 +21,7 @@ from core.event_log import EventLog
 from core.intake_state import IntakeStateError
 from core.job_registry import ACTIVE, JobRecord, JobRegistry
 from core.job_runner import JobContext, JobRunner
+from core.targets import public_target_reason
 
 _LOCK = threading.Lock()
 _ENTRIES: Dict[str, Dict[str, Any]] = {}
@@ -49,6 +50,7 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     """
     from agents.src_agent import run_src_agent
     from agents.src_autopilot import SrcAutopilot
+    from core import skills
 
     state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
     out_dir = state_dir / "src-agent-runs" / run_id
@@ -244,6 +246,11 @@ def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     return {"summary_ref": str(out_dir / "src-blackboard.json"), "progress": {"phase": "done"}}
 
 
+# 一次粘贴最多起这么多任务。清单里 200 个域名不等于 200 个猎场:池子只有两个 worker,
+# 排到队列尾部的那些等于挂着一堆不会动的行。超出部分在对话里说清楚,不静默丢。
+MAX_FANOUT = 20
+
+
 def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     """One conversation turn: route the intent, run chat, escalate if asked.
 
@@ -261,32 +268,62 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     mode = modes.get_mode(mode_name)
 
     ctx.emit("user_message", text=text)
-    decision = intent_router.route(text, mode=mode)
+    # 确定性规则先跑,读不懂的说法才落到这一个便宜的分类调用。这个回调必须传 ——
+    # 不传的话 ``route`` 就只剩规则,而"看看这个站能不能打"这类说法只有分类器读得懂
+    # (以前这里就没传,兜底整段是死代码,所以没认出来的话永远是"只回话")。
+    decision = intent_router.route(text, mode=mode, llm_complete=src_chat._default_llm_complete)
 
     if decision.mode and decision.mode != mode.name:
         mode = modes.get_mode(decision.mode)
         ctx.emit("mode_changed", mode=mode.name)
 
-    unimplemented = ""
-    if decision.escalates and decision.target:
+    notice = ""
+    if decision.escalates and (decision.target or decision.targets):
         if decision.subtask_kind not in HANDLERS:
             # The router proposes a kind nothing can run — an existing kind whose
             # executor was pulled, or (more often) one the LLM classifier invented.
             # Launching it would only mint a job that fails ``no_handler:<kind>``,
             # so the turn says so in the conversation instead.
-            unimplemented = (f"（未启动后台任务:{decision.subtask_kind} 还没有执行器,"
-                             f"本轮只在对话里分析。）")
+            notice = (f"（未启动后台任务:{decision.subtask_kind} 还没有执行器,"
+                      f"本轮只在对话里分析。）")
         else:
-            # Subtask node: a blackboard intent + a durable job (DAG/lease handled there).
-            # The runner announces it (subtask_started) — don't emit a second copy here.
-            run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
-            subtask = get_registry(state_dir).create(
-                session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
-                target=decision.target,
-                payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
-                         "reason": decision.reason, "title": mode.title},
-            )
-            get_runner(state_dir).submit(subtask)
+            # One job per asset: a pasted list is a batch of assets, and each one
+            # hunts on its own target — a single job covering the union would
+            # widen every asset's scope to the whole paste. They all share the
+            # turn's turn_id, so they render inside this turn and one stop stops
+            # them all. ``decision.target`` is just the first seed (the Feishu
+            # path and older callers only know that field).
+            #
+            # Building the job is the last place that can refuse: past it the
+            # target is durable and will really be requested. The rule path
+            # already gated its seeds (``targets.py``), but a target the LLM
+            # classifier named never saw the gate — so re-check here rather than
+            # trust the producer.
+            seeds = [s for s in (decision.targets or [decision.target]) if s]
+            launchable = [s for s in seeds if not public_target_reason(s)]
+            skipped: List[str] = []
+            if len(launchable) < len(seeds):
+                skipped.append(f"{len(seeds) - len(launchable)} 个不是公网 http(s)")
+            launched = launchable[:MAX_FANOUT]
+            if len(launchable) > len(launched):
+                skipped.append(f"{len(launchable) - len(launched)} 个超出本轮 {MAX_FANOUT} 个的上限")
+
+            # Subtask node: a blackboard intent + a durable job (DAG/lease handled
+            # there). The runner announces each one (subtask_started) — don't emit
+            # a second copy here.
+            registry, runner = get_registry(state_dir), get_runner(state_dir)
+            for seed in launched:
+                run_id = f"SA-{int(time.time())}-{secrets.token_hex(3)}"
+                subtask = registry.create(
+                    session_id=session_id, turn_id=job.turn_id, kind=decision.subtask_kind,
+                    target=seed,
+                    payload={"run_id": run_id, "_state_dir": str(state_dir), "via": "intent_router",
+                             "reason": decision.reason, "title": mode.title},
+                )
+                runner.submit(subtask)
+            if skipped:
+                notice = (f"（这份清单识别到 {len(seeds)} 个目标,起了 {len(launched)} 个;"
+                          + "、".join(skipped) + " 没起。）")
 
     # 只注入 dispatcher + 第一轮地板模块。深度不走这里 —— 模型用 read_knowledge
     # 在认出面相的时候按需拉(见 core/skills.select_modules 与 SKILL.md §2)。
@@ -300,7 +337,7 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     # with no executor, and a mode can carry inline tools with no executor at all.
     reply = src_chat.chat(session, text, system_prompt=prompt or None,
                           tool_names=mode.tools, fallback_prompt=mode.system_fragment or None)
-    ctx.emit("assistant_message", text=f"{unimplemented}\n\n{reply}" if unimplemented else reply)
+    ctx.emit("assistant_message", text=f"{notice}\n\n{reply}" if notice else reply)
     return {"summary_ref": f"session:{session_id}", "progress": {"mode": mode.name,
                                                                 "routed": decision.action}}
 

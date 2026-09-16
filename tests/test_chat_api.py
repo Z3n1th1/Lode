@@ -48,6 +48,11 @@ class _ChatCase(unittest.TestCase):
                              session_secret=SECRET, static_dir=static)
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(console_jobs.shutdown_all)
+        # 兜底分类器现在真的会走 LLM(以前这条路是死代码)。测试一律短路:一个
+        # 用例想验证兜底行为就自己覆盖它,别的用例绝不允许碰网络。
+        llm = patch.object(agents_src_chat, "_default_llm_complete", lambda *a, **k: None)
+        llm.start()
+        self.addCleanup(llm.stop)
 
     def start_client(self, handlers=None) -> TestClient:
         if handlers is None:
@@ -206,7 +211,7 @@ class EscalationTests(_ChatCase):
         turn_job = resp.json()["job_id"]
 
         self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
-        self.assertEqual(["http://example.com"], seen)
+        self.assertEqual(["http://example.com/"], seen)
 
         jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
         kinds = sorted(j["kind"] for j in jobs)
@@ -230,7 +235,7 @@ class EscalationTests(_ChatCase):
         announce = next(e for e in started if e["job_kind"] == "src_loop")
         # the envelope kind stays "subtask_started" so the renderer can dispatch
         self.assertEqual("src_loop", announce["job_kind"])
-        self.assertEqual("http://example.com", announce["target"])
+        self.assertEqual("http://example.com/", announce["target"])
         # the announcement carries the mode's own title (core/modes.py), so a
         # rename there shows up here on purpose
         self.assertEqual("挖洞", announce["title"])
@@ -245,6 +250,139 @@ class EscalationTests(_ChatCase):
         finished = [e for e in events if e["kind"] == "subtask_finished"]
         self.assertEqual(2, len(finished))
         self.assertEqual({"completed"}, {e["status"] for e in finished})
+
+    def test_a_pasted_list_fans_out_to_one_job_per_asset(self) -> None:
+        """一份清单是一批资产:每个资产自己一个任务。
+
+        一个任务扫整份清单会把每个资产的授权范围放宽到全清单,所以按资产切开。
+        它们共用这一轮的 ``turn_id``,因此渲染在这一轮里,一个停止就能全停。
+        """
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "扫描一下 https://a.example.com https://b.example.com c.example.com",
+                                 "mode": "pentest"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        expected = ["https://a.example.com/", "https://b.example.com/", "https://c.example.com/"]
+        self.assertEqual(expected, sorted(seen))
+
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        loops = [j for j in jobs if j["kind"] == "src_loop"]
+        self.assertEqual(3, len(loops))
+        # 三个任务,三个不同的目标 —— 不是一个目标起三遍
+        self.assertEqual(expected, sorted(j["target"] for j in loops))
+        self.assertEqual({"completed"}, {j["status"] for j in loops})
+        turn_id = next(j for j in jobs if j["kind"] == "chat_turn")["turn_id"]
+        self.assertEqual({turn_id}, {j["turn_id"] for j in loops})
+
+        # 每个任务各自的 subtask_started,标题来自 mode(挖洞)
+        started = [e for e in client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+                   if e["kind"] == "subtask_started" and e["job_kind"] == "src_loop"]
+        self.assertEqual(3, len(started))
+        self.assertEqual(expected, sorted(e["target"] for e in started))
+
+    def test_a_list_longer_than_the_fan_out_cap_says_what_it_dropped(self) -> None:
+        """池子只有两个 worker,排到队列尾部的等于挂着一堆不会动的行。
+
+        超出上限的部分在对话里点名,不静默丢。
+        """
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        text = "扫描一下 " + " ".join(f"https://h{i}.example.com" for i in range(5))
+        with patch.object(console_jobs, "MAX_FANOUT", 2):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": text, "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual(2, len(seen))
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        self.assertEqual(2, len([j for j in jobs if j["kind"] == "src_loop"]))
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        reply = next(e for e in events if e["kind"] == "assistant_message")["text"]
+        self.assertIn("起了 2 个", reply)
+        self.assertIn("3 个超出本轮 2 个的上限", reply)
+
+    def test_a_non_public_seed_never_becomes_a_job(self) -> None:
+        """分类器给的目标没走过 targets.py 的闸门,所以建 job 前要再拦一次。
+
+        过了这一步目标就是持久化记录,并且真的会发请求 —— 私网地址不该走到那里。
+        清单里识别到的公网目标照起,被拦下的在对话里点名。
+        """
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        decided = intent_router.RouteDecision(
+            action=intent_router.ESCALATE, subtask_kind="src_loop", mode="pentest", reason="llm",
+            target="http://127.0.0.1:8080/admin",
+            targets=["http://127.0.0.1:8080/admin", "https://ok.example.com/"])
+        with patch.object(intent_router, "route", return_value=decided):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": "看看这两个", "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual(["https://ok.example.com/"], seen)
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        self.assertEqual(["https://ok.example.com/"],
+                         [j["target"] for j in jobs if j["kind"] == "src_loop"])
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        reply = next(e for e in events if e["kind"] == "assistant_message")["text"]
+        self.assertIn("1 个不是公网 http(s)", reply)
+
+    def test_a_route_without_targets_still_launches_its_one_target(self) -> None:
+        """分类器只回一个 ``target``(没有 ``targets``),不能就一个任务都不起。"""
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        decided = intent_router.RouteDecision(
+            action=intent_router.ESCALATE, subtask_kind="src_loop",
+            target="https://solo.example.com/", mode="pentest", reason="llm")
+        with patch.object(intent_router, "route", return_value=decided):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": "看看 https://solo.example.com/", "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual(["https://solo.example.com/"], seen)
+
+    def test_a_terse_verb_launches_without_asking_the_classifier(self) -> None:
+        """一句"扫 x.com y.com"要直接开跑,不该先花一次分类调用。"""
+        seen: list = []
+        asked: list = []
+        client = self._client_with_stubbed_loop(seen)
+        with patch.object(agents_src_chat, "_default_llm_complete",
+                          lambda system, user, **kw: asked.append(user) or None):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": "扫 https://a.example.com https://b.example.com",
+                                     "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual([], asked)
+        self.assertEqual(["https://a.example.com/", "https://b.example.com/"], sorted(seen))
+
+    def test_the_chat_path_hands_the_classifier_to_the_router(self) -> None:
+        """兜底分类器必须真的接上:``route`` 拿不到这个回调时就只剩规则,
+
+        而规则读不懂的说法(这里是"看看…能不能打")就永远是"只回话"。以前这条线
+        在 ``_handler_chat_turn`` 里没接线,整段兜底是死代码。
+        """
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+
+        def fake_complete(system, user, **kwargs):
+            self.assertIn("route user intent", system)
+            return '{"action":"escalate","subtask_kind":"src_loop","reason":"ask"}'
+
+        with patch.object(agents_src_chat, "_default_llm_complete", fake_complete):
+            resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                               json={"text": "看看 https://solo.example.com/ 能不能打",
+                                     "mode": "pentest"})
+            self.assertEqual(202, resp.status_code, resp.text)
+            self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+        self.assertEqual(["https://solo.example.com/"], seen)
 
     def test_chat_mode_with_a_target_does_not_escalate(self) -> None:
         seen: list = []

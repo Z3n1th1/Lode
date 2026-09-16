@@ -86,7 +86,102 @@ class IntentRouterTests(unittest.TestCase):
         decision = intent_router.route("扫描一下 https://target.example.com", mode=modes.get_mode("pentest"))
         self.assertTrue(decision.escalates)
         self.assertEqual("src_loop", decision.subtask_kind)
-        self.assertEqual("https://target.example.com", decision.target)
+        # 归一化后的写法(targets.assets 是唯一来源),所以补上了空路径的斜杠
+        self.assertEqual("https://target.example.com/", decision.target)
+        self.assertEqual(["https://target.example.com/"], decision.targets)
+
+    def test_a_target_list_escalates_with_one_seed_per_asset(self) -> None:
+        """一份清单是一批资产:决策带上全部种子,并且按入口/域名/主机分好栏。"""
+        decision = intent_router.route(
+            "扫描一下 https://a.example.com https://b.example.com c.example.com",
+            mode=modes.get_mode("pentest"))
+        self.assertTrue(decision.escalates)
+        self.assertEqual(
+            ["https://a.example.com/", "https://b.example.com/", "https://c.example.com/"],
+            decision.targets)
+        # 老调用方(飞书那条路)只认 target,它必须是第一个种子
+        self.assertEqual(decision.targets[0], decision.target)
+        self.assertEqual({"entrypoints": ["https://a.example.com/", "https://b.example.com/"],
+                          "domains": [], "hosts": ["c.example.com"]},
+                         decision.scope)
+        self.assertEqual("targets+action", decision.reason)
+
+    def test_an_embedded_url_glued_to_chinese_is_a_target(self) -> None:
+        decision = intent_router.route("对https://rei.com做信息收集", mode=modes.get_mode("pentest"))
+        self.assertTrue(decision.escalates)
+        self.assertEqual(["https://rei.com/"], decision.targets)
+
+    def test_a_prose_page_full_of_links_does_not_escalate(self) -> None:
+        """粘一整页说明进来时,里面散落的链接不该变成一串自动开跑的猎场。
+
+        目标是识别到了 —— 但它们不是这句话的主体(说明文字才是),所以只回报,
+        不发请求。确认单/对话是让操作员自己挑的地方。
+        """
+        prose = ("扫描一下 "
+                 "https://a.example.com https://b.example.com https://c.example.com "
+                 "https://d.example.com https://e.example.com https://docs.example.org "
+                 "这段说明我整段粘进来了 你读懂它再回答 "
+                 "不要对着里面提到的每个域名都跑一遍 那样等于对一堆越权目标发请求 "
+                 "我们应该谨慎一点 先看清楚授权范围 再决定要不要开跑")
+        decision = intent_router.route(prose, mode=modes.get_mode("pentest"))
+        self.assertEqual(intent_router.REPLY, decision.action)
+        self.assertEqual("targets_not_a_list", decision.reason)
+        self.assertEqual([], decision.targets)
+
+    def test_a_terse_verb_is_enough(self) -> None:
+        """操作员打一个"扫"字就该认 —— 动作词是按词根匹配的,不是整词表。"""
+        decision = intent_router.route("扫 x.example.com、y.example.com",
+                                       mode=modes.get_mode("pentest"))
+        self.assertTrue(decision.escalates)
+        self.assertEqual(["https://x.example.com/", "https://y.example.com/"], decision.targets)
+
+    def test_the_classifier_is_asked_when_no_rule_matched(self) -> None:
+        """目标在、但没有一个认识的动词 -> 兜底分类器说了算(而不是永远"只回话")。"""
+        asked: list = []
+
+        def fake_complete(system, user, **kwargs):
+            asked.append(user)
+            return '{"action":"escalate","subtask_kind":"src_loop","reason":"ask"}'
+
+        decision = intent_router.route("x.example.com 和 y.example.com 这两个",
+                                       mode=modes.get_mode("pentest"), llm_complete=fake_complete)
+        self.assertEqual(1, len(asked))
+        self.assertTrue(decision.escalates)
+        # 分类器只回答要不要开跑:目标以解析结果为准,所以两个都开
+        self.assertEqual(["https://x.example.com/", "https://y.example.com/"], decision.targets)
+        self.assertEqual("ask", decision.reason)
+
+    def test_the_classifier_cannot_widen_a_prose_page(self) -> None:
+        """说明文字里散落的链接不因为分类器点头就变成一串猎场 —— 这条先判,不花钱。"""
+        asked: list = []
+
+        def fake_complete(system, user, **kwargs):
+            asked.append(user)
+            return '{"action":"escalate","reason":"sure"}'
+
+        prose = ("https://a.example.com\nhttps://b.example.com\nhttps://c.example.com\n"
+                 "https://d.example.com\nhttps://e.example.com\nhttps://docs.example.org\n"
+                 "这是那份说明的正文,我整段粘进来了\n"
+                 "你要先读懂它在讲什么\n"
+                 "而不是对着里面提到的每个域名都跑一遍\n"
+                 "那样等于对一堆越权目标发请求\n"
+                 "谨慎一点\n"
+                 "先看清楚授权范围\n"
+                 "再决定要不要开跑\n"
+                 "谢谢")
+        decision = intent_router.route(prose, mode=modes.get_mode("pentest"),
+                                       llm_complete=fake_complete)
+        self.assertEqual([], asked)          # 没花钱:主体判定在分类器之前
+        self.assertEqual(intent_router.REPLY, decision.action)
+        self.assertEqual("targets_not_a_list", decision.reason)
+
+    def test_the_classifiers_own_target_is_ignored_when_we_parsed_the_text(self) -> None:
+        """模型嘴里的目标没有过闸门,也没有归一化,不能拿它当任务目标。"""
+        decision = intent_router.route(
+            "x.example.com 这个怎么样", mode=modes.get_mode("pentest"),
+            llm_complete=lambda *a, **k: '{"action":"escalate","target":"http://evil.example.net/","reason":"ask"}')
+        self.assertTrue(decision.escalates)
+        self.assertEqual(["https://x.example.com/"], decision.targets)
 
     def test_url_does_not_escalate_in_chat_mode(self) -> None:
         decision = intent_router.route("扫描一下 https://target.example.com", mode=modes.get_mode("chat"))

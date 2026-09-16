@@ -4,7 +4,6 @@ Extracted from the old control_plane monolith: request parsing guards,
 the public-target (SSRF) gate, scope normalisation and intake plumbing."""
 
 import hmac
-import ipaddress
 import json
 import math
 import re
@@ -14,7 +13,6 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -26,6 +24,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from core.file_lock import AdvisoryFileLock, replace_with_retry
 from core.operation_profile import list_profiles
 from core.src_blackboard import SrcBlackboard
+from core.targets import public_target_reason
 
 
 try:                                   # LLM 供应商设置(界面配置 key/分层模型)
@@ -100,37 +99,14 @@ _INTAKE_BRUTE_FLAGS = frozenset({"enabled", "path", "port", "password", "usernam
 
 
 def _valid_public_target(raw: str) -> str:
-    """校验目标为 http(s)/公网域名;拒私网/回环/链路本地/元数据/保留地址(防越权+SSRF 面)。返回归一化目标或空。"""
+    """校验目标为 http(s)/公网域名;拒私网/回环/链路本地/元数据/保留地址(防越权+SSRF 面)。返回归一化目标或空。
+
+    判定本身在 ``core.targets.public_target_reason`` —— 对话和建卡两条路必须用同一个
+    闸门,所以这里只保留调用方习惯的"通过则返回原串,否则空串"这个形状。
+    """
     s = (raw or "").strip()
-    if not (1 <= len(s) <= 300) or " " in s:
+    if public_target_reason(s):
         return ""
-    cand = s if "://" in s else "http://" + s
-    try:
-        u = urlparse(cand)
-    except Exception:  # noqa: BLE001
-        return ""
-    if u.scheme not in ("http", "https"):
-        return ""
-    # Credentials and malformed ports must never enter a durable intake
-    # record.  Besides preventing accidental secret persistence, this keeps
-    # Console validation aligned with SurfaceScope.check_url().
-    if u.username or u.password:
-        return ""
-    try:
-        _ = u.port
-    except ValueError:
-        return ""
-    host = (u.hostname or "").lower()
-    if not host or host == "localhost" or host.endswith(".localhost") or "." not in host and not host.replace(":", "").isascii():
-        return ""
-    try:
-        ip = ipaddress.ip_address(host)
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
-            return ""
-    except ValueError:
-        if "." not in host:                       # 非 IP 且无点=裸主机名,拒(要公网域名)
-            return ""
     return s[:300]
 
 
