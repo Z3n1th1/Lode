@@ -199,10 +199,11 @@ _MODULE_SIGNALS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
     (("idor", "越权", "水平权限", "垂直权限", "user_id", "org_id", "order_id"), "idor"),
     (("ssrf", "服务端请求伪造", "内网", "169.254.169.254"), "ssrf"),
     (("注入", "sqli", "sql syntax", "sqlstate", "ora-", "pg_query", "mysql_fetch",
-      "unclosed quotation", "命令执行", "rce", "ssti", "模板注入"), "injection"),
+      "unclosed quotation", "命令执行", "rce", "ssti", "模板注入",
+      "排序参数", "order_by", "orderbycolumn"), "injection"),
     (("jwt", "oauth", "认证", "单点", "重置密码", "改绑"), "auth"),
     (("组合链", "利用链", "提权", "接管", "串联"), "chains"),
-    (("侦察", "信息收集", "子域", "子域名", "攻击面", "端点"), "recon"),
+    (("侦察", "信息收集", "子域", "子域名", "攻击面", "端点", "源站", "孤儿"), "recon"),
 )
 # 故意收窄:这个词表同时用于"跑到中途遇到信号就激活",而激活的卡片会在**后续每一轮**
 # 都进 system prompt。所以精确比召回重要 —— `token` / `session` / `metadata` 这类词在
