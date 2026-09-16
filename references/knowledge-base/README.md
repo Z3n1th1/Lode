@@ -33,6 +33,9 @@
 | `401-403-bypass.md` | **禁开磨登录 HTML**（已收成一行）；业务 API 401 现场自己打 |
 | `api-gateway-test.md` | API 网关 |
 | `agent-tool-exec-test.md` | 对话口工具真执行（不是越狱、不是云 IDE RPC） |
+| `android-broadcast-leak-test.md` | 广播当数据出口：隐式/粘性广播带 token·cookie；priority 只对有序/粘性广播论先后 |
+| `android-intent-redirect-test.md` | 嵌套 Intent 绕过 `exported=false`；外部 extra 决定请求发往哪台服务器（权限重委托） |
+| `android-provider-test.md` | Provider：projection/sortOrder 拼 SQL（报错即证据）、openFile 缺 canonicalize → 读 shared_prefs |
 | `anon-id-chain-test.md` | 匿名总线吐 id → 详情不校验归属；坐席/管理端 JS 里的后台接口 |
 | `authbypass-test.md` | 认证绕过（未登录改密/IDaaS + 短表指针；英文字典已砍） |
 | `cache-poisoning-test.md` | 缓存投毒/欺骗（原有+补充） |
@@ -82,7 +85,8 @@
 | `xss-test.md` | XSS（中文开场 + 冷门事件 + XSS→RCE / 自定义协议） |
 | `xxe-test.md` | 专题知识（hack-skills 导入或融合） |
 
-**合计：52 个知识文件**（不含本 README）。其中 4 张是从 SRC 报告集蒸出来的
+**合计：55 个知识文件**（不含本 README）。其中 7 张是从 SRC 报告集蒸出来的
 （`signing-oracle-test` / `anon-id-chain-test` / `js-context-xss-bypass-test` /
-`no-param-target-test`）—— 只留打法，不带客户名。SRC 报告版式不在本库：见
+`no-param-target-test` / `android-provider-test` / `android-broadcast-leak-test` /
+`android-intent-redirect-test`）—— 只留打法，不带客户名。SRC 报告版式不在本库：见
 `~/.grok/rules/vuln-report-format.md`。定级只认 format，本库不定级。
