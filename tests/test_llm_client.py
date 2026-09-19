@@ -7,7 +7,10 @@ function-calling loop's protocol guarantees.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -220,6 +223,70 @@ class RunToolLoopTests(_Base):
             )
         self.assertEqual("", result["text"])
         self.assertEqual("boom", result["error"])
+
+
+class UpstreamConcurrencyTests(unittest.TestCase):
+    """按上游限并发:并发 worker 不等于并发打同一家 provider。
+
+    没有任何闸的时候,把 job 池从 2 提到 8 就等于"同时对一家上游发 8 个(再乘
+    每个 cycle 并行的 explore 数)请求",那是收集 429 的标准做法。
+    """
+
+    def setUp(self) -> None:
+        os.environ.pop("LODE_LLM_CONCURRENCY", None)
+        llm_client._GATES.clear()
+        self.addCleanup(os.environ.pop, "LODE_LLM_CONCURRENCY", None)
+        self.addCleanup(llm_client._GATES.clear)
+
+    def _hammer(self, host: str, threads: int, cap: int) -> int:
+        """Run `threads` concurrent completions at one upstream; return peak overlap."""
+        live = 0
+        peak = 0
+        lock = threading.Lock()
+        provider = {"name": "p", "base_url": f"https://{host}", "api_key": "k", "model": "m"}
+
+        def fake_provider(httpx, provider, messages, tools, timeout, max_tokens, temperature):
+            nonlocal live, peak
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.15)
+            with lock:
+                live -= 1
+            return {"role": "assistant", "content": "ok"}, ""
+
+        os.environ["LODE_LLM_CONCURRENCY"] = str(cap)
+        with patch.object(llm_client, "_httpx_provider", fake_provider), \
+                patch.object(llm_client, "ordered_pool", lambda prefer, only: [provider]):
+            workers = [threading.Thread(target=llm_client.complete_messages,
+                                        args=([{"role": "user", "content": "hi"}],))
+                       for _ in range(threads)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+        return peak
+
+    def test_one_upstream_never_exceeds_the_cap(self) -> None:
+        self.assertLessEqual(self._hammer("one.test", threads=6, cap=2), 2)
+
+    def test_two_upstreams_have_their_own_gates(self) -> None:
+        """两家上游各 2 个并发 → 合起来 4 个同时在飞。闸按上游分,不是全局一条。"""
+        peaks = [self._hammer(f"up{i}.test", threads=2, cap=2) for i in range(2)]
+        self.assertEqual([2, 2], peaks)
+
+    def test_the_env_var_sets_the_cap(self) -> None:
+        os.environ["LODE_LLM_CONCURRENCY"] = "3"
+        self.assertEqual(3, llm_client.configured_llm_concurrency())
+
+    def test_garbage_and_absurd_values_fall_back(self) -> None:
+        os.environ["LODE_LLM_CONCURRENCY"] = "lots"
+        self.assertEqual(llm_client.DEFAULT_LLM_CONCURRENCY,
+                         llm_client.configured_llm_concurrency())
+        os.environ["LODE_LLM_CONCURRENCY"] = "0"
+        self.assertEqual(1, llm_client.configured_llm_concurrency())
+        os.environ["LODE_LLM_CONCURRENCY"] = "9999"
+        self.assertEqual(64, llm_client.configured_llm_concurrency())
 
 
 if __name__ == "__main__":

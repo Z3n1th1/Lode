@@ -20,7 +20,8 @@ import json
 import os
 import re
 import sys
-import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -34,6 +35,7 @@ if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
 from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason
+from core.rate_limit import limiter_for
 from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
 from core import skills as _skills
 
@@ -339,7 +341,6 @@ def _fetch_for_analysis(
     scope: SurfaceScope,
     *,
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None,
-    last_request_at: float = 0.0,
 ) -> Dict[str, Any]:
     """Scope-checked GET fetch for LLM analysis. Returns structured result."""
     ok, reason = scope.check_url(url)
@@ -348,10 +349,11 @@ def _fetch_for_analysis(
     read_reason = _readonly_url_reason(url)
     if read_reason:
         return {"status": 0, "body": "", "headers": {}, "error": f"write_blocked:{read_reason}"}
-    # Rate limit
-    wait = scope.delay_seconds - (time.monotonic() - last_request_at)
-    if wait > 0:
-        time.sleep(wait)
+    # 限速交给全局桶(见 core/rate_limit)。以前是调用方传 last_request_at 进来、
+    # 自己 sleep —— 那份"间隔"是每个 agent 运行各一份,并发起来就是 N 倍速率。
+    limiter = limiter_for(scope)
+    if limiter is not None:
+        limiter.acquire(url)
     get = fetcher or _fetch_text
     try:
         status, body, headers = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
@@ -375,6 +377,9 @@ class AgentConfig:
     explorer_only: bool = False
     max_cycles: int = 20
     max_explore_per_cycle: int = 3
+    # 一个 cycle 里同时探几个 intent。1 = 老行为(串行)。每轮的墙钟大头是
+    # Explorer 那次 LLM 调用,所以这条直接决定单个 target 跑多快。
+    max_parallel_explore: int = 3
     worker_id: str = ""
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None
     llm_complete_fn: Optional[Callable[..., Optional[str]]] = None
@@ -407,6 +412,7 @@ class ExploreResult:
 SUMMARY_SCHEMA = "SrcAgentRunSummary/v1"
 MAX_CYCLES = 50
 MAX_EXPLORE_PER_CYCLE = 5
+MAX_PARALLEL_EXPLORE = 5
 MAX_HTTP_ACTIONS = 3
 BODY_LIMIT = 15_000
 _ALLOWED_METHODS = {"GET", "HEAD"}
@@ -448,14 +454,16 @@ class SrcAgentLoop:
             raise ValueError(f"max_cycles must be 1..{MAX_CYCLES}")
         if not 1 <= config.max_explore_per_cycle <= MAX_EXPLORE_PER_CYCLE:
             raise ValueError(f"max_explore_per_cycle must be 1..{MAX_EXPLORE_PER_CYCLE}")
+        if not 1 <= config.max_parallel_explore <= MAX_PARALLEL_EXPLORE:
+            raise ValueError(f"max_parallel_explore must be 1..{MAX_PARALLEL_EXPLORE}")
         self.config = config
         self.blackboard = SrcBlackboard(config.blackboard_path)
         self._complete = config.llm_complete_fn or _default_llm_complete
         self._worker_id = config.worker_id or f"src-agent-{os.getpid()}"
-        self._last_request_at = 0.0
         # 已激活的打法:name -> 正文。只在第一次激活时读盘,之后每轮复用。
         self._activated: Dict[str, str] = {}
         self._activation_log: List[Dict[str, Any]] = []
+        self._activation_lock = threading.Lock()
         # 作业规范(技能包 dispatcher)只读一次,之后每轮复用。
         self._doctrine_text: Optional[str] = None
         if config.knowledge_seed:
@@ -468,27 +476,34 @@ class SrcAgentLoop:
     # its place. Nothing here is loaded up front except the seed.
 
     def activate(self, names: Sequence[str], *, source: str) -> List[str]:
-        """Load playbooks by name, once each. Returns the ones newly activated."""
+        """Load playbooks by name, once each. Returns the ones newly activated.
+
+        并发起 explore 之后这个方法会被多个线程同时进:它是"先查再写"的
+        (``name in self._activated`` 之后再 ``self._activated[name] = text``),
+        没有锁的话同一篇打法会被激活两次、日志里出两条、字符预算也可能被冲过。
+        加锁比把状态拆开便宜,而且这一层本来就不在热路径上。
+        """
         added: List[str] = []
-        for raw in names or ():
-            name = str(raw or "").strip().removesuffix(".md")
-            if not name or name in self._activated:
-                continue
-            if len(self._activated) >= KNOWLEDGE_MAX_ACTIVE:
-                break
-            budget = KNOWLEDGE_TOTAL_CHARS - sum(len(t) for t in self._activated.values())
-            if budget < 200:
-                break
-            got = _skills.read_knowledge(name, limit=min(KNOWLEDGE_CARD_CHARS, budget))
-            text = str(got.get("text") or "")
-            if not text:
-                continue
-            self._activated[name] = text
-            self._activation_log.append({
-                "name": name, "source": source, "library": got.get("source"),
-                "chars": got.get("chars"), "truncated": bool(got.get("truncated")),
-            })
-            added.append(name)
+        with self._activation_lock:
+            for raw in names or ():
+                name = str(raw or "").strip().removesuffix(".md")
+                if not name or name in self._activated:
+                    continue
+                if len(self._activated) >= KNOWLEDGE_MAX_ACTIVE:
+                    break
+                budget = KNOWLEDGE_TOTAL_CHARS - sum(len(t) for t in self._activated.values())
+                if budget < 200:
+                    break
+                got = _skills.read_knowledge(name, limit=min(KNOWLEDGE_CARD_CHARS, budget))
+                text = str(got.get("text") or "")
+                if not text:
+                    continue
+                self._activated[name] = text
+                self._activation_log.append({
+                    "name": name, "source": source, "library": got.get("source"),
+                    "chars": got.get("chars"), "truncated": bool(got.get("truncated")),
+                })
+                added.append(name)
         return added
 
     def activate_from_signals(self, *texts: str, source: str) -> List[str]:
@@ -501,10 +516,14 @@ class SrcAgentLoop:
         return self.activate(names, source=source)
 
     def _activated_section(self) -> str:
-        if not self._activated:
+        # 先取快照再渲染:并发 explore 时另一个线程可能正在往 self._activated 里
+        # 加条目,直接迭代 items() 会 RuntimeError: dictionary changed size。
+        with self._activation_lock:
+            items = list(self._activated.items())
+        if not items:
             return ""
         parts = ["## 已激活的打法（这次运行已经加载,直接照着做,不要重新问一遍）"]
-        for name, text in self._activated.items():
+        for name, text in items:
             parts.append(f"### {name}\n{text}")
         return "\n\n".join(parts)
 
@@ -595,8 +614,14 @@ class SrcAgentLoop:
             self._apply_dependencies(selected)
 
             # Explore phase
-            for intent_id, hypothesis, check in self._plan_exploration(selected, snapshot):
-                result = self._explore(intent_id, hypothesis, check, snapshot)
+            #
+            # 这一轮的墙钟几乎全花在 Explorer 那次 LLM 调用上,所以选中的 intent
+            # 一起跑而不是排队跑。安全性由黑板自己保证:claim_intent 是文件锁里的
+            # 读-改-写,两个线程(或两个进程)抢同一个 intent 只会有一个拿到。
+            # 出网仍然只有一个桶 —— 并发的是"思考",不是"请求速率"。
+            planned = list(self._plan_exploration(selected, snapshot))
+            results = self._explore_batch(planned, snapshot)
+            for (intent_id, _hypothesis, _check), result in zip(planned, results):
                 if result.status == "deferred":
                     # 依赖未就绪或已被别的 worker 领走 —— 不是错误,下轮再看。
                     self._timeline("deferred", intent_id, result.dead_end_reason[:120] or "not_claimable")
@@ -853,6 +878,37 @@ class SrcAgentLoop:
             source="explorer-signal",
         )
 
+    def _explore_batch(
+        self,
+        planned: Sequence[Tuple[str, str, str]],
+        snapshot: Dict[str, Any],
+    ) -> List[ExploreResult]:
+        """Run this cycle's selected intents, concurrently when asked to.
+
+        Results come back in ``planned`` order, not completion order: the counters,
+        the timeline and the error list have to be the same whichever thread
+        happened to finish first, or a run stops being reproducible.
+
+        One intent crashing must not take the batch with it — it becomes an
+        ``error`` result and shows up in the run summary's ``errors`` like any
+        other failure.
+        """
+        if not planned:
+            return []
+        width = min(int(self.config.max_parallel_explore), len(planned), MAX_PARALLEL_EXPLORE)
+        if width <= 1:
+            return [self._explore(i, h, c, snapshot) for i, h, c in planned]
+        with ThreadPoolExecutor(max_workers=width, thread_name_prefix="src-explore") as pool:
+            futures = [pool.submit(self._explore, i, h, c, snapshot) for i, h, c in planned]
+            results: List[ExploreResult] = []
+            for (intent_id, _hypothesis, _check), future in zip(planned, futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # noqa: BLE001 - one intent must not sink the batch
+                    results.append(ExploreResult(intent_id, "error",
+                                                 dead_end_reason=f"explore_crashed:{exc}"))
+            return results
+
     def _explore(
         self,
         intent_id: str,
@@ -893,9 +949,7 @@ class SrcAgentLoop:
         fetch_result = _fetch_for_analysis(
             target_url, self.config.scope,
             fetcher=self.config.fetcher,
-            last_request_at=self._last_request_at,
         )
-        self._last_request_at = time.monotonic()
 
         if fetch_result["error"]:
             # Transient network failure → requeue with retry, don't burn the intent.
@@ -998,9 +1052,7 @@ class SrcAgentLoop:
                 fr = _fetch_for_analysis(
                     action_url, self.config.scope,
                     fetcher=self.config.fetcher,
-                    last_request_at=self._last_request_at,
                 )
-                self._last_request_at = time.monotonic()
                 if fr["error"]:
                     action_results.append(f"BLOCKED {method} {action_url}: {fr['error'][:120]}")
                 else:
@@ -1123,6 +1175,7 @@ def run_src_agent(
     *,
     max_cycles: int = 20,
     max_explore_per_cycle: int = 3,
+    max_parallel_explore: int = 3,
     reasoner_prefer: str = "deepseek",
     explorer_prefer: str = "",
     worker_id: str = "",
@@ -1146,6 +1199,7 @@ def run_src_agent(
         explorer_prefer=explorer_prefer,
         max_cycles=max_cycles,
         max_explore_per_cycle=max_explore_per_cycle,
+        max_parallel_explore=max_parallel_explore,
         worker_id=worker_id,
         fetcher=fetcher,
         llm_complete_fn=llm_complete_fn,

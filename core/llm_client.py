@@ -17,8 +17,11 @@ Every HTTP-to-LLM call in the product goes through here: ``agents.src_agent``
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from core.llm_pool import (
     DEFAULT_MODEL,
@@ -35,7 +38,41 @@ MAX_TOOL_ROUNDS = 6
 # advertise in the assistant message to what we are willing to answer.
 MAX_TOOL_CALLS_PER_ROUND = 8
 
+LLM_CONCURRENCY_ENV = "LODE_LLM_CONCURRENCY"
+DEFAULT_LLM_CONCURRENCY = 4
+
 _LAST_ERROR = {"error": ""}
+_GATES: Dict[str, threading.BoundedSemaphore] = {}
+_GATES_GUARD = threading.Lock()
+
+
+def configured_llm_concurrency() -> int:
+    """How many requests may be in flight at one upstream at a time.
+
+    Nothing used to bound this — every call built its own client — so raising the
+    job pool turned straight into N simultaneous requests at one provider, which
+    is how you collect 429s and half-finished runs.  The cap is per **upstream**,
+    keyed on the endpoint host, because two config entries that differ only by
+    model still draw on one quota.
+    """
+    raw = os.environ.get(LLM_CONCURRENCY_ENV, "").strip()
+    if not raw:
+        return DEFAULT_LLM_CONCURRENCY
+    try:
+        return max(1, min(int(raw), 64))
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_CONCURRENCY
+
+
+def _gate_for(provider: Dict[str, str]) -> threading.BoundedSemaphore:
+    host = (urlparse(str(provider.get("base_url") or "")).netloc or "unknown").lower()
+    with _GATES_GUARD:
+        gate = _GATES.get(host)
+        if gate is None:
+            gate = threading.BoundedSemaphore(configured_llm_concurrency())
+            _GATES[host] = gate
+        return gate
+
 
 
 def last_error() -> str:
@@ -180,8 +217,11 @@ def complete_messages(messages: List[Dict[str, Any]], *, tools: Any = None,
         return message
     last = ""
     for provider in pool:
-        message, error = _httpx_provider(httpx, provider, messages, tools, timeout,
-                                         max_tokens, temperature)
+        # 按上游限流,不是按配置项:同一个 base_url 的两个 model 共用一个配额。
+        # 闸只在"这一家"上排队,所以一家在重试退避时不会占住另一家的名额。
+        with _gate_for(provider):
+            message, error = _httpx_provider(httpx, provider, messages, tools, timeout,
+                                             max_tokens, temperature)
         if message is not None:
             clear_error()
             return message
@@ -257,6 +297,8 @@ def run_tool_loop(
 __all__ = [
     "MAX_TOOL_ROUNDS",
     "MAX_TOOL_CALLS_PER_ROUND",
+    "DEFAULT_LLM_CONCURRENCY",
+    "configured_llm_concurrency",
     "complete_messages",
     "run_tool_loop",
     "sanitize_messages",

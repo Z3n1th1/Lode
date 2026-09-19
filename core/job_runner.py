@@ -1,8 +1,8 @@
 """Bounded worker pool that runs durable :mod:`core.job_registry` jobs.
 
-Replaces the Console's ``threading.Thread(daemon=True)`` background run. A fixed
-pool (default 2 workers) executes one job at a time; job state is on disk so a
-restart never loses the record, and the worker re-checks the durable
+Replaces the Console's ``threading.Thread(daemon=True)`` background run. A pool of
+``LODE_JOB_WORKERS`` workers (default 8) executes jobs concurrently; job state is on
+disk so a restart never loses the record, and the worker re-checks the durable
 ``stop_requested`` flag at every phase boundary so a stop is cooperative.
 
 Absorbed from the old (unwired) ``core.orchestrator``: phase retry with linear
@@ -21,6 +21,32 @@ from core import job_registry as jr
 
 # kind -> handler(job, ctx) -> result dict (may include "summary_ref", "progress")
 Handler = Callable[[jr.JobRecord, "JobContext"], Optional[Dict[str, Any]]]
+
+JOB_WORKERS_ENV = "LODE_JOB_WORKERS"
+DEFAULT_JOB_WORKERS = 8
+MAX_JOB_WORKERS = 64
+
+
+def configured_job_workers() -> int:
+    """How many jobs may be in flight at once.
+
+    The pool is what turns "n targets queued" into "n things actually running".  It
+    was hardcoded to 2, so pasting a 250-host scope ran two hosts at a time and
+    queued the other 248 regardless of what the scope said.
+
+    Raising it is only *safe* because request pacing is one bucket per scope
+    (``core.rate_limit``) instead of one clock per worker.  Without that, N workers
+    would send N times the requests the program agreed to — so if you ever bypass
+    the limiter, put this back to 1 before you do.
+    """
+    raw = os.environ.get(JOB_WORKERS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_JOB_WORKERS
+    try:
+        return max(1, min(int(raw), MAX_JOB_WORKERS))
+    except (TypeError, ValueError):
+        return DEFAULT_JOB_WORKERS
+
 
 
 class JobContext:
@@ -65,7 +91,7 @@ class JobRunner:
     def __init__(self, *, registry: jr.JobRegistry, handlers: Optional[Dict[str, Handler]] = None,
                  on_event: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
                  notify_fn: Optional[Callable[[str, str], None]] = None,
-                 max_workers: int = 2, max_phases: int = 3,
+                 max_workers: Optional[int] = None, max_phases: int = 3,
                  retry_backoff: float = 1.5) -> None:
         self.registry = registry
         self.handlers: Dict[str, Handler] = dict(handlers or {})
@@ -73,7 +99,10 @@ class JobRunner:
         self.notify_fn = notify_fn
         self.max_phases = max(1, max_phases)
         self.retry_backoff = retry_backoff
-        self._pool = ThreadPoolExecutor(max_workers=max(1, max_workers),
+        # 显式传值优先,没传才看环境变量 —— 测试要能钉死一个确定的并发度,
+        # 否则它会跟着操作员的 LODE_JOB_WORKERS 变。
+        self.max_workers = max(1, int(max_workers)) if max_workers else configured_job_workers()
+        self._pool = ThreadPoolExecutor(max_workers=self.max_workers,
                                         thread_name_prefix="lode-job")
         self._contexts: Dict[str, JobContext] = {}
         self._lock = threading.Lock()

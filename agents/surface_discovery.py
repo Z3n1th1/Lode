@@ -22,6 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from core.rate_limit import limiter_for
+
 
 API_PREFIXES = {
     "api", "apis", "openapi", "v1", "v2", "v3", "rest", "rpc", "graphql",
@@ -404,10 +406,11 @@ def discover_surface(
         raise ValueError("target_rejected:" + read_reason)
     result = SurfaceResult(target=target, base_url=base)
     get = fetcher or _fetch_text
-    last_request = 0.0
+    # 限速不在这层记账了:每个调用点自己数 last_request 就是"每个 worker 一份配额",
+    # 起 N 个 worker 就等于把程序写明的 req/s 乘 N。桶是全局的,见 core/rate_limit。
+    limiter = limiter_for(scope)
 
     def fetch(url: str, *, follow: bool = True) -> tuple[int, str, dict[str, str]]:
-        nonlocal last_request
         ok, reason = scope.check_url(url)
         if not ok:
             result.errors.append(f"blocked:{url}:{reason}")
@@ -416,10 +419,8 @@ def discover_surface(
         if read_reason:
             result.errors.append(f"blocked:{url}:{read_reason}")
             return 0, "", {}
-        wait = scope.delay_seconds - (time.monotonic() - last_request)
-        if wait > 0:
-            time.sleep(wait)
-        last_request = time.monotonic()
+        if limiter is not None:
+            limiter.acquire(url)
         status, text, headers = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
         result.requests.append({"url": url, "status": status})
         if follow and 300 <= status < 400:
