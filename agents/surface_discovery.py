@@ -213,6 +213,9 @@ class SurfaceScope:
 class SurfaceResult:
     target: str
     base_url: str
+    # 基址跟过一跳之后落地的地址。空表示没发生重定向 —— 别拿它当"最终状态",
+    # 它只回答"那一跳跳到了哪"。
+    final_url: str = ""
     status: int = 0
     fingerprints: set[str] = field(default_factory=set)
     scripts: set[str] = field(default_factory=set)
@@ -368,7 +371,8 @@ def _fetch_text(url: str, *, timeout: float, max_bytes: int = 1_500_000) -> tupl
             charset = charset_match.group(1) if charset_match else "utf-8"
             return int(response.status), body.decode(charset, errors="replace"), headers
     except HTTPError as exc:
-        return int(exc.code), "", {}
+        # 把响应头留下:3xx 的 Location 就在这里面,后面跟一跳要用。
+        return int(exc.code), "", {str(key).lower(): str(value) for key, value in (exc.headers or {}).items()}
     except (OSError, URLError, TimeoutError, ValueError):
         return 0, "", {}
 
@@ -402,7 +406,7 @@ def discover_surface(
     get = fetcher or _fetch_text
     last_request = 0.0
 
-    def fetch(url: str) -> tuple[int, str, dict[str, str]]:
+    def fetch(url: str, *, follow: bool = True) -> tuple[int, str, dict[str, str]]:
         nonlocal last_request
         ok, reason = scope.check_url(url)
         if not ok:
@@ -418,10 +422,38 @@ def discover_surface(
         last_request = time.monotonic()
         status, text, headers = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
         result.requests.append({"url": url, "status": status})
+        if follow and 300 <= status < 400:
+            # 跟一跳。不跟的话,回 301/302 的站正文一个字节都取不到,面就是空的 ——
+            # 看上去像"这个站没东西",其实是重定向没走(login 跳到 /login/、
+            # stats 跳到别的站,都是这种)。
+            #
+            # 只跟一跳(``follow=False`` 掐死递归),而且跳过去的目标要重新走一遍
+            # 这个函数:scope 闸门、只读闸门、限速一样不能少。重定向可以指向任何
+            # 地方,包括授权范围外 —— 不能因为它是"跳转"就放行。被闸门拦下时
+            # 这里原样返回那个 3xx,不假装跳成功。
+            location = str(headers.get("location") or "").strip()
+            if location:
+                hop = urljoin(url, location)
+                hop_status, hop_text, hop_headers = fetch(hop, follow=False)
+                if hop_status:
+                    # 只有真跳成了才记下来 —— 被闸门拦下的那一跳不算"落点",
+                    # 否则 final_url 会写成一个我们从没请求过的站外地址。
+                    result.requests[-1]["redirected_to"] = hop
+                    return hop_status, hop_text, hop_headers
         return status, text, headers
 
+    started_at = len(result.requests)
     status, html, headers = fetch(start + ("/" if not parsed.path else ""))
     result.status = status
+    # 基址跳走了的话,落地的地址才是这个站真正的根 —— 后面 robots/sitemap/相对
+    # 脚本链接都要按它解析,否则从 /login/ 页里抽出来的资源会挂到旧根上。
+    final_url = next((str(row.get("redirected_to")) for row in result.requests[started_at:]
+                      if row.get("redirected_to")), "")
+    if final_url:
+        result.final_url = final_url
+        landed = urlsplit(final_url)
+        base = urlunsplit((landed.scheme.lower(), landed.netloc, "", "", ""))
+        start = final_url.rstrip("/") or base
     result.fingerprints.update(_fingerprints(html, headers.get("content-type", "")))
     if status == 0:
         result.errors.append("base_unreachable")
@@ -477,6 +509,7 @@ def surface_to_dict(result: SurfaceResult) -> dict[str, Any]:
         "schema": "SrcSurfaceResult/v1",
         "target": result.target,
         "base_url": result.base_url,
+        "final_url": result.final_url,
         "status": result.status,
         "fingerprints": sorted(result.fingerprints),
         "scripts": sorted(result.scripts),

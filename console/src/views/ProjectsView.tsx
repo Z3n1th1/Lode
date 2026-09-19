@@ -78,15 +78,21 @@ const INTAKE_COLUMNS: Column<PendingIntakeRow>[] = [
 
 export default function ProjectsView() {
   const projects = usePanels((state) => state.projects)
+  const projectTotal = usePanels((state) => state.projectTotal)
+  const projectsMoreError = usePanels((state) => state.projectsMoreError)
   const intakes = usePanels((state) => state.intakes)
   const intakeQueueStatus = usePanels((state) => state.intakeQueueStatus)
   const loading = usePanels((state) => state.loading)
+
+  // 列表是分页的:页头写的必须是总数,不是本页条数。
+  const shown = `${projectTotal} 个目标`
+  const hasMore = projects.length < projectTotal
 
   return (
     <section className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="项目"
-        meta={`${projects.length} 个目标`}
+        meta={hasMore ? `${projects.length} / ${shown}` : shown}
         actions={
           <>
             <Button
@@ -115,6 +121,29 @@ export default function ProjectsView() {
           emptyHint="新建一个目标后会出现在这里"
           onRowClick={(row) => usePanels.getState().selectProject(row.project_id)}
         />
+
+        {/* 还有没取回来的项目时,必须让操作者看得见"下面还有"。失败也要说 ——
+            一个点了没反应的按钮,和当初那个静默截断是同一类毛病。 */}
+        {hasMore || projectsMoreError ? (
+          <div className="flex shrink-0 items-center gap-3 border-b border-line px-3 py-2">
+            {projectsMoreError ? (
+              <span className="text-xs text-warn">加载下一页失败:{projectsMoreError}</span>
+            ) : (
+              <span className="font-mono text-2xs text-fg-4">
+                已显示 {projects.length} / {projectTotal}
+              </span>
+            )}
+            <span className="flex-1" />
+            <Button
+              variant="quiet"
+              size="sm"
+              disabled={!hasMore}
+              onClick={() => void usePanels.getState().loadMoreProjects()}
+            >
+              加载更多
+            </Button>
+          </div>
+        ) : null}
 
         <ProjectDetailPane />
 

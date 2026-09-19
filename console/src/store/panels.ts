@@ -4,6 +4,7 @@ import { create } from 'zustand'
 
 import {
   ApiError,
+  PROJECT_PAGE_SIZE,
   confirmProjectIntake,
   discardProjectIntake,
   loadFindings,
@@ -197,6 +198,10 @@ interface PanelState {
   system: SystemInfo | null
   models: ModelPool | null
   projects: ProjectCard[]
+  /** 全部项目数(不只是本页)。列表分页之后,这两个数是两件事。 */
+  projectTotal: number
+  /** "加载更多"失败的原因。空着 = 没出过错。 */
+  projectsMoreError: string
   projectDetail: ProjectDetail | null
   selectedProjectId: string
   selectedSessionId: string
@@ -224,6 +229,8 @@ interface PanelState {
   modal: ModalState
 
   load: (route: Route) => Promise<void>
+  /** 再取一页项目追到列表尾部。已经取到底就是空操作。 */
+  loadMoreProjects: () => Promise<void>
   selectProject: (id: string) => void
   selectSession: (id: string) => Promise<void>
   submitGuidance: () => Promise<void>
@@ -251,6 +258,8 @@ export const usePanels = create<PanelState>()((set, get) => ({
   system: null,
   models: null,
   projects: [],
+  projectTotal: 0,
+  projectsMoreError: '',
   projectDetail: null,
   selectedProjectId: '',
   selectedSessionId: '',
@@ -283,11 +292,16 @@ export const usePanels = create<PanelState>()((set, get) => ({
       } else if (route === 'findings') {
         set({ findings: await loadFindings() })
       } else if (route === 'projects') {
-        const [projects, queue] = await Promise.all([
-          loadProjects(),
+        // 后台轮询也走这条。按已经展开的条数去取,否则刚点开的"更多"会在下一次
+        // 轮询时缩回去 —— 列表在脚底下塌掉比不加载更难受。服务端单次最多给
+        // MAX_PROJECT_PAGE(200)条,展开得比这更多时会回落到 200;页头会写
+        // "200 / 252",按钮也还在,所以那是看得见、点得回来的,不是静默截断。
+        const want = Math.max(PROJECT_PAGE_SIZE, get().projects.length)
+        const [page, queue] = await Promise.all([
+          loadProjects(0, want),
           readIntakeQueue(get().intakes, get().intakeQueueStatus)
         ])
-        set({ projects, ...queue })
+        set({ projects: page.projects, projectTotal: page.total, projectsMoreError: '', ...queue })
       } else if (route === 'settings') {
         const profiles = await loadProfiles().catch(() => [])
         set({
@@ -300,6 +314,24 @@ export const usePanels = create<PanelState>()((set, get) => ({
       /* 单个页面读失败不打断整体;20s 轮询会重试 */
     } finally {
       set({ loading: false })
+    }
+  },
+
+  async loadMoreProjects() {
+    const { projects, projectTotal } = get()
+    if (projects.length >= projectTotal) return
+    try {
+      const page = await loadProjects(projects.length, PROJECT_PAGE_SIZE)
+      // 按 project_id 去重:列表按最近活动排序,翻页期间头部插进新项目会让
+      // 这一页的头几条和上一页的尾几条重叠,直接 concat 会渲染出重复行。
+      const seen = new Set(projects.map((p) => p.project_id))
+      set({
+        projects: projects.concat(page.projects.filter((p) => !seen.has(p.project_id))),
+        projectTotal: page.total,
+        projectsMoreError: ''
+      })
+    } catch (error) {
+      set({ projectsMoreError: error instanceof ApiError ? error.message : '加载失败' })
     }
   },
 

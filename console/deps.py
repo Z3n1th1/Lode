@@ -41,6 +41,9 @@ except Exception:                      # noqa: BLE001
 MAX_STATE_FILE_BYTES = 2 * 1024 * 1024
 MAX_STATE_EVENTS = 2_000
 MAX_VISIBLE_ITEMS = 20
+# 项目列表是分页的,一页最多给这么多。20 这个默认值继续用 MAX_VISIBLE_ITEMS;
+# 上限另外给,免得一个 limit 参数就能把整本台账拉进响应体。
+MAX_PROJECT_PAGE = 200
 MAX_CARD_BYTES = 128 * 1024
 MIN_PASSWORD_LENGTH = 16
 MIN_SESSION_SECRET_LENGTH = 32

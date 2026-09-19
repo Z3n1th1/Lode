@@ -76,6 +76,56 @@ class SrcSurfaceDiscoveryTests(unittest.TestCase):
         self.assertIn("https://example.com/app.js?v=1", requested)
         self.assertTrue(any("state_changing_url" in error for error in result.errors))
 
+    def test_a_redirect_is_followed_one_hop_and_becomes_the_base(self) -> None:
+        """回 301/302 的站以前一个字节都取不到 —— 面是空的,看着像"没东西"。
+
+        跟一跳之后,落地的地址才是这个站的根:相对脚本要按它解析,不能挂回旧根。
+        """
+        requested: list[str] = []
+
+        def fetcher(url, **kwargs):
+            del kwargs
+            requested.append(url)
+            if url == "https://www.example.com/":
+                return 301, "", {"location": "https://app.example.com/home/"}
+            if url == "https://app.example.com/home/":
+                return 200, '<script src="/static/app.js"></script>', {"content-type": "text/html"}
+            return 404, "", {}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_domains=("example.com",), delay_seconds=0),
+            "https://www.example.com", max_scripts=1, fetcher=fetcher)
+
+        self.assertEqual(200, result.status)
+        self.assertEqual("https://app.example.com/home/", result.final_url)
+        self.assertIn("https://app.example.com/home/", requested)
+        # 相对链接按落地地址解析 —— 没 rebase 的话这里会是 www.example.com
+        self.assertIn("https://app.example.com/static/app.js", result.scripts)
+
+    def test_a_redirect_out_of_scope_is_not_followed(self) -> None:
+        """重定向能指向任何地方,所以跳过去的目标必须重新过 scope 闸门。
+
+        放行一个越界的 302 等于把"只能打清单内的主机"这条规矩交给被扫的站去决定。
+        """
+        requested: list[str] = []
+
+        def fetcher(url, **kwargs):
+            del kwargs
+            requested.append(url)
+            if url == "https://www.example.com/":
+                return 302, "", {"location": "https://outside.example.net/"}
+            return 404, "", {}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_domains=("example.com",), delay_seconds=0),
+            "https://www.example.com", max_scripts=0, fetcher=fetcher)
+
+        # 原样返回那个 3xx,不假装跳成功了
+        self.assertEqual(302, result.status)
+        self.assertEqual("", result.final_url)
+        self.assertNotIn("https://outside.example.net/", requested)
+        self.assertTrue(any("blocked:" in error for error in result.errors))
+
     def test_outputs_are_replayable_json_and_markdown(self) -> None:
         result = discover_surface(
             SurfaceScope("fixture-src", "authorized", allowed_domains=("example.com",), delay_seconds=0.1),

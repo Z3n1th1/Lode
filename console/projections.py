@@ -45,6 +45,7 @@ from console.deps import (
     ALLOWED_BLOCK_REASONS,
     ALLOWED_TASK_STATUSES,
     MAX_CARD_BYTES,
+    MAX_PROJECT_PAGE,
     MAX_STATE_EVENTS,
     MAX_STATE_FILE_BYTES,
     MAX_VISIBLE_ITEMS,
@@ -520,7 +521,11 @@ class ReadOnlyControlPlane:
                     "blocked_reason": task["blocked_reason"] or None,
                 }
             )
-        return sorted(snapshots, key=lambda item: item["created_at"], reverse=True)[:MAX_VISIBLE_ITEMS]
+        # 这里以前切 MAX_VISIBLE_ITEMS(=20),而那是**显示**用的常量 —— 于是快照在
+        # 数据层就被砍到 20,下游再怎么分页也拿不到第 21 个。这一层不该截断:上界
+        # 交给 MAX_STATE_EVENTS(读台账本身的上界),显示由调用方分页。
+        return sorted(snapshots, key=lambda item: item["created_at"],
+                      reverse=True)[:MAX_STATE_EVENTS]
 
     def _project_sandbox_runs(self, tasks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         cards = []
@@ -805,8 +810,13 @@ class ReadOnlyControlPlane:
         # P5 放宽:只要有 target 就投影(profile 缺失显示 —),便于展示真实历史运行
         return self._project_tasks(self._read_jsonl_plain(self.state_dir / "strix_tasks.jsonl"), require_profile=False)
 
-    def projects(self) -> List[Dict[str, Any]]:
-        """一个 target = 一个 project;聚合其 goals(会话)与 tasks(Strix 运行)。"""
+    def projects(self, *, offset: int = 0, limit: int = MAX_VISIBLE_ITEMS) -> Dict[str, Any]:
+        """一个 target = 一个 project;聚合其 goals(会话)与 tasks(Strix 运行)。
+
+        分页返回,并且**把总数带出去**。以前这里是 ``[:MAX_VISIBLE_ITEMS]`` 的静默
+        截断,而页头照抄列表长度 —— 于是"最近 20 个"在界面上就是"一共 20 个"。
+        跑一个 252 台主机的 scope 时,操作员没有任何办法知道后面还有 232 个。
+        """
         goals = self._goal_snapshots()
         tasks = self._task_snapshots()
         proj: Dict[str, Dict[str, Any]] = {}
@@ -848,7 +858,17 @@ class ReadOnlyControlPlane:
                 "status": "running" if p["running"] else "done",
                 "last_activity": p["last_activity"],
             })
-        return sorted(out, key=lambda x: x["last_activity"], reverse=True)[:MAX_VISIBLE_ITEMS]
+        ordered = sorted(out, key=lambda x: x["last_activity"], reverse=True)
+        try:
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            start = 0
+        try:
+            size = max(1, min(int(limit), MAX_PROJECT_PAGE))
+        except (TypeError, ValueError):
+            size = MAX_VISIBLE_ITEMS
+        return {"projects": ordered[start:start + size], "total": len(ordered),
+                "offset": start, "limit": size}
 
     def project_detail(self, project_id: str) -> Dict[str, Any]:
         """会话 = goal_id(有 goal 事件则富元数据;没有则从共享该 goal_id 的 tasks 合成;task 无 goal_id 则退回 task_id)。"""

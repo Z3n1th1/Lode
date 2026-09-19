@@ -70,6 +70,59 @@ class IntentRouterTests(unittest.TestCase):
                 decision = intent_router.route(command, mode=modes.get_mode("chat"))
                 self.assertEqual("pentest", decision.mode)
 
+    def test_the_mode_command_does_not_need_the_word_moshi(self) -> None:
+        """操作员说的是"改成挖洞"、"直接到挖洞"—— 尾缀"模式"不是必说的。
+
+        以前只认"进入…模式"一种骨架,这些说法全部落空,再看对话模式的
+        autonomy=none,表现就是"产品不让人切模式"。
+        """
+        for command in ("改成挖洞", "切成挖洞", "切到挖洞", "直接到挖洞",
+                        "我需要直接到挖洞", "改成挖洞然后扫这个站"):
+            with self.subTest(command=command):
+                decision = intent_router.route(command, mode=modes.get_mode("chat"))
+                self.assertEqual("pentest", decision.mode)
+                self.assertEqual("mode_command", decision.reason)
+
+    def test_a_word_that_only_starts_with_an_alias_is_not_a_mode_command(self) -> None:
+        """"用 srcset 懒加载"不是换模式 —— ASCII 别名必须卡词边界。
+
+        从长到短扫前缀是汉字需要的("改成挖洞然后扫…"要从整串里取出"挖洞"),
+        照搬到字母上就会把 srcset 认成 src,于是一句讲图片格式的话变成换模式。
+        """
+        decision = intent_router.route("这个站用 srcset 懒加载", mode=modes.get_mode("chat"))
+        self.assertEqual("chat", decision.mode)
+        self.assertEqual("default_reply", decision.reason)
+
+    def test_an_unknown_mode_name_stays_unknown_without_the_suffix(self) -> None:
+        decision = intent_router.route("改成 ctf", mode=modes.get_mode("chat"))
+        self.assertEqual(modes.DEFAULT_MODE, decision.mode)
+        self.assertEqual("default_reply", decision.reason)
+
+    def test_switching_the_mode_and_launching_in_one_turn(self) -> None:
+        """换模式和开跑可以是一句话,否则"改成挖洞"和清单要发两次。
+
+        关键是用**换过之后**的模式判自治级别:拿旧模式(对话)去判,这句话会被
+        autonomy_none 挡回来,等于白说。
+        """
+        decision = intent_router.route("改成挖洞 扫 a.example.com", mode=modes.get_mode("chat"))
+        self.assertTrue(decision.escalates)
+        self.assertEqual("pentest", decision.mode)
+        self.assertEqual("src_loop", decision.subtask_kind)
+        self.assertEqual(["https://a.example.com/"], decision.targets)
+        self.assertEqual("targets+action", decision.reason)
+
+    def test_the_chat_mode_hint_names_the_way_out(self) -> None:
+        """对话模式下认出了要挖的东西却开不了跑,得说清楚怎么切,不能只回话。"""
+        blocked = intent_router.route("扫描一下 https://target.example.com",
+                                      mode=modes.get_mode("chat"))
+        self.assertEqual(intent_router.REPLY, blocked.action)
+        self.assertEqual("autonomy_none", blocked.reason)
+        self.assertEqual(intent_router.HINT_MODE_BLOCKS_HUNT, blocked.hint)
+        # 正常路径不带提示:能跑就跑,别唠叨
+        allowed = intent_router.route("扫描一下 https://target.example.com",
+                                      mode=modes.get_mode("pentest"))
+        self.assertEqual("", allowed.hint)
+
     def test_a_removed_mode_command_is_inert(self) -> None:
         """CTF / code-audit left the product: their commands must not land somewhere.
 
@@ -200,6 +253,24 @@ class IntentRouterTests(unittest.TestCase):
         decision = intent_router.route("扫描一下 http://target.local/app",
                                        mode=modes.get_mode("pentest"))
         self.assertTrue(decision.escalates)
+        self.assertEqual("src_loop", decision.subtask_kind)
+
+    def test_asking_for_the_surface_only_routes_to_the_cheap_half(self) -> None:
+        """建面便宜、推理贵。说得出"只建面"就不该起整个 LLM 循环。
+
+        ``surface_scan`` 以前有 handler、UI 也渲染,却没有生产者 —— 全仓 grep 不到
+        谁建得出来。这条钉住那个生产者。
+        """
+        for command in ("只建面 扫 a.example.com", "先建面,目标 a.example.com",
+                        "a.example.com 只侦察一下"):
+            with self.subTest(command=command):
+                decision = intent_router.route(command, mode=modes.get_mode("pentest"))
+                self.assertTrue(decision.escalates)
+                self.assertEqual(intent_router.SURFACE_SCAN_KIND, decision.subtask_kind)
+
+    def test_the_default_kind_is_unchanged_when_nobody_asked_for_surface_only(self) -> None:
+        decision = intent_router.route("对 a.example.com 做信息收集",
+                                       mode=modes.get_mode("pentest"))
         self.assertEqual("src_loop", decision.subtask_kind)
 
     def test_ambiguous_uses_llm_then_fails_safe(self) -> None:

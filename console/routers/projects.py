@@ -48,6 +48,7 @@ from console.models import (
 from console.projections import ReadOnlyControlPlane
 from console.routers.base import _NOSTORE, Ctx
 from console.deps import (
+    MAX_VISIBLE_ITEMS,
     SESSION_ID_RE,
     _text,
     _valid_profile,
@@ -119,9 +120,11 @@ def build(ctx: Ctx) -> APIRouter:
         return JSONResponse(content=ctx.control_plane.task_detail(id), headers=_NOSTORE)
 
     @router.get("/api/v1/projects")
-    def projects(request: Request) -> JSONResponse:
+    def projects(request: Request, offset: int = 0, limit: int = MAX_VISIBLE_ITEMS) -> JSONResponse:
+        """分页的项目列表。响应体带 total,界面才能说"还有多少个"而不是假装到底了。"""
         _require_session(request)
-        return JSONResponse(content=ctx.control_plane.projects(), headers=_NOSTORE)
+        return JSONResponse(content=ctx.control_plane.projects(offset=offset, limit=limit),
+                            headers=_NOSTORE)
 
     @router.get("/api/v1/project")
     def project(request: Request, id: str = "") -> JSONResponse:

@@ -484,6 +484,67 @@ class EscalationTests(_ChatCase):
         # a mode switch alone must not launch anything
         self.assertEqual([], seen)
 
+    def test_asking_for_surface_only_creates_a_surface_scan_job(self) -> None:
+        """建面要真能从对话里发起。
+
+        ``surface_scan`` 有 handler、UI 也把它渲染成「攻击面侦察」,但全仓 grep
+        不到生产者 —— 说是能只建面,其实只会起 src_loop,把整个 LLM 循环烧在一个
+        只想先看一眼的站上。
+        """
+        seen: list = []
+
+        def fake_surface(job, ctx):
+            seen.append(job.target)
+            ctx.emit("subtask_progress", phase="done")
+            return {"summary_ref": "surface-done"}
+
+        patcher = patch.object(agents_src_chat, "chat", lambda session, text, **kw: "已收到")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        client = self.start_client({"surface_scan": fake_surface})
+
+        resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                           json={"text": "只建面 扫 a.example.com", "mode": "pentest"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual(["https://a.example.com/"], seen)
+
+        jobs = client.get(f"/api/v1/jobs?session_id={self.SESSION}").json()["jobs"]
+        self.assertIn("surface_scan", [j["kind"] for j in jobs])
+        self.assertNotIn("src_loop", [j["kind"] for j in jobs])
+
+    def test_a_bare_mode_command_switches_and_launches_in_one_turn(self) -> None:
+        """「改成挖洞,扫 x」一句话就该切模式 + 开跑,不用先发一句再发清单。"""
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                    json={"text": "改成挖洞 扫 a.example.com", "mode": "chat"})
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual(["https://a.example.com/"], seen)
+
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        changed = next(e for e in events if e["kind"] == "mode_changed")
+        self.assertEqual("pentest", changed["mode"])
+        # 子任务的标题来自换过之后的模式,不是发起时那个
+        announce = next(e for e in events if e["kind"] == "subtask_started"
+                        and e["job_kind"] == "src_loop")
+        self.assertEqual("挖洞", announce["title"])
+
+    def test_chat_mode_names_the_way_out_instead_of_silently_replying(self) -> None:
+        """对话模式下说出了「目标 + 动作词」却没开跑,回复里必须说明怎么切。"""
+        seen: list = []
+        client = self._client_with_stubbed_loop(seen)
+        client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
+                    json={"text": "扫描一下 https://example.com", "mode": "chat"})
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+        self.assertEqual([], seen)
+
+        events = client.get(f"/api/v1/chat/sessions/{self.SESSION}/events").json()["events"]
+        reply = next(e for e in events if e["kind"] == "assistant_message")
+        self.assertIn("挖洞", reply["text"])
+        # 只是提示怎么切,不是偷偷换了模式
+        self.assertEqual([], [e for e in events if e["kind"] == "mode_changed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -70,27 +72,82 @@ def cmd_console(args: argparse.Namespace) -> int:
     return subprocess.call(cmd, cwd=str(ROOT))
 
 
+def _target_slug(url: str) -> str:
+    """Per-target subdirectory name, so a batch does not overwrite itself."""
+    netloc = urlsplit(url).netloc or urlsplit("//" + url).netloc
+    return re.sub(r"[^A-Za-z0-9._-]", "_", netloc).strip("._") or "target"
+
+
+def _batch_targets(args: argparse.Namespace) -> list[str]:
+    """The targets for this invocation.
+
+    A batch used to exist only in the Console (paste a list, one job per asset);
+    the CLI took a single url, so running a whole scope from the command line
+    meant writing a shell loop around it — and that loop bypassed the scope
+    gate, the delay and the evidence files.  The loop lives in the product now:
+    every target still goes through ``discover_surface`` one by one.
+    """
+    if getattr(args, "targets_file", None):
+        lines = Path(args.targets_file).read_text(encoding="utf-8").splitlines()
+        targets = [line.strip() for line in lines]
+        targets = [t for t in targets if t and not t.startswith("#")]
+    elif getattr(args, "from_scope", False):
+        doc = json.loads(Path(args.scope).read_text(encoding="utf-8"))
+        targets = [str(u).strip() for u in (doc.get("seed_urls") or []) if str(u).strip()]
+        if not targets:
+            targets = ["https://" + str(h).strip().lstrip("*.") + "/"
+                       for h in (doc.get("allowed_hosts") or []) if str(h).strip()]
+    else:
+        targets = [args.url] if getattr(args, "url", None) else []
+    if not targets:
+        raise SystemExit("no targets: pass a url, --targets-file or --from-scope")
+    return targets
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
-    """Surface discovery + candidate triage."""
+    """Surface discovery + candidate triage, one or many targets."""
     from agents.surface_discovery import SurfaceScope, discover_surface, surface_to_dict, write_surface_outputs
     scope = _load_scope(args.scope)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    result = discover_surface(scope, args.url, max_scripts=args.max_scripts)
-    d = surface_to_dict(result)
-    json_path, md_path = write_surface_outputs(result, out_dir)
-    print(json.dumps({
-        "schema": "SurfaceScanSummary/v1",
-        "target": args.url,
-        "status": d["status"],
-        "paths": len(d["paths"]),
-        "api_urls": len(d["api_urls"]),
-        "scripts": len(d["scripts"]),
-        "fingerprints": d["fingerprints"],
-        "output_json": str(json_path),
-        "output_md": str(md_path),
-    }, ensure_ascii=False, indent=2))
-    return 0
+    root = Path(args.out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    targets = _batch_targets(args)
+    batch = len(targets) > 1
+    rows = []
+    for target in targets:
+        # Single target keeps writing straight into --out-dir (the shape callers
+        # already have); a batch gets one subdirectory per host.
+        out_dir = root / _target_slug(target) if batch else root
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[scan] {target}", file=sys.stderr)
+        try:
+            result = discover_surface(scope, target, max_scripts=args.max_scripts)
+        except (ValueError, OSError, TypeError) as exc:
+            rows.append({"target": target, "status": 0, "error": str(exc)})
+            continue
+        d = surface_to_dict(result)
+        json_path, md_path = write_surface_outputs(result, out_dir)
+        rows.append({
+            "target": target,
+            "status": d["status"],
+            "final_url": d["final_url"],
+            "paths": len(d["paths"]),
+            "api_urls": len(d["api_urls"]),
+            "scripts": len(d["scripts"]),
+            "fingerprints": d["fingerprints"][:8],
+            "output_json": str(json_path),
+            "output_md": str(md_path),
+            "errors": d["errors"][:5],
+        })
+        if args.console_state:
+            # 落盘只是一半:Console 只读 state_dir 里的台账,不看 --out-dir。
+            # 不记这一行,跑得再多在界面上也是零。
+            from console.task_ledger import record_run
+            record_run(args.console_state, target=target, output_path=out_dir)
+            rows[-1]["recorded_in"] = str(args.console_state)
+    print(json.dumps({"schema": "SurfaceScanSummary/v1", "targets": rows},
+                     ensure_ascii=False, indent=2))
+    # 一个都没成就是错的;只要有一个出结果就算跑过了(其余的在 targets[].status 里)
+    return 0 if any(row.get("status") for row in rows) else 1
 
 
 def cmd_agent(args: argparse.Namespace) -> int:
@@ -112,13 +169,62 @@ def cmd_auto(args: argparse.Namespace) -> int:
         scope, out_dir / "autopilot-state.json", out_dir,
         max_rounds=3, max_candidates=200,
     )
-    print(f"[1/2] Surface discovery + triage on {args.url} ...", file=sys.stderr)
-    autopilot.run_round([args.url])
+    # ``run_round`` has always taken a sequence — only the entry point was
+    # single-target. Batch is now expressible instead of shell-looped outside.
+    targets = _batch_targets(args)
+    print(f"[1/2] Surface discovery + triage on {len(targets)} target(s) ...", file=sys.stderr)
+    autopilot.run_round(targets)
 
     bb_path = out_dir / "src-blackboard.json"
     print(f"[2/2] LLM agent analysis (max {args.max_cycles} cycles) ...", file=sys.stderr)
     summary = _run_agent(str(bb_path), args.scope, args)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_surface_import(args: argparse.Namespace) -> int:
+    """Record results that are already on disk into the Console ledger — no network.
+
+    A scan that ran before this bridge existed left its output in ``--out-dir`` and
+    nothing in ``state_dir``, so the Console showed none of it.  Re-running the scan
+    just to make it visible would re-fetch a third party's production hosts for a
+    bookkeeping reason; importing reads what is already there instead.
+    """
+    from console.task_ledger import load_rows, record_run
+
+    root = Path(args.results_dir)
+    found = sorted(root.glob("*/surface-*.json")) + sorted(root.glob("surface-*.json"))
+    if not found:
+        print(json.dumps({"schema": "SurfaceImportSummary/v1", "imported": 0,
+                          "error": f"no surface-*.json under {root}"},
+                         ensure_ascii=False, indent=2))
+        return 1
+
+    already = {(str(row.get("target") or ""), str(row.get("output_path") or ""))
+               for row in load_rows(args.console_state)}
+    results = []
+    for path in found:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            results.append({"file": str(path), "skipped": f"unreadable:{exc}"})
+            continue
+        target = str(doc.get("target") or "").strip()
+        if not target:
+            results.append({"file": str(path), "skipped": "no_target_in_result"})
+            continue
+        if (target, str(path.parent.resolve())) in already:
+            results.append({"target": target, "skipped": "already_recorded"})
+            continue
+        run_id = "surface-" + re.sub(r"[^A-Za-z0-9_.-]", "-", path.parent.name or "root")
+        row = record_run(args.console_state, target=target, output_path=path.parent, run_id=run_id)
+        results.append({"task_id": row["id"], "target": target, "output_path": row["output_path"]})
+
+    imported = [r for r in results if "task_id" in r]
+    print(json.dumps({"schema": "SurfaceImportSummary/v1",
+                      "console_state": str(args.console_state),
+                      "imported": len(imported), "results": results},
+                     ensure_ascii=False, indent=2))
     return 0
 
 
@@ -243,10 +349,16 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_console)
 
     s = sub.add_parser("scan", help="Surface discovery only")
-    s.add_argument("url")
+    s.add_argument("url", nargs="?")
     s.add_argument("--scope", required=True)
     s.add_argument("--out-dir", default="./out")
     s.add_argument("--max-scripts", type=int, default=40)
+    s.add_argument("--targets-file", type=Path,
+                   help="file with one target per line (blank lines and # comments skipped)")
+    s.add_argument("--from-scope", action="store_true",
+                   help="use the scope's seed_urls, else every allowed_hosts entry, as the list")
+    s.add_argument("--console-state", type=Path,
+                   help="Console state dir; record each run in its task ledger so it shows up in the UI")
     s.set_defaults(func=cmd_scan)
 
     a = sub.add_parser("agent", help="LLM agent loop on existing blackboard")
@@ -260,12 +372,16 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_agent)
 
     au = sub.add_parser("auto", help="Full pipeline: scan → agent")
-    au.add_argument("url")
+    au.add_argument("url", nargs="?")
     au.add_argument("--scope", required=True)
     au.add_argument("--out-dir", default="./out")
     au.add_argument("--max-cycles", type=int, default=20)
     au.add_argument("--reasoner-prefer", default=None)
     au.add_argument("--explorer-prefer", default=None)
+    au.add_argument("--targets-file", type=Path,
+                    help="file with one target per line (blank lines and # comments skipped)")
+    au.add_argument("--from-scope", action="store_true",
+                    help="use the scope's seed_urls, else every allowed_hosts entry, as the list")
     au.set_defaults(func=cmd_auto)
 
     pr = sub.add_parser("progress", help="Show test progress summary")
@@ -287,6 +403,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="Environment check")
     d.set_defaults(func=cmd_doctor)
+
+    si = sub.add_parser("surface-import",
+                        help="Record already-scanned results into the Console task ledger (no network)")
+    si.add_argument("results_dir", type=Path,
+                    help="an --out-dir from a previous scan (with or without per-target subdirs)")
+    si.add_argument("--console-state", type=Path, required=True)
+    si.set_defaults(func=cmd_surface_import)
 
     return p
 

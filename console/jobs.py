@@ -99,35 +99,57 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     return {"summary_ref": str(bb_path), "progress": {"phase": "done", "findings": findings}}
 
 
-def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
-    """Full SRC pipeline for a target typed into the conversation.
+def _typed_target_scope(job: JobRecord, *, run_id: str, target_url: str) -> Any:
+    """Scope for a target the operator typed into the conversation.
 
-    The scope is widened to the target's registrable domain: here the operator
-    typed a URL and the engagement profile decides how far to go.  A confirmed
-    TargetCard must **not** take this path — see
-    :func:`_scope_from_confirmed_card`.
+    Only the host he actually typed is authorised.  This used to widen to the
+    registrable domain (``www.a.com`` → ``a.com``), and ``allowed_domains``
+    matches *descendants* — so pasting one URL opened the entire domain, including
+    hosts the program explicitly excludes (measured on the NBA program: pasting
+    ``www.nba.com`` made ``cms.``/``payment.``/``login-sandbox.nba.com`` /
+    ``arcade.nba.com`` all requestable while every one of them is out of scope).
+    Reaching further is now something the operator says explicitly, by naming the
+    hosts — a run must never widen itself on the strength of a redirect or a
+    suffix.
     """
     from agents.surface_discovery import SurfaceScope
     from urllib.parse import urlparse
 
-    run_id = str(ctx.job.payload.get("run_id") or job.job_id)
-    target_url = job.target
-
     parsed = urlparse(target_url)
     host = (parsed.hostname or "").lower()
-    domains = [str(d).strip() for d in (job.payload.get("allowed_domains") or []) if str(d).strip()]
+    domains = [str(d).strip().lower() for d in (job.payload.get("allowed_domains") or []) if str(d).strip()]
     hosts = [str(h).strip().lower() for h in (job.payload.get("allowed_hosts") or []) if str(h).strip()]
-    if host and host not in domains and host not in hosts:
-        parts = host.split(".")
-        domains.append(".".join(parts[-2:]) if len(parts) >= 2 else host)
-
+    forbidden = [str(f).strip().lower() for f in (job.payload.get("forbidden_hosts") or []) if str(f).strip()]
+    if host and host not in hosts:
+        hosts.append(host)
+    # 限速取 payload,其次环境变量,最后才是老默认值。写死 0.5s 在池子有两个 worker
+    # 时是 4 req/s —— 超过程序写明的 3 req/s 上限,所以这个值必须能从外面压下去。
+    # ``0`` 是"给了个很小的值",不是"没给":不能用 or 把它吞掉。
+    raw_delay = job.payload.get("delay_seconds")
+    if raw_delay is None or raw_delay == "":
+        raw_delay = os.environ.get("LODE_SURFACE_DELAY_SECONDS") or 0.5
+    try:
+        delay = max(0.1, min(float(raw_delay), 30.0))
+    except (TypeError, ValueError):
+        delay = 0.5
     authorization = str(job.payload.get("authorization") or "")
-    scope = SurfaceScope(
+    return SurfaceScope(
         program=f"console-{run_id}",
         authorization=authorization or f"Console operator authorized scan of {target_url}",
-        allowed_domains=tuple(domains), allowed_hosts=tuple(hosts), delay_seconds=0.5,
+        allowed_domains=tuple(domains), allowed_hosts=tuple(hosts),
+        forbidden=tuple(forbidden), delay_seconds=delay,
     )
-    return _run_scope(job, ctx, scope, run_id=run_id, target_url=target_url)
+
+
+def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """Full SRC pipeline for a target typed into the conversation.
+
+    A confirmed TargetCard must **not** take this path — see
+    :func:`_scope_from_confirmed_card`.
+    """
+    run_id = str(ctx.job.payload.get("run_id") or job.job_id)
+    scope = _typed_target_scope(job, run_id=run_id, target_url=job.target)
+    return _run_scope(job, ctx, scope, run_id=run_id, target_url=job.target)
 
 
 TARGET_RUN_KIND = "target_run"
@@ -227,22 +249,28 @@ def start_target_run(
 
 
 def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
-    """Surface discovery + autopilot only (no LLM loop)."""
+    """Surface discovery + autopilot only (no LLM loop).
+
+    This is the cheap half of a hunt: 建面 before deciding what deserves the
+    expensive reason/explore loop.  It used to build its own scope out of nothing
+    (``allowed_domains=()``, ``allowed_hosts=()``), which ``require_authorization``
+    rejects outright — so reaching it raised ``surface_scope_required`` every time.
+    It now shares the typed-target scope, so it authorises exactly what the
+    operator named and nothing else.
+    """
     from agents.src_autopilot import SrcAutopilot
-    from agents.surface_discovery import SurfaceScope
 
     state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
     run_id = str(ctx.job.payload.get("run_id") or job.job_id)
     out_dir = state_dir / "src-agent-runs" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    scope = SurfaceScope(program=f"console-{run_id}",
-                         authorization=f"Console operator authorized scan of {job.target}",
-                         allowed_domains=(), allowed_hosts=(), delay_seconds=0.5)
+    scope = _typed_target_scope(job, run_id=run_id, target_url=job.target)
     ctx.emit("subtask_progress", phase="autopilot")
     autopilot = SrcAutopilot(scope, out_dir / "autopilot-state.json", out_dir,
                              max_rounds=3, max_candidates=100,
                              blackboard_path=out_dir / "src-blackboard.json")
     autopilot.run_round([job.target])
+    ctx.emit("subtask_progress", phase="done")
     return {"summary_ref": str(out_dir / "src-blackboard.json"), "progress": {"phase": "done"}}
 
 
@@ -324,6 +352,13 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
             if skipped:
                 notice = (f"（这份清单识别到 {len(seeds)} 个目标,起了 {len(launched)} 个;"
                           + "、".join(skipped) + " 没起。）")
+
+    if decision.hint == intent_router.HINT_MODE_BLOCKS_HUNT:
+        # 认出了"目标 + 动作词",却因为当前模式不发起请求而开不了跑。静默只回话
+        # 等于把操作员晾在那儿 —— 他不知道是产品不干活还是自己少说了一句。
+        notice = (f"（当前是「{mode.title}」模式,这一轮不会发起任何请求。"
+                  f"说一句「进入挖洞模式」、或者把上面的模式切到「挖洞」,"
+                  f"同样这句话就直接开跑。）")
 
     # 只注入 dispatcher + 第一轮地板模块。深度不走这里 —— 模型用 read_knowledge
     # 在认出面相的时候按需拉(见 core/skills.select_modules 与 SKILL.md §2)。

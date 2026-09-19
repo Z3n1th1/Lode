@@ -193,8 +193,14 @@ export interface SessionCard {
 export interface ProjectDetail { project_id: string; target: string; sessions: SessionCard[] }
 export interface TrajectoryEvent { seq: number; ts: number; source: string; kind: string; summary: string }
 
-export async function loadProjects(): Promise<ProjectCard[]> {
-  return (await (await request('/api/v1/projects', { cache: 'no-store' })).json()) as ProjectCard[]
+/** 项目列表是分页的:total 是全部项目数,不是本页数量。 */
+export interface ProjectPage {
+  projects: ProjectCard[]; total: number; offset: number; limit: number
+}
+export const PROJECT_PAGE_SIZE = 20
+export async function loadProjects(offset = 0, limit = PROJECT_PAGE_SIZE): Promise<ProjectPage> {
+  const q = `?offset=${offset}&limit=${limit}`
+  return (await (await request(`/api/v1/projects${q}`, { cache: 'no-store' })).json()) as ProjectPage
 }
 export async function loadProject(id: string): Promise<ProjectDetail> {
   return (await (await request(`/api/v1/project?id=${encodeURIComponent(id)}`, { cache: 'no-store' })).json()) as ProjectDetail
