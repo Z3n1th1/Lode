@@ -248,12 +248,13 @@ export default function NewProjectModal() {
               <div className="border-t border-line pt-3.5">
                 <span className="font-mono text-2xs text-fg-4">或者:贴一份授权文档(scope 文件)</span>
                 <p className="mt-1.5 text-xs text-fg-4">
-                  程序文档写的常是"所有流量 ≤ 3 req/s"加一长串精确主机名。贴**整份** JSON,
+                  程序文档写的常是"所有流量 ≤ 3 req/s"加一长串精确主机名。整份 JSON 贴进来,
                   每台主机会各自起一个任务,共用一份预算。域名通配不收 —— 只收精确主机名。
                 </p>
                 <textarea
                   className="mt-2 h-24 w-full resize-y rounded-md border border-line bg-transparent p-2.5 font-mono text-xs text-fg outline-none transition-colors focus:border-line-strong"
                   spellCheck={false}
+                  aria-label="授权文档"
                   placeholder='{"program": "…", "authorization": "…", "allowed_hosts": ["api.example.com"]}'
                   value={scopeText}
                   onChange={(event) => usePanels.getState().patchScopeText(event.target.value)}

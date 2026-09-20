@@ -557,44 +557,38 @@ def _scope_document_refusal(exc: Any) -> str:
     text = _SCOPE_REFUSAL_TEXT.get(reason, "它没通过授权文档的校验")
     extra = f"({detail})" if detail else ""
     return (f"这看起来是一份授权文档,但读不成一次可以开跑的授权:{text}{extra}。\n\n"
-            f"什么都没起,也没有发出任何请求。改好之后把**整份 JSON** 重新贴一次就行 —— "
+            f"什么都没起,也没有发出任何请求。改好之后把整份 JSON 重新贴一次就行 —— "
             f"前后不要带说明文字,否则它就只是聊天里的一段话了。")
 
 
 def _scope_preview_notice(view: Dict[str, Any]) -> str:
-    """What the operator is about to authorise, in the conversation."""
+    """The durable prose record of what the operator is about to authorise.
+
+    账本里那一行已经逐项列出了细节,所以这里不重复整份清单 —— 复述一遍只会让人
+    多读一遍,而两处说法一旦不一致,读的人不知道该信哪个。这里只留决策要看的那几件
+    事(以及"现在还没发请求")。
+    """
     summary = view.get("summary") if isinstance(view.get("summary"), dict) else {}
     hosts = [str(host) for host in (summary.get("hosts") or [])]
     rejected = summary.get("rejected") or []
     program = str(summary.get("program") or "").strip() or "未命名"
     rate = float(summary.get("requests_per_second") or 0.0)
     cap = int(summary.get("max_fanout") or 0)
-    methods = "、".join(str(method) for method in (summary.get("allowed_methods") or []))
-    body = "可以带请求体" if summary.get("allow_request_body") else "不允许带请求体"
     will_run = min(len(hosts), cap) if cap else len(hosts)
 
-    shown = "、".join(hosts[:6]) + (" …" if len(hosts) > 6 else "")
     lines = [
-        "这是一份**授权文档**,不是一次狩猎请求 —— 确认之前不发起任何请求。",
-        "",
-        f"- 程序:{program}",
-        f"- 授权主机:{len(hosts)} 台({shown})",
+        "这是一份授权文档,不是一次狩猎请求 —— 确认之前不发起任何请求。",
+        f"程序 {program},{len(hosts)} 台主机"
+        + (f",{rate:g} req/s(这份授权下所有任务共用一个预算)" if rate else "") + "。",
     ]
-    forbidden = summary.get("forbidden_hosts") or []
-    if forbidden:
-        lines.append(f"- 排除:{len(forbidden)} 台")
-    if rate:
-        lines.append(f"- 速率:{rate:g} req/s(这份授权下所有任务共用一个预算,不是每个任务一份)")
-    if methods:
-        lines.append(f"- 能力:{methods}({body})")
-    lines.append(f"- 本轮将起:{will_run} 个任务 —— 每个任务只覆盖它自己那一台主机")
     if len(hosts) > will_run:
-        lines.append(f"- 另有 {len(hosts) - will_run} 台超出文档自己写的上限 {cap},这次不起")
+        lines.append(f"将起 {will_run} 个任务;另有 {len(hosts) - will_run} 台超出文档自己写的"
+                     f"上限 {cap},这次不起。")
+    else:
+        lines.append(f"将起 {will_run} 个任务 —— 每个任务只覆盖它自己那一台主机。")
     if rejected:
-        lines.append("")
-        lines.append(f"- 被拦下 {len(rejected)} 台(不是公网 http(s),或通配主机):"
-                     + "、".join(f"{host}({reason})" for host, reason in rejected[:5]))
-    lines += ["", "在待确认队列里点确认之后才开跑。"]
+        lines.append(f"另有 {len(rejected)} 台被拦下(不是公网 http(s),或通配主机)。")
+    lines.append("在待确认队列里点确认之后才开跑。")
     return "\n".join(lines)
 
 

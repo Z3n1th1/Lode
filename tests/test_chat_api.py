@@ -615,12 +615,13 @@ class ScopeDocumentTurnTests(_ChatCase):
         # 事件里不带全文:原文在 intake ledger 里,确认时按 digest 复读。
         self.assertNotIn("document", preview_event)
 
+        # 正文只留决策要看的那几件事;逐项细节在账本那一行里,不复述两遍。
         reply = self._replies(client, session)[0]
         self.assertIn("确认之前不发起任何请求", reply)
-        self.assertIn("3 台", reply)
+        self.assertIn("3 台主机", reply)
         self.assertIn("3 req/s", reply)
         self.assertIn("共用一个预算", reply)
-        self.assertIn("本轮将起:2 个任务", reply)
+        self.assertIn("将起 2 个任务", reply)
         self.assertIn("1 台超出", reply)
 
         # 待确认槽里躺着的是那份文档,不是一张目标卡。
