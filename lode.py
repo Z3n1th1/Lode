@@ -414,8 +414,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _shared_state_dir(args: argparse.Namespace) -> Path:
+    """Where the cross-process request budget lives.
+
+    The Console keeps it under its ``--state-dir``; the CLI has to look in the same
+    place, or a CLI ``--from-scope`` run and a Console run against one program each
+    send at the full stated rate and the program sees the sum of the two.
+    """
+    explicit = getattr(args, "console_state", None) or getattr(args, "state_dir", None)
+    if explicit:
+        return Path(explicit)
+    return Path(os.environ.get("LODE_STATE_DIR") or (ROOT / "lode-state"))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        from core.rate_limit import configure_persistence
+
+        configure_persistence(_shared_state_dir(args))
+    except Exception:  # noqa: BLE001 - pacing is enforced per process even if this fails
+        pass
     try:
         return args.func(args)
     except KeyboardInterrupt:

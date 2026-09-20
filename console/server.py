@@ -40,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
     # Keep the header's active-model switch and the agent's provider pool on the
     # same file (core.llm_pool otherwise defaults to a non-existent /opt path).
     os.environ.setdefault("LLM_ACTIVE_PROVIDER_FILE", str(state_dir / "model_active_provider.json"))
+    # One request budget per engagement, in a file under this state dir — so a
+    # CLI run and a Console run against the same program share it instead of each
+    # holding to the stated rate on its own.
+    from core.rate_limit import configure_persistence
+
+    configure_persistence(state_dir)
 
     password = os.environ.get("LODE_ADMIN_PASSWORD", "")
     session_secret = os.environ.get("LODE_SESSION_SECRET", "")

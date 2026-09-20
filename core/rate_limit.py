@@ -1,4 +1,4 @@
-"""One request budget per engagement, shared by every worker in the process.
+"""One request budget per engagement, shared by every worker that draws on it.
 
 Why this exists
 ---------------
@@ -29,21 +29,34 @@ stays out of the way, which keeps the zero-delay fixtures instant.
 
 Scope of the guarantee
 ----------------------
-This shares across **threads in one process**.  Two separate Lode processes
-against the same program do not share a budget yet — that needs the bucket state
-in a file under the state dir (``core/file_lock.AdvisoryFileLock`` is the right
-primitive), and it only starts to matter once workers are separate processes.
-Until then, don't run two Lode processes against one program and expect the
-stated rate to hold.
+This shares across **threads in one process**, and — once a state dir is
+configured (:func:`configure_persistence`) — across **processes** too, by keeping
+the engagement's token state in a file under that state dir.  Two Lode processes
+against one program used to each run their own budget, so the program saw the sum
+of the two; that is the case the file bucket closes, and it is the reason a CLI
+``--from-scope`` run and a Console run can no longer be added together.
+
+The configurable file bucket is opt-in on purpose: leave the state dir unset
+(tests, library use) and this module behaves exactly as it did before, with the
+in-process bucket only.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
-__all__ = ["TokenBucket", "ScopeLimiter", "limiter_for", "reset_limiters"]
+try:
+    from core.file_lock import AdvisoryFileLock
+except ImportError:  # pragma: no cover - flat sys.path (tests insert core/ directly)
+    from file_lock import AdvisoryFileLock  # type: ignore
+
+__all__ = ["TokenBucket", "FileTokenBucket", "ScopeLimiter", "limiter_for",
+           "reset_limiters", "configure_persistence", "bucket_key"]
 
 
 class TokenBucket:
@@ -79,13 +92,91 @@ class TokenBucket:
             time.sleep(wait)
 
 
+class FileTokenBucket:
+    """The same contract as :class:`TokenBucket`, with the state on disk.
+
+    One process's registry only knows its own threads, so "the budget" was really
+    "this process's share of the budget": a CLI run and a Console run against the
+    same program each sat at the full stated rate and the program saw double.
+    Putting the token state in a file under the state dir — read-modify-written
+    under an advisory lock — makes the process boundary stop mattering.
+
+    Two deliberate differences from the in-memory bucket:
+
+    * the clock is ``time.time()``, not ``time.monotonic()``, because two
+      processes have to agree on how much time passed;
+    * the state is persisted on *every* attempt, including the ones that fail to
+      take a token, so a waiter's refill is never recomputed from a stale
+      timestamp.
+    """
+
+    def __init__(self, path: Path, *, rate_per_second: float, capacity: float = 1.0,
+                 key: str = "") -> None:
+        self.path = Path(path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        self.rate = max(1e-6, float(rate_per_second))
+        self.capacity = max(1.0, float(capacity))
+        # 桶的键只为了让人能打开文件知道这是谁的预算 —— 桶本身不认识 engagement。
+        self.key = key or self.path.stem
+
+    def acquire(self) -> None:
+        while True:
+            wait = self._try_take()
+            if wait <= 0:
+                return
+            # 睡在锁外面 —— 和内存桶同一条理由:在锁里等就把所有 worker 串成队列。
+            # 加个下限,免得令牌只差千分之几个时变成自旋。
+            time.sleep(max(0.002, wait))
+
+    def _try_take(self) -> float:
+        """Return 0.0 when a token was spent, else how long to wait before retrying."""
+        with AdvisoryFileLock(self.lock_path):
+            state = self._read()
+            now = time.time()
+            tokens = min(self.capacity, state["tokens"] + (now - state["updated_at"]) * self.rate)
+            if tokens >= 1.0:
+                self._write(now, tokens - 1.0)
+                return 0.0
+            self._write(now, tokens)
+            return (1.0 - tokens) / self.rate
+
+    def _read(self) -> Dict[str, Any]:
+        try:
+            doc = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = None
+        if isinstance(doc, dict):
+            try:
+                return {"tokens": float(doc["tokens"]), "updated_at": float(doc["updated_at"])}
+            except (KeyError, TypeError, ValueError):
+                pass
+        # 没有文件(第一次请求)或者文件坏了:按满桶起步,和内存桶的初值一致,
+        # 所以"第一个请求是免费的"这条在两个实现里是同一件事。
+        return {"tokens": self.capacity, "updated_at": time.time()}
+
+    def _write(self, updated_at: float, tokens: float) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"key": self.key, "tokens": round(tokens, 6), "updated_at": updated_at,
+                   "rate_per_second": self.rate, "capacity": self.capacity}
+        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class ScopeLimiter:
     """The engagement-wide bucket plus one bucket per host."""
 
-    def __init__(self, program: str, *, rate_per_second: float) -> None:
-        self.program = program
+    def __init__(self, engagement: str, *, rate_per_second: float,
+                 state_dir: Optional[Path] = None) -> None:
+        self.engagement = engagement
         self.rate_per_second = float(rate_per_second)
-        self._program = TokenBucket(self.rate_per_second)
+        self.state_dir = Path(state_dir) if state_dir else None
+        # 程序桶是"所有流量 <= N req/s"那句承诺,所以它必须跨进程 —— 有 state dir
+        # 就落到文件上。主机桶只是礼貌(politeness),留在进程内:它是同一条承诺
+        # 的窄化,不是第二句承诺,而且每个 host 一个文件会让超大 scope 写爆目录。
+        self._program: Any = (
+            FileTokenBucket(_budget_path(self.state_dir, engagement),
+                            rate_per_second=self.rate_per_second, key=engagement)
+            if self.state_dir is not None else TokenBucket(self.rate_per_second)
+        )
         self._hosts: Dict[str, TokenBucket] = {}
         self._guard = threading.Lock()
 
@@ -110,14 +201,51 @@ class ScopeLimiter:
         self._program.acquire()
 
 
+def bucket_key(scope: Any) -> str:
+    """Which engagement's promise this scope is making.  One bucket per value.
+
+    ``engagement`` is the budget identity; ``program`` is only its fallback.
+    They differ on the Console path, where every job mints its own program name
+    (``console-<run_id>``) — using that as the key gave each job its own bucket, so
+    pasting 20 targets ran 20 independent budgets and the program saw 20× its
+    stated rate.  A scope file never sets ``engagement``, so the CLI keeps the
+    exact key it had.
+    """
+    engagement = str(getattr(scope, "engagement", "") or "").strip()
+    return engagement or str(getattr(scope, "program", "") or "authorized-program").strip()
+
+
+def _budget_path(state_dir: Path, key: str) -> Path:
+    """One file per engagement.  Hashed so a program name can't escape the dir."""
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return Path(state_dir) / "rate-limit" / f"{digest}.json"
+
+
 _LIMITERS: Dict[Tuple[str, float], ScopeLimiter] = {}
 _LIMITERS_GUARD = threading.Lock()
+_STATE_DIR: Optional[Path] = None
+
+
+def configure_persistence(state_dir: Any) -> None:
+    """Make the budget shared with other processes, via ``state_dir``.
+
+    Called once at start-up by the Console and the CLI, both of which already
+    know their state dir.  Passing ``None``/``""`` goes back to the in-process
+    bucket (what tests and library use get).
+
+    Existing limiters are dropped: they were built with the old answer to "is
+    there a file to share?", and handing back a cached in-process limiter after
+    this call would silently keep the two processes apart.
+    """
+    global _STATE_DIR
+    _STATE_DIR = Path(state_dir) if state_dir else None
+    reset_limiters()
 
 
 def limiter_for(scope: Any) -> Optional[ScopeLimiter]:
     """The bucket every worker of this scope must draw from, or ``None`` if unpaced.
 
-    Keyed by ``(program, delay)`` and not by program alone: two scopes that
+    Keyed by ``(engagement, delay)`` and not by engagement alone: two scopes that
     declare different pacing are two different promises, and collapsing them
     would silently apply the first one's rate to the second.  It also keeps
     tests that reuse a fixture program name from inheriting each other's state.
@@ -125,12 +253,11 @@ def limiter_for(scope: Any) -> Optional[ScopeLimiter]:
     delay = float(getattr(scope, "delay_seconds", 0.0) or 0.0)
     if delay <= 0:
         return None
-    program = str(getattr(scope, "program", "") or "authorized-program")
-    key = (program, round(delay, 6))
+    key = (bucket_key(scope), round(delay, 6))
     with _LIMITERS_GUARD:
         limiter = _LIMITERS.get(key)
         if limiter is None:
-            limiter = ScopeLimiter(program, rate_per_second=1.0 / delay)
+            limiter = ScopeLimiter(key[0], rate_per_second=1.0 / delay, state_dir=_STATE_DIR)
             _LIMITERS[key] = limiter
         return limiter
 

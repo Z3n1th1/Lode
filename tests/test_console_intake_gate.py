@@ -321,7 +321,8 @@ class IntakeRunTests(_GateCase):
             "target_id": "t-1",
             "scope": {"allowed_hosts": ["target.example.test"], "forbidden_hosts": ["forbidden.example.test"]},
         }
-        scope = console_jobs._scope_from_confirmed_card(card, target_id="t-1", run_id="SL-1")
+        scope = console_jobs._scope_from_confirmed_card(
+            card, target_id="t-1", run_id="SL-1", engagement="turn-T-1", delay=0.5)
 
         self.assertEqual("confirmed_target_card:t-1", scope.authorization)
         # No registrable-domain widening: only the host on the card.
@@ -329,6 +330,10 @@ class IntakeRunTests(_GateCase):
         self.assertFalse(scope.check_url("https://api.target.example.test/")[0])
         self.assertFalse(scope.check_url("https://other.example.test/")[0])
         self.assertFalse(scope.check_url("https://forbidden.example.test/")[0])
+        # 预算身份和节奏都由调用方给:这条路径以前落在 dataclass 默认值上,和手打
+        # URL 那条路(0.5)是两个速率。
+        self.assertEqual("turn-T-1", scope.engagement)
+        self.assertEqual(0.5, scope.delay_seconds)
 
     def test_a_card_that_changed_after_confirmation_is_refused(self) -> None:
         client = self.client()

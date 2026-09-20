@@ -99,6 +99,48 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     return {"summary_ref": str(bb_path), "progress": {"phase": "done", "findings": findings}}
 
 
+DEFAULT_SURFACE_DELAY = 0.5
+DELAY_ENV = "LODE_SURFACE_DELAY_SECONDS"
+
+
+def _scope_delay(job: JobRecord) -> float:
+    """The one place a Console run's pacing is decided.
+
+    The typed-target path read ``payload → env → 0.5`` while the confirmed-card
+    path passed nothing and landed on the dataclass default (0.4) — two answers to
+    the same question, 2 req/s vs 2.5 req/s, chosen by which entry point the
+    operator happened to use.  ``0`` means "a very small number was given", not
+    "nothing was given", so it must not be swallowed by ``or``.
+    """
+    raw = job.payload.get("delay_seconds")
+    if raw is None or raw == "":
+        raw = os.environ.get(DELAY_ENV) or DEFAULT_SURFACE_DELAY
+    try:
+        return max(0.1, min(float(raw), 30.0))
+    except (TypeError, ValueError):
+        return DEFAULT_SURFACE_DELAY
+
+
+def _engagement(job: JobRecord, *, run_id: str) -> str:
+    """Which budget this job draws on (see ``core.rate_limit.bucket_key``).
+
+    Deliberately not the program name: the Console mints a fresh one per job
+    (``console-<run_id>``) for display, and using it as the budget key gave every
+    job its own bucket — 20 pasted targets became 20 independent budgets, so the
+    program saw up to 20× the rate it declared.
+
+    One conversation is one engagement.  Every job fanned out from a turn already
+    carries that turn's ``turn_id`` (it is what makes "one stop stops them all"
+    work), so the same field now also makes them share one budget.  A scope that
+    does name a program wins — that is the operator's own identity for it.
+    """
+    declared = str(job.payload.get("program") or "").strip()
+    if declared:
+        return declared
+    turn = str(getattr(job, "turn_id", "") or "").strip()
+    return f"turn-{turn}" if turn else f"console-{run_id}"
+
+
 def _typed_target_scope(job: JobRecord, *, run_id: str, target_url: str) -> Any:
     """Scope for a target the operator typed into the conversation.
 
@@ -122,22 +164,13 @@ def _typed_target_scope(job: JobRecord, *, run_id: str, target_url: str) -> Any:
     forbidden = [str(f).strip().lower() for f in (job.payload.get("forbidden_hosts") or []) if str(f).strip()]
     if host and host not in hosts:
         hosts.append(host)
-    # 限速取 payload,其次环境变量,最后才是老默认值。写死 0.5s 在池子有两个 worker
-    # 时是 4 req/s —— 超过程序写明的 3 req/s 上限,所以这个值必须能从外面压下去。
-    # ``0`` 是"给了个很小的值",不是"没给":不能用 or 把它吞掉。
-    raw_delay = job.payload.get("delay_seconds")
-    if raw_delay is None or raw_delay == "":
-        raw_delay = os.environ.get("LODE_SURFACE_DELAY_SECONDS") or 0.5
-    try:
-        delay = max(0.1, min(float(raw_delay), 30.0))
-    except (TypeError, ValueError):
-        delay = 0.5
     authorization = str(job.payload.get("authorization") or "")
     return SurfaceScope(
         program=f"console-{run_id}",
         authorization=authorization or f"Console operator authorized scan of {target_url}",
+        engagement=_engagement(job, run_id=run_id),
         allowed_domains=tuple(domains), allowed_hosts=tuple(hosts),
-        forbidden=tuple(forbidden), delay_seconds=delay,
+        forbidden=tuple(forbidden), delay_seconds=_scope_delay(job),
     )
 
 
@@ -155,13 +188,19 @@ def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 TARGET_RUN_KIND = "target_run"
 
 
-def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: str) -> Any:
+def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: str,
+                               engagement: str, delay: float) -> Any:
     """Build the run scope from a confirmed TargetCard — strictly.
 
     ``allowed_domains`` stays empty on purpose: a domain entry matches
     descendants, so widening a one-host card to its registrable domain would let
     the run reach hosts the operator never confirmed.  Non-wildcard
     ``allowed_hosts`` entries match exactly, which is what a card carries.
+
+    ``engagement``/``delay`` are passed in rather than defaulted here: this is the
+    path that used to inherit ``SurfaceScope``'s dataclass default while the typed
+    path used the payload/env one, so the same operator got two different paces
+    depending on how the run started.
     """
     from agents.surface_discovery import SurfaceScope
 
@@ -171,9 +210,11 @@ def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: 
     return SurfaceScope(
         program=f"console-{run_id}",
         authorization=f"confirmed_target_card:{target_id}",
+        engagement=engagement,
         allowed_domains=(),
         allowed_hosts=hosts,
         forbidden=forbidden,
+        delay_seconds=delay,
     )
 
 
@@ -192,7 +233,10 @@ def _handler_target_run(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
         target_id, expected_digest=str(job.payload.get("target_card_digest") or ""))
     if stored["target_card_ref"] != str(job.payload.get("target_card_ref") or ""):
         raise IntakeStateError("target_card_ref_mismatch")
-    scope = _scope_from_confirmed_card(stored["target_card"], target_id=target_id, run_id=run_id)
+    scope = _scope_from_confirmed_card(
+        stored["target_card"], target_id=target_id, run_id=run_id,
+        engagement=_engagement(job, run_id=run_id), delay=_scope_delay(job),
+    )
     # Belt and braces: the card has to cover the URL we are about to fetch.
     allowed, reason = scope.check_url(job.target)
     if not allowed:

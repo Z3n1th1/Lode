@@ -129,6 +129,15 @@ def _host_matches(host: str, entry: str, *, descendants: bool = True) -> bool:
 class SurfaceScope:
     program: str
     authorization: str
+    # 预算身份 —— 一次 engagement 一个令牌桶(见 core/rate_limit)。
+    #
+    # 它和 ``program`` 是两件事:``program`` 是给人看的名字,控制台上每个 job 都铸
+    # 一个新的(``console-<run_id>``),拿它当桶的键就等于一个 job 一个桶。一次粘贴
+    # 20 个目标 = 20 个桶 = 程序写明的 3 req/s 变成 16。
+    #
+    # 所以 Console 路径显式声明 ``turn-<turn_id>``(一次对话 = 一次 engagement),
+    # 而 scope 文件不声明 —— 空值回落到 ``program``,CLI 的行为一个字都不变。
+    engagement: str = ""
     allowed_domains: tuple[str, ...] = ()
     allowed_hosts: tuple[str, ...] = ()
     allowed_ips: tuple[str, ...] = ()
@@ -157,9 +166,13 @@ class SurfaceScope:
         authorization = str(value.get("authorization") or data.get("authorization") or "").strip()
         if not authorization and value.get("schema") == "TargetCard/v1":
             authorization = "confirmed_target_card:" + str(value.get("target_id") or "unknown")
+        program = str(value.get("program") or value.get("name") or "authorized-program").strip()
+        # 文件里没写 engagement 就是 CLI 那条路:回落 program,桶的键和以前逐字相同。
+        engagement = str(data.get("engagement") or value.get("engagement") or "").strip() or program
         return cls(
-            program=str(value.get("program") or value.get("name") or "authorized-program").strip(),
+            program=program,
             authorization=authorization,
+            engagement=engagement,
             allowed_domains=domains,
             allowed_hosts=hosts,
             allowed_ips=tuple(str(item).strip() for item in (data.get("allowed_ips") or ()) if str(item).strip()),

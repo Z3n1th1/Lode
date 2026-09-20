@@ -23,9 +23,10 @@ from console import jobs  # noqa: E402
 class _Job:
     """Just enough of a JobRecord for the scope builder."""
 
-    def __init__(self, target: str, payload: dict | None = None) -> None:
+    def __init__(self, target: str, payload: dict | None = None, turn_id: str = "") -> None:
         self.target = target
         self.payload = payload or {}
+        self.turn_id = turn_id
 
 
 def _scope(target: str, payload: dict | None = None):
@@ -82,6 +83,47 @@ class TypedTargetScopeTests(unittest.TestCase):
 
     def test_the_scope_still_passes_authorization(self) -> None:
         _scope("https://a.example.com/").require_authorization()
+
+
+class RunIdentityTests(unittest.TestCase):
+    """一次对话 = 一次 engagement;一次对话里的所有 job 合起来只有一份预算。
+
+    桶本身在 ``core/rate_limit``(它有一整套测试)。这里钉的是 Console 这一侧交出
+    去的身份:是不是那次对话,以及两条入口(手打的 URL / 确认过的卡片)是不是同一
+    个节奏 —— 它们以前是两个答案(0.5 与 dataclass 默认 0.4)。
+    """
+
+    def test_a_typed_job_draws_on_its_conversation(self) -> None:
+        job = _Job("https://a.example.com/", {"run_id": "SA-1"}, turn_id="T-abc")
+        scope = jobs._typed_target_scope(job, run_id="SA-1", target_url=job.target)
+        self.assertEqual("turn-T-abc", scope.engagement)
+        self.assertEqual("console-SA-1", scope.program)   # 显示名照旧,一个 job 一个
+
+    def test_a_declared_program_beats_the_conversation(self) -> None:
+        """scope 里点了名的程序就是这次 engagement 自己的身份,不用对话号顶替。"""
+        job = _Job("https://a.example.com/", {"program": "nba"}, turn_id="T-abc")
+        scope = jobs._typed_target_scope(job, run_id="SA-1", target_url=job.target)
+        self.assertEqual("nba", scope.engagement)
+
+    def test_without_a_turn_it_still_gets_a_unique_identity(self) -> None:
+        """没有 turn(老调用方/手工构造)不能退化成空键 —— 那样所有 job 会并成一个桶。"""
+        scope = jobs._typed_target_scope(_Job("https://a.example.com/"), run_id="SA-9",
+                                         target_url="https://a.example.com/")
+        self.assertEqual("console-SA-9", scope.engagement)
+
+    def test_the_card_path_and_the_typed_path_pace_the_same(self) -> None:
+        job = _Job("https://a.example.com/")
+        card_scope = jobs._scope_from_confirmed_card(
+            {"scope": {"allowed_hosts": ["a.example.com"]}}, target_id="t1", run_id="r1",
+            engagement=jobs._engagement(job, run_id="r1"), delay=jobs._scope_delay(job))
+        self.assertEqual(_scope("https://a.example.com/").delay_seconds, card_scope.delay_seconds)
+
+    def test_both_constructors_take_the_pace_from_the_same_place(self) -> None:
+        job = _Job("https://a.example.com/", {"delay_seconds": 1.0})
+        card_scope = jobs._scope_from_confirmed_card(
+            {"scope": {"allowed_hosts": ["a.example.com"]}}, target_id="t1", run_id="r1",
+            engagement="turn-T", delay=jobs._scope_delay(job))
+        self.assertEqual(1.0, card_scope.delay_seconds)
 
 
 class SurfaceScanProducerTests(unittest.TestCase):
