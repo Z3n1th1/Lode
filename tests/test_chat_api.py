@@ -5,6 +5,7 @@ The chat turn calls the LLM, so the ``chat_turn`` handler is replaced with a fak
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -545,6 +546,123 @@ class EscalationTests(_ChatCase):
         self.assertIn("挖洞", reply["text"])
         # 只是提示怎么切,不是偷偷换了模式
         self.assertEqual([], [e for e in events if e["kind"] == "mode_changed"])
+
+
+class ScopeDocumentTurnTests(_ChatCase):
+    """在对话里贴一份授权文档:认出它、出一张待确认卡,而且**一个请求都不发**。
+
+    这份文档里有几台主机名,``targets.split_targets`` 会很乐意把它们当成一次
+    "粘了一堆目标"去扩 fan-out。所以这条判定必须在意图路由**之前**跑。
+    """
+
+    DOC = {
+        "program": "nba-public",
+        "authorization": "HackerOne managed program, closed scope",
+        "allowed_hosts": ["api.nba.com", "cdn.nba.com", "login.nba.com"],
+        "forbidden_hosts": ["cms.nba.com"],
+        "rate_limit": {"requests_per_second": 3},
+        "max_fanout": 2,
+    }
+
+    def _session(self, client) -> str:
+        return client.post("/api/v1/chat/sessions", json={"mode": "pentest"}).json()["session_id"]
+
+    def _client(self) -> TestClient:
+        """每一个会发流量的 executor 都必须换成替身。
+
+        这个测试类里的文本**含主机名**,所以哪怕判定对了、走的是聊天回退,意图路由
+        也可能判成"粘了一堆目标"而起 src_loop。不换替身就会真的去打 api.nba.com。
+        """
+        def fake(job, ctx):
+            ctx.emit("subtask_progress", phase="stubbed")
+            return {"summary_ref": "stubbed"}
+
+        patcher = patch.object(agents_src_chat, "chat", lambda session, text, **kw: "已收到")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return self.start_client({"src_loop": fake, "surface_scan": fake})
+
+    def _send(self, client, session: str, text: str) -> None:
+        resp = client.post(f"/api/v1/chat/sessions/{session}/messages",
+                           json={"text": text, "mode": "pentest"})
+        self.assertEqual(202, resp.status_code, resp.text)
+        self.assertTrue(_wait(lambda: not console_jobs.active_jobs(self.state_dir)))
+
+    def _events(self, client, session: str) -> list:
+        return client.get(f"/api/v1/chat/sessions/{session}/events").json()["events"]
+
+    def _replies(self, client, session: str) -> list:
+        return [e["text"] for e in self._events(client, session) if e["kind"] == "assistant_message"]
+
+    def test_a_pasted_document_authorises_nothing_until_confirmed(self) -> None:
+        client = self._client()
+        session = self._session(client)
+        self._send(client, session, json.dumps(self.DOC))
+
+        # 这一轮自己就是对话轮,所以只有一个 subtask_started(它自己)—— 没有第二个,
+        # 那是"文档里的主机名被当成目标起了跑"。
+        kinds = [event["kind"] for event in self._events(client, session)]
+        self.assertEqual(1, kinds.count("subtask_started"))
+        self.assertIn("scope_preview", kinds)
+        self.assertLess(kinds.index("scope_preview"), kinds.index("assistant_message"))
+        # 一个狩猎 job 都没起 —— 文档里那些主机名没有变成一次 fan-out。
+        self.assertEqual([], [job for job in client.get("/api/v1/jobs?limit=200").json()["jobs"]
+                             if job["kind"] != "chat_turn"])
+
+        preview_event = next(e for e in self._events(client, session) if e["kind"] == "scope_preview")
+        self.assertEqual(["api.nba.com", "cdn.nba.com", "login.nba.com"],
+                         preview_event["summary"]["hosts"])
+        # 事件里不带全文:原文在 intake ledger 里,确认时按 digest 复读。
+        self.assertNotIn("document", preview_event)
+
+        reply = self._replies(client, session)[0]
+        self.assertIn("确认之前不发起任何请求", reply)
+        self.assertIn("3 台", reply)
+        self.assertIn("3 req/s", reply)
+        self.assertIn("共用一个预算", reply)
+        self.assertIn("本轮将起:2 个任务", reply)
+        self.assertIn("1 台超出", reply)
+
+        # 待确认槽里躺着的是那份文档,不是一张目标卡。
+        pending = client.get("/api/v1/project/intake/pending").json()
+        self.assertIsNone(pending["preview"])
+        self.assertEqual(preview_event["intake_id"], pending["scope_preview"]["intake_id"])
+
+    def test_a_domain_pattern_is_refused_with_a_reason_and_no_request(self) -> None:
+        client = self._client()
+        session = self._session(client)
+        self._send(client, session, json.dumps({"authorization": "a", "allowed_domains": ["nba.com"]}))
+
+        self.assertEqual([], [job for job in client.get("/api/v1/jobs?limit=200").json()["jobs"]
+                             if job["kind"] != "chat_turn"])
+        self.assertEqual([], [e for e in self._events(client, session) if e["kind"] == "scope_preview"])
+        reply = self._replies(client, session)[0]
+        self.assertIn("allowed_domains", reply)
+        self.assertIn("只收精确主机名", reply)
+        self.assertIn("nba.com", reply)
+        self.assertIn("没有发出任何请求", reply)
+
+    def test_prose_around_the_json_stays_a_chat_message(self) -> None:
+        """夹在句子里的一段 JSON 是一句关于文档的话,不是一份文档。"""
+        client = self._client()
+        session = self._session(client)
+        self._send(client, session, "帮我看看这份配置 " + json.dumps(self.DOC))
+
+        self.assertEqual([], [e for e in self._events(client, session) if e["kind"] == "scope_preview"])
+        self.assertIsNone(client.get("/api/v1/project/intake/pending").json()["scope_preview"])
+
+    def test_a_second_different_document_says_what_is_in_the_way(self) -> None:
+        client = self._client()
+        session = self._session(client)
+        self._send(client, session, json.dumps(self.DOC))
+        self._send(client, session, json.dumps({**self.DOC, "program": "other",
+                                                 "allowed_hosts": ["x.example.com"]}))
+
+        self.assertIn("待确认队列里已经有一份授权文档", self._replies(client, session)[-1])
+        self.assertIn("先放弃它", self._replies(client, session)[-1])
+        # 第一份仍在原地,没有被第二份挤掉,也没有起任何任务。
+        pending = client.get("/api/v1/project/intake/pending").json()["scope_preview"]
+        self.assertEqual(["api.nba.com", "cdn.nba.com", "login.nba.com"], pending["summary"]["hosts"])
 
 
 if __name__ == "__main__":

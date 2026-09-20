@@ -37,6 +37,8 @@ EVENT_KINDS = (
     "tool_call", "tool_result", "subtask_started", "subtask_progress",
     "subtask_finished", "finding", "approval_required", "approval_resolved",
     "mode_changed", "error",
+    # 一次对话轮里认出的一份授权文档:待确认,还没有任何请求发出去。
+    "scope_preview",
 )
 
 

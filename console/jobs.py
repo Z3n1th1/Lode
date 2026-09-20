@@ -535,6 +535,123 @@ def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 # 它管的是队列有多长,不是程序会被打多快。清单里 200 个域名不等于 200 个猎场。
 
 
+# 拒绝理由要翻成人话。只说"不行"而不说"为什么",操作员会以为产品坏了 —— 而这几条
+# 恰恰是最容易被当成 bug 的地方(它们都是"你这份文档的写法我们不收")。
+_SCOPE_REFUSAL_TEXT = {
+    "scope_document_domains_not_allowed":
+        "它用 allowed_domains 授权 —— 那是整片域,连带它的所有子域,而 Console 只收精确主机名",
+    "scope_document_ip_range_not_allowed":
+        "它用 CIDR 网段授权 —— 那是一片地址,同样不是精确主机名",
+    "surface_authorization_required":
+        "它没有写 authorization(书面授权说明)那一栏",
+    "surface_scope_required":
+        "它没有写任何主机、域或地址",
+    "scope_document_no_hosts":
+        "它列出的主机里,没有一台是能打的公网 http(s) 主机",
+}
+
+
+def _scope_document_refusal(exc: Any) -> str:
+    reason = str(getattr(exc, "reason", "") or exc)
+    detail = str(getattr(exc, "detail", "") or "")
+    text = _SCOPE_REFUSAL_TEXT.get(reason, "它没通过授权文档的校验")
+    extra = f"({detail})" if detail else ""
+    return (f"这看起来是一份授权文档,但读不成一次可以开跑的授权:{text}{extra}。\n\n"
+            f"什么都没起,也没有发出任何请求。改好之后把**整份 JSON** 重新贴一次就行 —— "
+            f"前后不要带说明文字,否则它就只是聊天里的一段话了。")
+
+
+def _scope_preview_notice(view: Dict[str, Any]) -> str:
+    """What the operator is about to authorise, in the conversation."""
+    summary = view.get("summary") if isinstance(view.get("summary"), dict) else {}
+    hosts = [str(host) for host in (summary.get("hosts") or [])]
+    rejected = summary.get("rejected") or []
+    program = str(summary.get("program") or "").strip() or "未命名"
+    rate = float(summary.get("requests_per_second") or 0.0)
+    cap = int(summary.get("max_fanout") or 0)
+    methods = "、".join(str(method) for method in (summary.get("allowed_methods") or []))
+    body = "可以带请求体" if summary.get("allow_request_body") else "不允许带请求体"
+    will_run = min(len(hosts), cap) if cap else len(hosts)
+
+    shown = "、".join(hosts[:6]) + (" …" if len(hosts) > 6 else "")
+    lines = [
+        "这是一份**授权文档**,不是一次狩猎请求 —— 确认之前不发起任何请求。",
+        "",
+        f"- 程序:{program}",
+        f"- 授权主机:{len(hosts)} 台({shown})",
+    ]
+    forbidden = summary.get("forbidden_hosts") or []
+    if forbidden:
+        lines.append(f"- 排除:{len(forbidden)} 台")
+    if rate:
+        lines.append(f"- 速率:{rate:g} req/s(这份授权下所有任务共用一个预算,不是每个任务一份)")
+    if methods:
+        lines.append(f"- 能力:{methods}({body})")
+    lines.append(f"- 本轮将起:{will_run} 个任务 —— 每个任务只覆盖它自己那一台主机")
+    if len(hosts) > will_run:
+        lines.append(f"- 另有 {len(hosts) - will_run} 台超出文档自己写的上限 {cap},这次不起")
+    if rejected:
+        lines.append("")
+        lines.append(f"- 被拦下 {len(rejected)} 台(不是公网 http(s),或通配主机):"
+                     + "、".join(f"{host}({reason})" for host, reason in rejected[:5]))
+    lines += ["", "在待确认队列里点确认之后才开跑。"]
+    return "\n".join(lines)
+
+
+def _pending_conflict_notice(state_dir: Path | str) -> str:
+    """一个槽能放两种东西,所以挡路的是哪一种要说出来。"""
+    from console import intake as intake_bridge
+
+    try:
+        scope_preview = intake_bridge.scope_pending_preview(state_dir)
+        target_preview = intake_bridge.pending_preview(state_dir)
+    except OSError:
+        scope_preview = target_preview = None
+    if scope_preview is not None:
+        summary = scope_preview.summary if isinstance(scope_preview.summary, dict) else {}
+        return (f"（待确认队列里已经有一份授权文档:{summary.get('program') or '未命名'},"
+                f"{len(summary.get('hosts') or [])} 台主机。先放弃它,再说下一份。）")
+    if target_preview is not None:
+        return f"（待确认队列里已经有一个目标:{target_preview.target}。先放弃它,再说下一份。）"
+    return "（待确认队列里已经有一份待确认的东西。先放弃它,再说下一份。）"
+
+
+def _handle_scope_document(ctx: JobContext, *, state_dir: Path | str, text: str) -> Optional[Dict[str, Any]]:
+    """Handle a turn that **is** an authorisation document; ``None`` if it is not one.
+
+    认不出来就返回 ``None``,让这一轮照常走聊天 —— 认错的代价(把聊天里引用的例子
+    当成一次授权)比认不出的代价大得多,所以判定只有一处、而且刻意保守。
+    """
+    from agents import scope_document
+    from console import intake as intake_bridge
+
+    if scope_document.looks_like_scope_document(text) is None:
+        return None
+
+    result: Optional[Dict[str, Any]] = None
+    try:
+        preview = intake_bridge.start_scope_preview(state_dir, source="paste", text=text)
+    except scope_document.ScopeDocumentError as exc:
+        notice = _scope_document_refusal(exc)
+    except IntakeStateError as exc:
+        reason = str(exc)
+        notice = (_pending_conflict_notice(state_dir) if reason == "pending_intake_exists"
+                  else f"（这份文档没有被接受:{reason}。什么都没起,也没有发出任何请求。）")
+    except OSError:
+        notice = "（这份文档读通了,但落盘失败。什么都没起。）"
+    else:
+        view = intake_bridge.scope_preview_view(preview)
+        # 事件里不带全文:原文在 intake ledger 里,确认时按 digest 复读。把 200 台
+        # 主机再抄一遍进事件流,只会让两份"真相"有机会互相打架。
+        ctx.emit("scope_preview", **{key: value for key, value in view.items() if key != "document"})
+        notice = _scope_preview_notice(view)
+        result = {"summary_ref": f"scope-preview:{preview.intake_id}",
+                  "progress": {"routed": "scope_document", "hosts": len(preview.summary.get("hosts") or [])}}
+    ctx.emit("assistant_message", text=notice)
+    return result if result is not None else {"summary_ref": "",
+                                              "progress": {"routed": "scope_document_refused"}}
+
+
 def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     """One conversation turn: route the intent, run chat, escalate if asked.
 
@@ -553,6 +670,13 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     mode = modes.get_mode(mode_name)
 
     ctx.emit("user_message", text=text)
+    # 一份授权文档不是一次狩猎请求,而且必须在 route **之前**拦下来:
+    # ``targets.split_targets`` 会很乐意拿 JSON 里那些裸主机名去扩 fan-out,于是一份
+    # 200 台主机的文档会变成 30 个 job 和三十张互不相干的卡。
+    document_result = _handle_scope_document(ctx, state_dir=state_dir, text=text)
+    if document_result is not None:
+        return document_result
+
     # 确定性规则先跑,读不懂的说法才落到这一个便宜的分类调用。这个回调必须传 ——
     # 不传的话 ``route`` 就只剩规则,而"看看这个站能不能打"这类说法只有分类器读得懂
     # (以前这里就没传,兜底整段是死代码,所以没认出来的话永远是"只回话")。
