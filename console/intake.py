@@ -24,6 +24,7 @@ from core.intake_state import (
     IntakePreview,
     IntakeState,
     IntakeStateError,
+    ScopeIntakePreview,
     TargetCardStore,
     default_options,
     target_card_from_preview,
@@ -230,3 +231,142 @@ def preview_view(preview: IntakePreview) -> Dict[str, Any]:
 
 def default_ttl_seconds() -> int:
     return DEFAULT_INTAKE_TTL_SECONDS
+
+
+# -- 授权文档这条路 -----------------------------------------------------------
+# 三个入口(粘贴/上传/监听目录)都走这里,所以"什么算一份授权文档"只有一处说了算。
+# 判定与解析在 agents/scope_document(它需要 SurfaceScope,而 core/ 不 import agents)。
+def _scope_modules():
+    """Import the document parser lazily, like every other agents/ use in console."""
+    from agents import scope_document
+
+    return scope_document
+
+
+def scope_summary(parsed: Any) -> Dict[str, Any]:
+    """What the operator is shown, and (via options_digest) what they confirm."""
+    scope = parsed.scope
+    return {
+        "program": scope.program,
+        "authorization": scope.authorization,
+        "hosts": list(parsed.hosts),
+        "rejected": [[host, reason] for host, reason in parsed.rejected],
+        "forbidden_hosts": list(scope.forbidden),
+        "allowed_methods": list(scope.allowed_methods),
+        "allow_request_body": bool(scope.allow_request_body),
+        "requests_per_second": round(scope.requests_per_second, 6),
+        "max_fanout": int(parsed.max_fanout),
+    }
+
+
+def parse_document(*, text: str = "", document: Optional[Dict[str, Any]] = None) -> Any:
+    """Recognise and parse a document from pasted text or an already-decoded object."""
+    scope_document = _scope_modules()
+    if document is None:
+        document = scope_document.looks_like_scope_document(text)
+        if document is None:
+            raise scope_document.ScopeDocumentError("scope_document_not_recognised")
+    return scope_document.parse_scope_document(document)
+
+
+def scope_pending_preview(state_dir: Path | str) -> Optional[ScopeIntakePreview]:
+    return intake_state(state_dir).scope_pending(user_id=CONSOLE_USER, chat_id=CONSOLE_CHAT)
+
+
+def start_scope_preview(
+    state_dir: Path | str,
+    *,
+    source: str,
+    instruction: str = "",
+    text: str = "",
+    document: Optional[Dict[str, Any]] = None,
+) -> ScopeIntakePreview:
+    """Mint the preview for an authorisation document.  Executes nothing."""
+    parsed = parse_document(text=text, document=document)
+    return intake_state(state_dir).create_scope_preview(
+        document=dict(parsed.document),
+        summary=scope_summary(parsed),
+        instruction=instruction,
+        source=source,
+        user_id=CONSOLE_USER,
+        chat_id=CONSOLE_CHAT,
+        message_id=f"console-{source}",
+    )
+
+
+def scope_preview_view(preview: ScopeIntakePreview) -> Dict[str, Any]:
+    """The review-safe object the API returns and the UI echoes back.
+
+    ``document`` 一并发出去:操作员确认的是**他贴的那份原文**,让他能在确认前读到
+    原文,而不是只能读我们的摘要。
+    """
+    return {
+        "schema": "ScopeIntakePreview/v1",
+        "intake_id": preview.intake_id,
+        "source": preview.source,
+        "document": dict(preview.document),
+        "document_digest": preview.document_digest,
+        "summary": dict(preview.summary),
+        "instruction": preview.instruction,
+        "instruction_digest": preview.instruction_digest,
+        "scope_digest": preview.scope_digest,
+        "options_digest": preview.options_digest,
+        "preview_digest": preview.preview_digest,
+        "created_at": preview.created_at,
+        "expires_at": preview.expires_at,
+    }
+
+
+def _scope_result(source: Dict[str, Any], materialized: Dict[str, Any]) -> Dict[str, Any]:
+    """One shape for both a fresh document confirm and a replayed one."""
+    record = materialized["authorization"]
+    return {
+        "intake_id": str(source.get("intake_id", "")),
+        "program": str(source.get("program") or record.get("program") or ""),
+        "target": str(source.get("target") or record.get("program") or ""),
+        "instruction": str(source.get("instruction", "")),
+        "options_digest": str(source.get("options_digest", "")),
+        "scope_digest": str(source.get("scope_digest", "")),
+        "document_digest": str(source.get("document_digest", "")),
+        "authorization": record,
+        "authorization_id": materialized["authorization_id"],
+        "authorization_digest": materialized["authorization_digest"],
+        "authorization_ref": materialized["authorization_ref"],
+        "hosts": list(record.get("hosts") or []),
+        "max_fanout": int(record.get("max_fanout") or 0),
+    }
+
+
+def confirm_scope(state_dir: Path | str, *, intake_id: str, options_digest: str) -> Dict[str, Any]:
+    """Consume a document confirmation and mint the authorisation record.
+
+    记录是从**确认时手上那份原文**重新解析出来的,不是从预览里的摘要拼的 ——
+    摘要给人和 digest 看,原文给程序看。
+    """
+    from console.engagement import EngagementAuthorizationStore, authorization_from_document
+
+    state = intake_state(state_dir)
+    replay = state.confirmed_intake(
+        user_id=CONSOLE_USER, chat_id=CONSOLE_CHAT,
+        intake_id=intake_id, options_digest=options_digest,
+    )
+    if replay is not None:
+        return _scope_result(replay, EngagementAuthorizationStore(state_dir).materialize(replay["authorization"]))
+
+    preview = state.scope_pending(user_id=CONSOLE_USER, chat_id=CONSOLE_CHAT)
+    if preview is None:
+        raise IntakeStateError("no_pending_scope_intake_preview")
+    if preview.intake_id != intake_id:
+        raise IntakeStateError("intake_confirmation_binding_mismatch")
+
+    record = authorization_from_document(parse_document(document=dict(preview.document)), source=preview.source)
+    materialized = EngagementAuthorizationStore(state_dir).materialize(record)
+    receipt = state.consume_scope_confirmation(
+        user_id=CONSOLE_USER,
+        chat_id=CONSOLE_CHAT,
+        message_id=preview.intake_id,
+        intake_id=preview.intake_id,
+        options_digest=options_digest,
+        authorization=materialized["authorization"],
+    )
+    return _scope_result(receipt, materialized)

@@ -450,6 +450,146 @@ class GatePrimitiveTests(unittest.TestCase):
             )
 
 
+class EngagementRouteTests(_GateCase):
+    """.一份授权文档从 HTTP 入口走到底:预览 → 确认 → 每台主机一个 job。
+
+    三个入口(粘贴/上传/监听目录)共用这条链,所以这里测的是那条链本身,而不是
+    某一个入口的便利写法。
+    """
+
+    DOC = {
+        "program": "nba-public",
+        "authorization": "HackerOne managed program, closed scope",
+        "allowed_hosts": ["api.nba.com", "cdn.nba.com"],
+        "forbidden_hosts": ["cms.nba.com"],
+        "rate_limit": {"requests_per_second": 3},
+        "max_fanout": 30,
+    }
+
+    def _preview(self, client: TestClient, **overrides) -> dict:
+        body = {"text": json.dumps(self.DOC), **overrides}
+        resp = client.post("/api/v1/project/engagement/preview", json=body)
+        self.assertEqual(200, resp.status_code, resp.text)
+        return resp.json()
+
+    def test_preview_then_confirm_starts_one_job_per_host(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        preview = self._preview(client)
+
+        self.assertEqual("preview", preview["status"])
+        self.assertTrue(preview["intake_id"].startswith("I-"))
+        self.assertEqual(["api.nba.com", "cdn.nba.com"], preview["summary"]["hosts"])
+        self.assertEqual(30, preview["summary"]["max_fanout"])
+        self.assertAlmostEqual(3.0, preview["summary"]["requests_per_second"], places=6)
+        # 确认前什么都还没有:没有授权记录,也没有 job。
+        self.assertEqual([], client.get("/api/v1/jobs").json()["jobs"])
+        self.assertFalse(list(self.card_root.rglob("authorization.json")))
+
+        # 一个槽两种形状:文档pending 时目标那一栏是空的。
+        pending = client.get("/api/v1/project/intake/pending").json()
+        self.assertIsNone(pending["preview"])
+        self.assertEqual(preview["intake_id"], pending["scope_preview"]["intake_id"])
+
+        confirmed = client.post("/api/v1/project/engagement/confirm", json={
+            "intake_id": preview["intake_id"], "options_digest": preview["options_digest"]})
+        self.assertEqual(200, confirmed.status_code, confirmed.text)
+        body = confirmed.json()
+        self.assertEqual("confirmed", body["status"])
+        self.assertEqual(2, body["run"]["launched"])
+        self.assertEqual(0, body["run"]["skipped"])
+        self.assertEqual(2, body["run"]["created"])
+        self.assertTrue(body["authorization_ref"].endswith(".json"))
+        self.assertIn("2 个任务", body["note"])
+
+        jobs = [job for job in client.get("/api/v1/jobs?limit=200").json()["jobs"]
+                if job["kind"] == "engagement_host_run"]
+        self.assertEqual(2, len(jobs))
+        self.assertEqual({"https://api.nba.com/", "https://cdn.nba.com/"}, {job["target"] for job in jobs})
+        self.assertEqual(preview["intake_id"], jobs[0]["payload"]["intake_id"])
+
+        # 确认之后槽就空了,而且重放不会起第二批。
+        self.assertIsNone(client.get("/api/v1/project/intake/pending").json()["scope_preview"])
+        replay = client.post("/api/v1/project/engagement/confirm", json={
+            "intake_id": preview["intake_id"], "options_digest": preview["options_digest"]})
+        self.assertEqual(200, replay.status_code, replay.text)
+        self.assertTrue(replay.json()["run"]["reused"])
+        self.assertEqual(2, len([job for job in client.get("/api/v1/jobs?limit=200").json()["jobs"]
+                                 if job["kind"] == "engagement_host_run"]))
+
+    def test_a_domain_pattern_is_refused_and_the_entries_are_named(self) -> None:
+        """域模式授权的是整片没看过的子域,所以这条入口不收 —— 而且要说是哪几个。"""
+        client = self.client({"engagement_host_run": _noop_run})
+        resp = client.post("/api/v1/project/engagement/preview", json={
+            "text": json.dumps({"authorization": "a", "allowed_domains": ["nba.com", "wnba.com"]})})
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertEqual("scope_document_domains_not_allowed", resp.json()["detail"])
+        self.assertIn("nba.com", resp.json()["items"])
+        self.assertIsNone(client.get("/api/v1/project/intake/pending").json()["scope_preview"])
+
+    def test_prose_is_not_a_document_and_says_so(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        resp = client.post("/api/v1/project/engagement/preview",
+                           json={"text": "看看这个 " + json.dumps(self.DOC)})
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertEqual("scope_document_not_recognised", resp.json()["detail"])
+
+    def test_an_empty_body_is_refused_before_the_gate(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        resp = client.post("/api/v1/project/engagement/preview", json={"text": "   "})
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertEqual("scope_document_required", resp.json()["detail"])
+
+    def test_a_bad_binding_is_a_conflict(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        preview = self._preview(client)
+        resp = client.post("/api/v1/project/engagement/confirm",
+                           json={"intake_id": preview["intake_id"], "options_digest": "0" * 64})
+        self.assertEqual(409, resp.status_code, resp.text)
+        # 被拒的确认不能吃掉预览。
+        self.assertIsNotNone(client.get("/api/v1/project/intake/pending").json()["scope_preview"])
+
+    def test_discard_clears_the_document_slot(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        self._preview(client)
+        self.assertTrue(client.post("/api/v1/project/engagement/discard").json()["discarded"])
+        self.assertFalse(client.post("/api/v1/project/engagement/discard").json()["discarded"])
+        self.assertIsNone(client.get("/api/v1/project/intake/pending").json()["scope_preview"])
+
+    def test_a_target_and_a_document_cannot_be_pending_at_once(self) -> None:
+        """一格只放一样东西 —— 但也不能静默把操作员手上那张卡换掉。"""
+        client = self.client({"engagement_host_run": _noop_run})
+        preview = self._preview(client)
+        conflict = client.post("/api/v1/project/intake", json=self.payload())
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        self.assertEqual("pending_intake_exists", conflict.json()["detail"])
+        # 挡路的是一份文档,不是一张目标卡 —— 说清楚,操作员才知道该放弃什么。
+        self.assertEqual("document", conflict.json()["pending_kind"])
+        self.assertEqual(preview["intake_id"], conflict.json()["pending"]["intake_id"])
+
+    def test_the_documents_own_cap_limits_the_run(self) -> None:
+        client = self.client({"engagement_host_run": _noop_run})
+        preview = self._preview(client, text=json.dumps({**self.DOC,
+                                                         "allowed_hosts": ["a.nba.com", "b.nba.com", "c.nba.com"],
+                                                         "max_fanout": 2}))
+        body = client.post("/api/v1/project/engagement/confirm", json={
+            "intake_id": preview["intake_id"], "options_digest": preview["options_digest"]}).json()
+        self.assertEqual(2, body["run"]["launched"])
+        self.assertEqual(1, body["run"]["skipped"])
+        self.assertIn("1 台超出", body["note"])
+
+    def test_the_engagement_routes_require_a_session(self) -> None:
+        app = create_app(state_dir=self.state_dir, password=PASSWORD, session_secret=SESSION_SECRET)
+        with TestClient(app) as client:
+            for method, path, body in (
+                ("POST", "/api/v1/project/engagement/preview", {"text": "{}"}),
+                ("POST", "/api/v1/project/engagement/confirm",
+                 {"intake_id": "I-1", "options_digest": "0" * 64}),
+                ("POST", "/api/v1/project/engagement/discard", None),
+            ):
+                with self.subTest(path=path):
+                    self.assertEqual(401, client.request(method, path, json=body).status_code)
+
+
 class ScopePreviewGateTests(unittest.TestCase):
     """授权文档和单个目标共用**一个**待确认槽,但各走各的消费口。
 

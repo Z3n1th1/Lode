@@ -63,6 +63,11 @@ ROUTE_CONTRACT = frozenset({
     ("POST", "/api/v1/project/intake/discard"),
     ("GET", "/api/v1/project/intake/pending"),
     ("GET", "/api/v1/project/intakes"),
+    # 授权文档那条路:一份 scope 文档 → 一次确认 → 每台主机一个 job。和手打 URL
+    # 共用同一个待确认槽,只是确认的是文档而不是一个目标。
+    ("POST", "/api/v1/project/engagement/preview"),
+    ("POST", "/api/v1/project/engagement/confirm"),
+    ("POST", "/api/v1/project/engagement/discard"),
     ("GET", "/api/v1/project/results"),
     # durable jobs + unified conversation stream (P3)
     ("GET", "/api/v1/jobs"),

@@ -68,6 +68,23 @@ class ProjectIntakeConfirmRequest(BaseModel):
     run: bool = True
 
 
+class ScopeIntakePreviewRequest(BaseModel):
+    """Step 1 of the document gate: hand over a whole authorisation document.
+
+    ``text`` 是粘贴或上传文件的内容,``document`` 是已经解析好的对象 —— 二选一。
+    上传走 ``text`` + ``filename``(浏览器侧 ``File.text()``),所以这条路上不需要
+    multipart,也就不需要新增依赖。
+
+    ``filename`` 只用来标出这份文档从哪来;它不参与任何判定 —— 入口不同不该导致
+    治理不同。
+    """
+
+    text: str = ""
+    document: Dict[str, Any] = {}
+    filename: str = ""
+    instruction: str = ""
+
+
 class SessionGuidanceRequest(BaseModel):
     session_id: str
     target: str

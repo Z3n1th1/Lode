@@ -43,6 +43,7 @@ from console.auth import _password_matches, _require_session
 from console.models import (
     ProjectIntakeConfirmRequest,
     ProjectIntakeRequest,
+    ScopeIntakePreviewRequest,
     SessionGuidanceRequest,
 )
 from console.projections import ReadOnlyControlPlane
@@ -70,6 +71,19 @@ _INTAKE_CLIENT_ERRORS = {
     "intake_confirmation_binding_mismatch": status.HTTP_409_CONFLICT,
     "intake_preview_expired": status.HTTP_410_GONE,
     "intake_confirmation_expired": status.HTTP_410_GONE,
+    # 授权文档那条路。每一个都是"这份文档不能开跑"的具体原因,所以是 400 而不是 500:
+    # 出问题的是输入,不是门本身。
+    "no_pending_scope_intake_preview": status.HTTP_409_CONFLICT,
+    "scope_document_required": status.HTTP_400_BAD_REQUEST,
+    "scope_document_not_recognised": status.HTTP_400_BAD_REQUEST,
+    "scope_document_not_an_object": status.HTTP_400_BAD_REQUEST,
+    "scope_document_no_hosts": status.HTTP_400_BAD_REQUEST,
+    "scope_document_domains_not_allowed": status.HTTP_400_BAD_REQUEST,
+    "scope_document_ip_range_not_allowed": status.HTTP_400_BAD_REQUEST,
+    "surface_authorization_required": status.HTTP_400_BAD_REQUEST,
+    "surface_scope_required": status.HTTP_400_BAD_REQUEST,
+    "authorization_record_invalid": status.HTTP_400_BAD_REQUEST,
+    "host_not_in_authorization": status.HTTP_400_BAD_REQUEST,
 }
 
 
@@ -86,12 +100,35 @@ def _intake_error(reason: str, ctx: Ctx) -> JSONResponse:
         return JSONResponse(content={"detail": "intake_gate_failed"}, status_code=code, headers=_NOSTORE)
     body: Dict[str, Any] = {"detail": reason}
     if reason == "pending_intake_exists":
+        # 一个槽能放两种东西,所以"挡路的是哪一张卡"必须说清楚 —— 只说"已经有一个
+        # 待确认了",操作员不知道该放弃什么。``pending_kind`` 让 UI 用对应的渲染器,
+        # 而不是靠猜字段。
         try:
-            preview = intake.pending_preview(ctx.state_dir)
+            target_preview = intake.pending_preview(ctx.state_dir)
+            scope_preview = intake.scope_pending_preview(ctx.state_dir)
         except OSError:
-            preview = None
-        if preview is not None:
-            body["pending"] = intake.preview_view(preview)
+            target_preview = scope_preview = None
+        if target_preview is not None:
+            body["pending"] = intake.preview_view(target_preview)
+            body["pending_kind"] = "target"
+        elif scope_preview is not None:
+            body["pending"] = intake.scope_preview_view(scope_preview)
+            body["pending_kind"] = "document"
+    return JSONResponse(content=body, status_code=code, headers=_NOSTORE)
+
+
+def _scope_error(exc: Any) -> JSONResponse:
+    """Turn a document refusal into the operator-facing response.
+
+    ``items`` 带上被点名的域/网段 —— 只说"不行"而不说"哪个不行",操作员只能靠猜,
+    而这几条拒绝恰恰是最容易让人以为产品坏了的地方。
+    """
+    reason = str(getattr(exc, "reason", "") or exc)
+    code = _INTAKE_CLIENT_ERRORS.get(reason, status.HTTP_400_BAD_REQUEST)
+    body: Dict[str, Any] = {"detail": reason}
+    detail = str(getattr(exc, "detail", "") or "")
+    if detail:
+        body["items"] = detail
     return JSONResponse(content=body, status_code=code, headers=_NOSTORE)
 
 
@@ -256,13 +293,108 @@ def build(ctx: Ctx) -> APIRouter:
         _require_session(request)
         try:
             preview = intake.pending_preview(ctx.state_dir)
+            scope_preview = intake.scope_pending_preview(ctx.state_dir)
         except OSError:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="intake_read_failed")
         return JSONResponse(
             content={"preview": intake.preview_view(preview) if preview else None,
+                     # 一个槽,两种形状:UI 按哪个非空决定渲染哪张确认卡。
+                     "scope_preview": intake.scope_preview_view(scope_preview) if scope_preview else None,
                      "ttl_seconds": intake.default_ttl_seconds()},
             headers=_NOSTORE,
         )
+
+    @router.post("/api/v1/project/engagement/preview")
+    def project_engagement_preview(payload: ScopeIntakePreviewRequest, request: Request) -> JSONResponse:
+        """第一步:把一份授权文档读通,铸一个 digest 绑定的预览。**不建记录、不开跑**。
+
+        粘贴、上传、监听目录三个入口都到这里 —— 一个判定、一道闸门。
+        """
+        _require_session(request)
+        document = dict(payload.document) if isinstance(payload.document, dict) and payload.document else None
+        if document is None and not _text(payload.text).strip():
+            # 空的和"不是文档"是两回事:前者是操作员没给东西,后者是给错了东西。
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="scope_document_required")
+        source = "upload" if _text(payload.filename) else "paste"
+        try:
+            preview = intake.start_scope_preview(
+                ctx.state_dir, source=source,
+                instruction=_text(payload.instruction, limit=1000).strip(),
+                text=payload.text, document=document,
+            )
+        except IntakeStateError as exc:
+            return _intake_error(str(exc), ctx)
+        except ValueError as exc:  # ScopeDocumentError 是 ValueError,且带 reason
+            return _scope_error(exc)
+        except OSError:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="intake_write_failed")
+        return JSONResponse(content={"ok": True, "status": "preview", **intake.scope_preview_view(preview)},
+                            headers=_NOSTORE)
+
+    @router.post("/api/v1/project/engagement/confirm")
+    def project_engagement_confirm(payload: ProjectIntakeConfirmRequest, request: Request) -> JSONResponse:
+        """第二步:回显绑定、铸授权记录,然后每台主机起一个 job。
+
+        记录落盘之后才允许起任务 —— 顺序就是这条链的全部意义。超出文档自己写的
+        ``max_fanout`` 的部分如实回报。
+        """
+        _require_session(request)
+        try:
+            result = intake.confirm_scope(
+                ctx.state_dir,
+                intake_id=_text(payload.intake_id, limit=128),
+                options_digest=_text(payload.options_digest, limit=64),
+            )
+        except IntakeStateError as exc:
+            return _intake_error(str(exc), ctx)
+        except ValueError as exc:
+            return _scope_error(exc)
+        except OSError:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail="authorization_write_failed")
+
+        session_id = _text(payload.session_id, limit=128)
+        if session_id and not SESSION_ID_RE.fullmatch(session_id):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_session_id")
+        run: Optional[Dict[str, Any]] = None
+        if payload.run:
+            from console import jobs as _jobs
+
+            try:
+                run = _jobs.start_engagement_run(ctx.state_dir, confirmed=result, session_id=session_id)
+            except OSError:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="run_start_failed")
+            except ValueError as exc:
+                return _scope_error(exc)
+        note = (f"授权记录已落盘,已起 {run['launched']} 个任务。" if run
+                else "授权记录已落盘,未开跑。")
+        if run and run.get("skipped"):
+            note += f"另有 {run['skipped']} 台超出文档写的上限,没起。"
+        return JSONResponse(content={
+            "ok": True, "status": "confirmed",
+            "intake_id": result["intake_id"],
+            "program": result["program"],
+            "instruction": result["instruction"],
+            "options_digest": result["options_digest"],
+            "document_digest": result["document_digest"],
+            "authorization_id": result["authorization_id"],
+            "authorization_digest": result["authorization_digest"],
+            "authorization_ref": result["authorization_ref"],
+            "hosts": result["hosts"],
+            "max_fanout": result["max_fanout"],
+            "run": run,
+            "note": note,
+        }, headers=_NOSTORE)
+
+    @router.post("/api/v1/project/engagement/discard")
+    def project_engagement_discard(request: Request) -> JSONResponse:
+        """放弃待确认的那份文档(与 TTL 到期写同一个 preview_expired 事件)。"""
+        _require_session(request)
+        try:
+            discarded = intake.discard(ctx.state_dir)
+        except OSError:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="intake_write_failed")
+        return JSONResponse(content={"ok": True, "discarded": discarded}, headers=_NOSTORE)
 
     @router.get("/api/v1/project/intakes")
     def project_intakes(request: Request) -> JSONResponse:
