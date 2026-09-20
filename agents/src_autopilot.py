@@ -33,6 +33,7 @@ if str(_CORE_DIR) not in sys.path:
 from core.file_lock import AdvisoryFileLock, replace_with_retry
 from agents.surface_discovery import SurfaceResult, SurfaceScope, surface_to_dict
 from core.src_blackboard import SENSITIVE_QUERY_KEY as _SENSITIVE_QUERY_KEY
+from core.src_blackboard import VARIABLE_SEGMENT as _VARIABLE_SEGMENT
 from core.src_blackboard import SrcBlackboard, probe_url as _probe_url
 
 
@@ -135,12 +136,51 @@ def _candidate_id(url: str) -> str:
     return "SC-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
 
 
+# 一个模板能记多少个具体实例。到顶就是"这个形状至少枚举了这么多",不假装精确 ——
+# 枚举面 200 个 id 和 2000 个 id 对"这是个可枚举的对象引用"这个判断没有区别。
+MAX_VARIANT_SAMPLES = 25
+
+
+def _template_id(url: str) -> str:
+    """The *shape* of an endpoint — one id per family, not per instance.
+
+    ``/users/2`` and ``/users/37`` are one endpoint with a variable, not two
+    candidates. Without this, one enumerable resource produces one candidate per id:
+    200 candidates eat the whole ``max_candidates`` budget and the reasoner's whole
+    50-intent window, so the interesting endpoints never reach the model.
+
+    Host is deliberately *not* folded in — the merge key is ``(template_id, host)``,
+    so the same shape on two hosts stays two candidates.
+
+    Query values need no folding: the display form already collapses every value to
+    ``[redacted]``/``[value]``, so ``?id=1`` and ``?id=2`` were always one candidate.
+    """
+    parsed = urlsplit(url)
+    segments: List[str] = []
+    for segment in (parsed.path or "/").split("/"):
+        for marker, pattern in _VARIABLE_SEGMENT:
+            if pattern.match(segment):
+                segment = marker
+                break
+        segments.append(segment)
+    template = "/".join(segments) + (f"?{parsed.query}" if parsed.query else "")
+    return "ST-" + hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
+
+
+def _host_of(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
 @dataclass
 class CandidateRecord:
     url: str
     score: int
     # 真正去取的那个 URL(凭据参数已整条丢掉)。``url`` 只用于展示和落盘。
     probe_url: str = ""
+    # 同一个形状的家族身份;``url`` 是这个家族里第一个见到的具体实例。
+    template_id: str = ""
+    # 这个模板见过哪些具体实例 —— ``variants`` 由它推出来,到 MAX_VARIANT_SAMPLES 封顶。
+    variant_urls: List[str] = field(default_factory=list)
     sources: set[str] = field(default_factory=set)
     first_seen_round: int = 0
     last_seen_round: int = 0
@@ -148,13 +188,22 @@ class CandidateRecord:
 
     @property
     def candidate_id(self) -> str:
+        # 仍然 hash **具体** url:改它会让已有黑板每个候选多出一对 fact/intent,而
+        # sync_candidates 从不迁移 —— 那等于毁掉重启安全。
         return _candidate_id(self.url)
+
+    @property
+    def variants(self) -> int:
+        return max(1, len(self.variant_urls))
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
             "url": self.url,
             "probe_url": self.probe_url,
+            "template_id": self.template_id,
+            "variants": self.variants,
+            "variant_samples": list(self.variant_urls),
             "path": urlsplit(self.url).path or "/",
             "priority": self.score,
             "sources": sorted(self.sources),
@@ -379,19 +428,26 @@ class SrcAutopilot:
         results: Sequence[Mapping[str, Any] | SurfaceResult],
         round_number: int,
     ) -> tuple[int, int]:
-        records: Dict[str, CandidateRecord] = {}
+        records: Dict[tuple, CandidateRecord] = {}
         for raw in state.get("candidates", []):
             if not isinstance(raw, Mapping) or not raw.get("url"):
                 continue
-            records[str(raw["url"])] = CandidateRecord(
-                url=str(raw["url"]),
+            url = str(raw["url"])
+            template_id = str(raw.get("template_id") or "") or _template_id(url)
+            record = CandidateRecord(
+                url=url,
                 score=int(raw.get("priority", 0)),
                 probe_url=str(raw.get("probe_url") or ""),
+                template_id=template_id,
                 sources={str(item) for item in (raw.get("sources") or ())},
                 first_seen_round=int(raw.get("first_seen_round", 0)),
                 last_seen_round=int(raw.get("last_seen_round", 0)),
                 status=str(raw.get("status", "queued")),
             )
+            samples = raw.get("variant_samples")
+            if isinstance(samples, list):
+                record.variant_urls = [str(item) for item in samples[:MAX_VARIANT_SAMPLES]] or [url]
+            records[(template_id, _host_of(url))] = record
         new_count = 0
         blocked_count = 0
         for item in results:
@@ -419,24 +475,32 @@ class SrcAutopilot:
                     blocked_count += 1
                     continue
                 clean_url, _reason, live_url = canonical
-                if clean_url in records:
-                    record = records[clean_url]
+                template_id = _template_id(clean_url)
+                key = (template_id, _host_of(clean_url))
+                record = records.get(key)
+                if record is not None:
                     record.sources.update(sources)
                     record.score = max(record.score, _score_candidate(clean_url, record.sources))
                     record.last_seen_round = round_number
                     if not record.probe_url:
                         record.probe_url = live_url
+                    if (clean_url not in record.variant_urls
+                            and len(record.variant_urls) < MAX_VARIANT_SAMPLES):
+                        record.variant_urls.append(clean_url)
                     continue
                 new_count += 1
-                records[clean_url] = CandidateRecord(
+                records[key] = CandidateRecord(
                     url=clean_url,
                     score=_score_candidate(clean_url, sources),
                     probe_url=live_url,
+                    template_id=template_id,
+                    variant_urls=[clean_url],
                     sources=sources,
                     first_seen_round=round_number,
                     last_seen_round=round_number,
                 )
-        ordered = sorted(records.values(), key=lambda item: (-item.score, item.url))[: self.max_candidates]
+        ordered = sorted(records.values(),
+                         key=lambda item: (-item.score, item.template_id, item.url))[: self.max_candidates]
         state["candidates"] = [item.as_dict() for item in ordered]
         return new_count, blocked_count
 
@@ -464,9 +528,11 @@ class SrcAutopilot:
             "",
         ]
         for candidate in state.get("candidates", []):
+            variants = int(candidate.get("variants") or 1)
+            shape = f" variants={variants}" if variants > 1 else ""
             lines.append(
                 f"- `{candidate['candidate_id']}` priority={candidate['priority']} "
-                f"phase={candidate['next_phase']} url=`{candidate['url']}` "
+                f"phase={candidate['next_phase']} url=`{candidate['url']}`{shape} "
                 f"sources={','.join(candidate['sources']) or '-'}"
             )
         self._atomic_write(self.out_dir / "src-autopilot-candidates.md", "\n".join(lines) + "\n")

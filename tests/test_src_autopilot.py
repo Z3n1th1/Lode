@@ -170,5 +170,81 @@ class SrcAutopilotTests(unittest.TestCase):
         self.assertEqual("max_rounds", summary["stop_reason"])
 
 
+class TemplateFoldingTests(unittest.TestCase):
+    """可枚举的资源不该一个 id 一个候选。
+
+    没有折叠时,一个 /users/{id} 面就有 200 个候选:max_candidates(100)被它一个
+    吃满,reasoner 的 50 条窗口也全是它,真正有意思的端点根本进不了模型视野。
+    """
+
+    def _scope(self) -> SurfaceScope:
+        return SurfaceScope("fixture-src", "written authorization fixture",
+                            allowed_domains=("example.com",), delay_seconds=0.1)
+
+    def _run(self, paths, *, rounds=1):
+        result = {
+            "schema": "SrcSurfaceResult/v1", "target": "https://example.com/",
+            "base_url": "https://example.com", "paths": paths, "api_urls": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = SrcAutopilot(self._scope(), root / "state.json", root / "out", max_rounds=rounds)
+            summaries = [agent.run_round(["https://example.com"], results=[result])
+                         if index == 0 else agent.run_round(results=[result])
+                         for index in range(rounds)]
+            candidates = json.loads(
+                (root / "out" / "src-autopilot-candidates.json").read_text(encoding="utf-8"))["candidates"]
+            state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+        return summaries, candidates, state
+
+    def test_enumerated_ids_fold_into_one_candidate(self) -> None:
+        summaries, candidates, _ = self._run([f"/api/v1/users/{n}" for n in range(1, 6)])
+        self.assertEqual(1, summaries[0]["candidate_count"])
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(5, candidates[0]["variants"])
+        self.assertEqual("https://example.com/api/v1/users/1", candidates[0]["url"])
+        self.assertEqual(5, len(candidates[0]["variant_samples"]))
+        # 家族身份是形状,不是实例 —— candidate_id 仍然钉在具体 url 上。
+        self.assertNotEqual("", candidates[0]["template_id"])
+
+    def test_a_digit_inside_a_segment_is_not_an_id(self) -> None:
+        """"整段判定"是这条的全部意义:endpoint0/endpoint1/e2 是三条路径。
+
+        按"含数字"归类会把它们并成一个家族,而它们之间没有任何关系。
+        """
+        _, candidates, _ = self._run(["/api/endpoint0", "/api/endpoint1", "/api/e2"])
+        self.assertEqual(3, len(candidates))
+
+    def test_uuid_and_hex_segments_are_their_own_shapes(self) -> None:
+        _, candidates, _ = self._run([
+            "/orders/1a2b3c4d-1111-2222-3333-444455556666",
+            "/orders/2b3c4d5e-2222-3333-4444-555566667777",
+            "/blobs/9f8e7d6c5b4a3210",
+            "/blobs/1a2b3c4d5e6f7081",
+        ])
+        self.assertEqual(2, len(candidates))
+        variants = sorted(item["variants"] for item in candidates)
+        self.assertEqual([2, 2], variants)
+
+    def test_the_same_shape_on_two_hosts_stays_two_candidates(self) -> None:
+        """合并键是 (template_id, host):同一个形状在两台主机上是两件事。"""
+        _, candidates, _ = self._run(["https://a.example.com/users/1", "https://b.example.com/users/2"])
+        self.assertEqual(2, len(candidates))
+
+    def test_re_seeing_the_same_instance_does_not_inflate_variants(self) -> None:
+        """同一份 surface 结果每一轮都会被再喂一遍,计数不能跟着轮数涨。"""
+        _, candidates, state = self._run([f"/api/v1/users/{n}" for n in range(1, 4)], rounds=2)
+        self.assertEqual([1, 0], [row["new_candidates"] for row in state["rounds"]])
+        self.assertEqual(3, candidates[0]["variants"])
+
+    def test_variant_samples_saturate_instead_of_growing_without_bound(self) -> None:
+        """枚举面可以是几千个 id;记录在 MAX_VARIANT_SAMPLES 处封顶,不假装精确。"""
+        from agents.src_autopilot import MAX_VARIANT_SAMPLES
+
+        _, candidates, _ = self._run([f"/api/v1/users/{n}" for n in range(1, 200)])
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(MAX_VARIANT_SAMPLES, candidates[0]["variants"])
+
+
 if __name__ == "__main__":
     unittest.main()

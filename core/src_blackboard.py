@@ -93,6 +93,76 @@ def probe_url(value: Any) -> str:
         return ""
 
 
+# 整段类型判定,不是"含数字"。``endpoint0`` / ``endpoint1`` 必须留在两个家族里,
+# 否则"带数字就是 id"会把版本号、序号后缀、编码一起并进来。顺序也有讲究:纯数字
+# 同时也是合法 hex,所以 id 必须排在 hex 前面。
+VARIABLE_SEGMENT = (
+    ("{uuid}", re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")),
+    ("{id}", re.compile(r"^[0-9]+$")),
+    ("{hex}", re.compile(r"(?i)^[0-9a-f]{8,}$")),
+)
+_PARAM_SPLIT = re.compile(r"[^a-z0-9]+")
+_HYPOTHESIS_LIMIT = 3
+# 名字里的 token 化,不做子串匹配 —— 否则 "valid" 会被当成含 id、"conversion"
+# 会被当成含 version。
+_ID_TOKENS = frozenset({"id", "uid", "guid", "oid", "pid", "uuid", "no", "num", "seq", "sn"})
+_URL_TOKENS = frozenset({
+    "url", "uri", "target", "dest", "destination", "redirect", "next", "continue",
+    "callback", "webhook", "image", "img", "fetch", "proxy", "host", "domain",
+    "returnurl", "return", "link", "src", "source", "endpoint", "site", "feed", "avatar",
+})
+_FILE_TOKENS = frozenset({
+    "file", "filename", "path", "filepath", "dir", "directory", "folder", "template",
+    "include", "doc", "document", "download", "load", "read", "page", "view",
+})
+_QUERY_TOKENS = frozenset({
+    "q", "query", "search", "keyword", "kw", "filter", "sort", "order", "orderby",
+    "name", "lang", "language", "type", "format", "select", "where", "cmd", "exec",
+    "sql", "limit", "offset",
+})
+_BOUNDARY_SEGMENTS = frozenset({
+    "admin", "administrator", "manage", "management", "internal", "private", "export",
+    "backoffice", "superuser", "actuator", "debug", "config", "console", "portal",
+})
+
+
+def hypotheses(url: str) -> List[str]:
+    """The vulnerability classes this URL's *shape* suggests — 0 to 3, deterministic.
+
+    Shape only: no response, no model, no scoring. Two things this is not. It is not
+    a claim that the endpoint is vulnerable, and it is not the reasoner's per-intent
+    hypothesis (that one is free-form, written by the model). It is a stable prior,
+    so the Explorer starts from a concrete question instead of "look for
+    security-relevant patterns" — and the same URL always yields the same list,
+    because a hint that changes between runs is worse than no hint.
+
+    Deliberately reads the *display* URL: its values are already collapsed, so the
+    answer does not change when a different instance of the same template shows up.
+    """
+    parsed = urlsplit(url)
+    segments = [part.lower() for part in (parsed.path or "/").split("/") if part]
+    names = [str(key).lower() for key, _value in parse_qsl(parsed.query, keep_blank_values=True)]
+    tokens = {token for name in names for token in _PARAM_SPLIT.split(name) if token}
+    segment_set = set(segments)
+    has_variable = any(
+        pattern.match(segment) for segment in segments for _marker, pattern in VARIABLE_SEGMENT
+    )
+    found: List[str] = []
+    for name, hit in (
+        ("graphql", "graphql" in segment_set or "gql" in segment_set or "graphql" in tokens),
+        ("idor", has_variable or bool(tokens & _ID_TOKENS)),
+        ("ssrf", bool(tokens & _URL_TOKENS)),
+        ("path_traversal", bool(tokens & _FILE_TOKENS)),
+        ("injection", bool(tokens & _QUERY_TOKENS)),
+        ("authz_boundary", bool(segment_set & _BOUNDARY_SEGMENTS)),
+    ):
+        if hit:
+            found.append(name)
+            if len(found) >= _HYPOTHESIS_LIMIT:
+                break
+    return found
+
+
 def _safe_text(value: Any, limit: int) -> str:
     return _SECRET_TEXT.sub("[redacted]", _text(value, limit))
 
@@ -196,6 +266,9 @@ class SrcBlackboard:
                 # 执行用的那一份。展示用的 ``url`` 把每个参数值都打码了,拿它去请求
                 # 必然 404 —— 而黑板同时是执行的唯一真相源,所以两份都要带。
                 probe = probe_url(candidate.get("probe_url")) or url
+                # 形状给的检查方向(0–3 条)。确定性纯函数,同一个 url 永远同一组 ——
+                # 所以这里自己算,不读生产者的字段。
+                signals = hypotheses(url)
                 fact_id = "F-" + _digest("candidate", cid)
                 fact = facts.get(fact_id)
                 if fact is None:
@@ -205,6 +278,7 @@ class SrcBlackboard:
                         "candidate_id": cid,
                         "url": url,
                         "probe_url": probe,
+                        "hypotheses": signals,
                         "priority": _priority(candidate.get("priority")),
                         "sources": [_text(item, 40) for item in (candidate.get("sources") or [])[:12]],
                         "run_id": _text(run_id, 80),
@@ -232,6 +306,8 @@ class SrcBlackboard:
                         "target": url,
                         # 真正会被请求的那个 URL;``target`` 是给人看的去敏形式。
                         "probe_url": probe,
+                        # 形状给的检查方向;Explorer 的提示词里会带这一节。
+                        "hypotheses": signals,
                         "priority": _priority(candidate.get("priority")),
                         "phase": _text(candidate.get("next_phase"), 64) or "A-passive-triage",
                         "status": "queued",

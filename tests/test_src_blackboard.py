@@ -354,5 +354,64 @@ class SrcBlackboardDagClaimTests(unittest.TestCase):
         self.assertEqual(["F-7", "F-8", "F-9"], [row["fact_id"] for row in snapshot["facts"]])
 
 
+    def test_shape_signals_are_deterministic_and_shaped_by_the_url(self) -> None:
+        """纯看形状:同一个 URL 永远同一组,命中不了就是空(不硬凑)。"""
+        from core.src_blackboard import hypotheses
+
+        cases = {
+            "https://x.com/api/v1/users/2": ["idor"],
+            "https://x.com/orders/1a2b3c4d-1111-2222-3333-444455556666": ["idor"],
+            "https://x.com/admin/export?customer_id=[value]": ["idor", "authz_boundary"],
+            "https://x.com/graphql": ["graphql"],
+            "https://x.com/redirect?next=[value]": ["ssrf"],
+            "https://x.com/download?file=[value]": ["path_traversal"],
+            "https://x.com/search?q=[value]": ["injection"],
+            # 没有信号就是空:静态资源上给一条假设,比不给更糟。
+            "https://x.com/static/app.js": [],
+            "https://x.com/health": [],
+            # "含数字"不是"是 id":2fa 是路径名的一部分,不是对象引用。
+            "https://x.com/v1/2fa": [],
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(expected, hypotheses(url))
+
+    def test_shape_signals_stay_stable_across_template_instances(self) -> None:
+        """同一个模板的另一个实例必须给同一组信号,否则提示词会随候选漂。"""
+        from core.src_blackboard import hypotheses
+
+        self.assertEqual(hypotheses("https://x.com/users/2"), hypotheses("https://x.com/users/37"))
+
+    def test_a_signal_cannot_hide_behind_a_numeric_suffix(self) -> None:
+        """"valid" 里含 id、"conversion" 里含 version —— 名字必须按 token 匹配。"""
+        from core.src_blackboard import hypotheses
+
+        self.assertNotIn("idor", hypotheses("https://x.com/api/valid"))
+        self.assertNotIn("idor", hypotheses("https://x.com/api/report?conversion=[value]"))
+
+    def test_facts_and_intents_carry_the_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", default_lease_seconds=60)
+            board.sync_candidates(
+                [{"candidate_id": "SC-1", "url": "https://example.com/admin/export?customer_id=[redacted]",
+                  "priority": 80}],
+                run_id="SA-1",
+            )
+            snapshot = board.snapshot()
+
+        self.assertEqual(["idor", "authz_boundary"], snapshot["facts"][0]["hypotheses"])
+        self.assertEqual(["idor", "authz_boundary"], snapshot["intents"][0]["hypotheses"])
+        # 信号是从**展示** url 算的:同一个模板换个实例,结果不该变。
+        self.assertEqual("https://example.com/admin/export?customer_id=[redacted]",
+                         snapshot["intents"][0]["target"])
+
+    def test_at_most_three_signals(self) -> None:
+        from core.src_blackboard import _HYPOTHESIS_LIMIT, hypotheses
+
+        # 一条 URL 同时踩中 idor / ssrf / injection / authz_boundary
+        url = "https://x.com/admin/fetch?user_id=[value]&url=[value]&q=[value]"
+        self.assertEqual(_HYPOTHESIS_LIMIT, len(hypotheses(url)))
+
+
 if __name__ == "__main__":
     unittest.main()

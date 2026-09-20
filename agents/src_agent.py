@@ -180,7 +180,7 @@ Priority: {priority}
 Hypothesis: {hypothesis}
 Check: {check_description}
 
-{hints_section}
+{shape_section}{hints_section}
 
 HTTP Response:
   Status: {status}
@@ -199,6 +199,36 @@ Analyze this response for the stated hypothesis. Output JSON only.\
 # ---------------------------------------------------------------------------
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.S)
+
+
+# 形状信号 → 一句具体的检查方向(信号本身来自 core/src_blackboard.hypotheses)。
+#
+# authz_boundary 的措辞是刻意的:这条路径上**没有**头部/凭据通道(_fetch_text 只发
+# 固定的 UA/Accept),所以它问的是"未授权状态下是否已经可读",而不是"换个身份去
+# 对比"。提示词不能暗示一个不存在的通道 —— 模型会照着它写出没法执行的计划。
+_HYPOTHESIS_BRIEF = {
+    "idor": "对象引用可枚举 —— 换一个同形状的对象,看是否回的是别人的数据",
+    "injection": "带搜索/过滤/排序参数 —— 看回显与报错,判断能否注入",
+    "ssrf": "参数看起来是 URL/目标地址 —— 看服务端是否会替你去取",
+    "path_traversal": "参数看起来是文件路径 —— 看能否读到预期之外的文件",
+    "graphql": "GraphQL 端点 —— 看内省是否开放、字段级授权是否逐字段校验",
+    "authz_boundary": "路径位于授权边界上 —— 只判断它在**未授权**状态下是否已经可读"
+                      "(不做凭据重放,这条路径没有凭据通道)",
+}
+
+
+def _shape_signals_section(names: Any) -> str:
+    """The Explorer's 'what to look for' block, or '' when the shape says nothing.
+
+    Empty is a real answer: a static asset with no parameters gives the Explorer no
+    prior, and inventing one would be worse than letting the model read the response.
+    """
+    wanted = [str(name) for name in (names or []) if str(name) in _HYPOTHESIS_BRIEF]
+    if not wanted:
+        return ""
+    lines = [f"Shape signals (from the URL, not a claim):"]
+    lines.extend(f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted)
+    return "\n".join(lines) + "\n\n"
 
 
 def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
@@ -281,10 +311,12 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
         for i in queued:
             deps = i.get("depends_on") or []
             dep_note = f" deps={','.join(str(d) for d in deps)}" if deps else ""
+            shapes = i.get("hypotheses") or []
+            shape_note = f" shapes={','.join(str(s) for s in shapes)}" if shapes else ""
             lines.append(
                 f"- {i.get('intent_id', '?')}: target={i.get('target', '?')} "
                 f"priority={i.get('priority', 0)} phase={i.get('phase', '?')} "
-                f"candidate_id={i.get('candidate_id', '?')}{dep_note}"
+                f"candidate_id={i.get('candidate_id', '?')}{shape_note}{dep_note}"
             )
     else:
         lines.append("\n## Queued Intents: (none)")
@@ -1013,6 +1045,7 @@ class SrcAgentLoop:
             hypothesis=hypothesis or "general security analysis",
             check_description=check_description or "look for security-relevant patterns",
             hints_section=hints_section,
+            shape_section=_shape_signals_section(intent.get("hypotheses")),
             status=fetch_result["status"],
             headers_text=_sanitize_headers(fetch_result["headers"]),
             body_limit=BODY_LIMIT,

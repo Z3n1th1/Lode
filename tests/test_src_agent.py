@@ -107,6 +107,27 @@ class TestBlackboardContext(unittest.TestCase):
         self.assertIn("H-001", ctx)
         self.assertIn("Queued Intents (1 available)", ctx)
 
+    def test_queued_intents_show_their_shape_signals(self):
+        """形状信号要出现在 reasoner 选的这一行上,不然它只能看见一个裸 URL。"""
+        snapshot = {
+            "facts": [], "dead_ends": [], "hints": [],
+            "intents": [{"intent_id": "I-001", "target": "https://example.com/admin/export?customer_id=[redacted]",
+                         "priority": 80, "phase": "A-passive-triage", "status": "queued",
+                         "candidate_id": "SC-001", "hypotheses": ["idor", "authz_boundary"]}],
+        }
+        ctx = _blackboard_to_context(snapshot)
+        self.assertIn("shapes=idor,authz_boundary", ctx)
+
+    def test_an_intent_with_no_signal_gets_no_shapes_note(self):
+        """空就是空 —— 补一句 "shapes=-" 只会让每一行都变长。"""
+        snapshot = {
+            "facts": [], "dead_ends": [], "hints": [],
+            "intents": [{"intent_id": "I-001", "target": "https://example.com/health",
+                         "priority": 10, "status": "queued", "candidate_id": "SC-001"}],
+        }
+        ctx = _blackboard_to_context(snapshot)
+        self.assertNotIn("shapes=", ctx)
+
     def test_truncation_keeps_the_highest_scoring_intents(self):
         """黑板把 intents 按优先级降序存,所以取尾部就是取最低分的那一段。
 
@@ -337,6 +358,44 @@ class TestSrcAgentLoop(unittest.TestCase):
             self.assertGreaterEqual(intent["attempts"], 2)
             self.assertEqual(intent["status"], "dead_end")
             self.assertGreaterEqual(len(summary["errors"]), 1)
+
+    def test_the_explorer_prompt_carries_the_shape_signals(self):
+        """URL 形状看出来的检查方向必须进提示词。
+
+        否则 Explorer 面对的永远是同一句 "look for security-relevant patterns",
+        每个 intent 都从零开始猜 —— 而形状那点信息是免费的、确定的。
+        """
+        seen: List[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            bb.sync_candidates(
+                [{"candidate_id": "SC-1", "priority": 80,
+                  "url": "https://example.com/admin/export?customer_id=[redacted]"}],
+                run_id="SA-1",
+            )
+            intent_id = bb.snapshot()["intents"][0]["intent_id"]
+
+            def complete(system, user, **kw):
+                if "Reasoner" in system:
+                    return json.dumps({"reasoning": "t", "should_stop": False,
+                                       "selected_intents": [{"intent_id": intent_id,
+                                                             "hypothesis": "h", "check_description": "c"}]})
+                seen.append(user)
+                return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end",
+                                   "dead_end_reason": "nothing"})
+
+            run_src_agent(bb_path, _make_scope(), max_cycles=2, fetcher=lambda url, **kw: (200, "{}", {}),
+                          llm_complete_fn=complete, worker_id="test-w")
+
+        self.assertTrue(seen, "Explorer 一次都没跑到,这条断言无意义")
+        prompt = seen[0]
+        self.assertIn("Shape signals", prompt)
+        self.assertIn("idor", prompt)
+        self.assertIn("authz_boundary", prompt)
+        # 这条路径没有头部/凭据通道,提示词不能暗示有 —— 否则模型会写一个跑不了的计划。
+        self.assertIn("不做凭据重放", prompt)
 
     def test_explorer_unparseable_response(self):
         """Explorer garbage is transient → retried, dead_end only after the cap."""
