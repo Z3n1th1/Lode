@@ -109,6 +109,30 @@ def _as_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# req/s 是程序自己用的单位("所有流量 <= 3 req/s"),delay 是我们换算出来的。让操作员
+# 手算 1/3 是在制造错误来源。间隔的上下界只写一次:req/s 和 delay 是同一种东西的两种
+# 拼法,写错时该撞的是同一堵墙。
+MIN_DELAY_SECONDS = 0.1
+MAX_DELAY_SECONDS = 30.0
+
+
+def _delay_from_rate(value: Any) -> float | None:
+    """``requests_per_second`` → ``delay_seconds``, or ``None`` if unparseable.
+
+    两种拼法共用同一组上下界,所以写错哪一个撞的都是同一堵墙,不会出现"换个写法就
+    能打得更快"。上界(``MAX_DELAY_SECONDS``,30s)是既有的节奏界,不是这次新加的:
+    比它更慢的声明会被夹到 30s,``min_interval_seconds`` 一直如此。读不懂(``"fast"``)
+    或明显是 0 的一律返回 ``None``,让调用方退回它自己的读法,而不是替程序猜速率。
+    """
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    return max(MIN_DELAY_SECONDS, min(1.0 / rate, MAX_DELAY_SECONDS))
+
+
 def _readonly_url_reason(value: str) -> str:
     """Additional GET safety check, not proof of a server's implementation.
 
@@ -189,7 +213,16 @@ class SurfaceScope:
         forbidden = tuple(str(item).strip() for item in _as_tuple(data.get("forbidden") or data.get("forbidden_hosts")) if str(item).strip())
         rate = data.get("rate_limit") if isinstance(data.get("rate_limit"), Mapping) else {}
         timeout = value.get("timeout_seconds", rate.get("timeout_seconds", 8))
-        delay = value.get("surface_delay_seconds", rate.get("surface_delay_seconds", rate.get("min_interval_seconds", 0.4)))
+        # req/s 优先,而且和 delay 互斥:程序里写的是 req/s,换算是我们的事。两个都给
+        # 就按 req/s 走 —— 让 1/3 和 0.333 这种手算结果互相打架没有意义。
+        raw_rate = data.get("requests_per_second", value.get("requests_per_second"))
+        if raw_rate is None:
+            raw_rate = rate.get("requests_per_second")
+        from_rate = _delay_from_rate(raw_rate) if raw_rate is not None else None
+        if from_rate is not None:
+            delay = from_rate
+        else:
+            delay = value.get("surface_delay_seconds", rate.get("surface_delay_seconds", rate.get("min_interval_seconds", 0.4)))
         try:
             timeout = max(1.0, min(float(timeout), 60.0))
         except (TypeError, ValueError):
@@ -233,6 +266,11 @@ class SurfaceScope:
         operator authorise".
         """
         return bool(set(self.allowed_methods) - set(_SAFE_METHODS))
+
+    @property
+    def requests_per_second(self) -> float:
+        """The same promise as ``delay_seconds``, in the unit the program writes it in."""
+        return 1.0 / self.delay_seconds if self.delay_seconds > 0 else 0.0
 
     def capability_line(self) -> str:
         """What this scope permits, in one line, for a prompt.

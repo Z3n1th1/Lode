@@ -157,6 +157,49 @@ class PersistedRunScopeTests(unittest.TestCase):
         self.assertEqual("console-r1", doc["engagement"])   # 没有 turn 时退回 run
 
 
+class RateDeclarationTests(unittest.TestCase):
+    """Console 这一侧也能按 req/s 说速度,而不是让操作员手算间隔。
+
+    程序文档写的是 "3 req/s";让人自己算 0.333 再填进 payload,是把折算这件事交给
+    最没有理由精确的一方。和 scope 文件同一条规矩:req/s 在时按它走。
+    """
+
+    def test_a_rate_in_the_payload_is_converted_not_ignored(self) -> None:
+        self.assertAlmostEqual(1 / 3, jobs._scope_delay(_Job("https://a.example.com/",
+                                                             {"requests_per_second": 3})), places=6)
+
+    def test_the_rate_wins_over_a_hand_rounded_delay(self) -> None:
+        job = _Job("https://a.example.com/", {"requests_per_second": 4, "delay_seconds": 2.0})
+        self.assertEqual(0.25, jobs._scope_delay(job))
+
+    def test_the_rate_can_come_from_the_environment(self) -> None:
+        with patch.dict(os.environ, {"LODE_REQUESTS_PER_SECOND": "2"}):
+            self.assertEqual(0.5, jobs._scope_delay(_Job("https://a.example.com/")))
+
+    def test_the_payloads_rate_beats_the_environments_delay(self) -> None:
+        """两处都说了话时,单位更明确的那个赢 —— 不是"更晚读到的那个"。"""
+        with patch.dict(os.environ, {"LODE_SURFACE_DELAY_SECONDS": "2.0"}):
+            self.assertEqual(0.25, jobs._scope_delay(
+                _Job("https://a.example.com/", {"requests_per_second": 4})))
+
+    def test_an_unusable_rate_falls_back_to_the_delay_it_used_to_use(self) -> None:
+        for rate in ("fast", 0):
+            with self.subTest(rate=rate), patch.dict(os.environ, {"LODE_REQUESTS_PER_SECOND": ""}):
+                self.assertEqual(1.0, jobs._scope_delay(
+                    _Job("https://a.example.com/", {"requests_per_second": rate,
+                                                    "delay_seconds": 1.0})))
+
+    def test_the_scope_built_from_it_carries_the_rate(self) -> None:
+        scope = _scope("https://a.example.com/", {"requests_per_second": 3})
+        self.assertAlmostEqual(3.0, scope.requests_per_second, places=6)
+
+    def test_the_record_keeps_both_spellings(self) -> None:
+        """事后审的人要能直接读到程序写的那个数,而不是拿 1/delay 反算。"""
+        doc = jobs._scope_document(_scope("https://a.example.com/",
+                                          {"requests_per_second": 3}), run_id="SL-1")
+        self.assertAlmostEqual(3.0, doc["requests_per_second"], places=6)
+
+
 class SurfaceScanProducerTests(unittest.TestCase):
     """``surface_scan`` had a handler and a renderer but no producer — nothing in
     the product could ever create one, so the cheap half of a hunt was unreachable."""

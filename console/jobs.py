@@ -61,6 +61,8 @@ def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: st
         "allowed_hosts": list(scope.allowed_hosts),
         "allowed_methods": list(getattr(scope, "allowed_methods", ()) or ()),
         "allow_request_body": bool(getattr(scope, "allow_request_body", False)),
+        # 程序写的就是 req/s;delay 是我们的换算。记录里两个都留,免得事后要反算。
+        "requests_per_second": round(float(getattr(scope, "requests_per_second", 0.0) or 0.0), 6),
         "reasoner_prefer": reasoner,
         "explorer_prefer": explorer,
         "created_at": time.time(),
@@ -122,6 +124,7 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
 
 DEFAULT_SURFACE_DELAY = 0.5
 DELAY_ENV = "LODE_SURFACE_DELAY_SECONDS"
+RATE_ENV = "LODE_REQUESTS_PER_SECOND"
 
 
 def _scope_delay(job: JobRecord) -> float:
@@ -132,12 +135,31 @@ def _scope_delay(job: JobRecord) -> float:
     the same question, 2 req/s vs 2.5 req/s, chosen by which entry point the
     operator happened to use.  ``0`` means "a very small number was given", not
     "nothing was given", so it must not be swallowed by ``or``.
+
+    ``requests_per_second`` wins over ``delay_seconds`` when both are present, for
+    the same reason it does in a scope file: the program states a rate, and turning
+    it into an interval is our arithmetic to get wrong, not the operator's.
+
+    The bounds come from ``agents.surface_discovery`` rather than being spelled again
+    here.  They were two copies of ``0.1``/``30.0``, which is two answers waiting to
+    drift.
     """
+    from agents.surface_discovery import (
+        MAX_DELAY_SECONDS, MIN_DELAY_SECONDS, _delay_from_rate,
+    )
+
+    rate = job.payload.get("requests_per_second")
+    if rate is None or rate == "":
+        rate = os.environ.get(RATE_ENV)
+    if rate is not None and rate != "":
+        from_rate = _delay_from_rate(rate)
+        if from_rate is not None:
+            return from_rate
     raw = job.payload.get("delay_seconds")
     if raw is None or raw == "":
         raw = os.environ.get(DELAY_ENV) or DEFAULT_SURFACE_DELAY
     try:
-        return max(0.1, min(float(raw), 30.0))
+        return max(MIN_DELAY_SECONDS, min(float(raw), MAX_DELAY_SECONDS))
     except (TypeError, ValueError):
         return DEFAULT_SURFACE_DELAY
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "allowed_methods 是授权文档的能力维度:不写(或写空/写非法值)等于只读。GET/HEAD 是恒并集,声明什么都拿不掉。要发写方法必须同时声明 allow_request_body 才允许带请求体,并且写入会在 run 目录的 http-actions.jsonl 留全文。详见 docs/security-boundary.md。",
+  "_comment": "allowed_methods 是授权文档的能力维度:不写(或写空/写非法值)等于只读。GET/HEAD 是恒并集,声明什么都拿不掉。要发写方法必须同时声明 allow_request_body 才允许带请求体,并且写入会在 run 目录的 http-actions.jsonl 留全文。rate_limit.requests_per_second 是程序文档里的原话单位('所有流量 <= 3 req/s'),推荐直接照抄 —— 换算是我们的事,不用手算 0.333。它和 surface_delay_seconds / min_interval_seconds 是同一个承诺的两种拼法,两个都给时按 requests_per_second 走。详见 docs/security-boundary.md。",
   "program": "replace-with-authorized-program",
   "authorization": "",
   "allowed_domains": [],
@@ -11,7 +11,7 @@
   "seed_urls": [],
   "rate_limit": {
     "timeout_seconds": 8,
-    "surface_delay_seconds": 0.4
+    "requests_per_second": 3
   },
   "max_items": 200
 }

@@ -214,6 +214,92 @@ class CapabilityDeclarationTests(unittest.TestCase):
         self.assertTrue(truthy.allow_request_body)
 
 
+class RateDeclarationTests(unittest.TestCase):
+    """速度写在程序文档里的单位是 req/s,delay 是我们的换算结果。
+
+    以前只有 ``surface_delay_seconds`` / ``min_interval_seconds`` —— 程序写 "3 req/s"
+    而 scope 文件里得手算成 0.333。手算这件事本身就是错误来源,而且算错的方向几乎
+    总是"比承诺的快"。现在 req/s 可以直接写进去,换算由我们做一次,做在一处。
+    """
+
+    def _scope(self, **doc):
+        return SurfaceScope.from_mapping(doc)
+
+    def test_a_rate_is_taken_as_written(self) -> None:
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            rate_limit={"requests_per_second": 3})
+        self.assertAlmostEqual(1 / 3, scope.delay_seconds, places=6)
+        self.assertAlmostEqual(3.0, scope.requests_per_second, places=6)
+
+    def test_a_rate_can_sit_at_the_top_level_too(self) -> None:
+        """程序文档长得各不相同,"只能写在 rate_limit 里"是个会被踩的门槛。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=2)
+        self.assertEqual(0.5, scope.delay_seconds)
+
+    def test_the_rate_wins_over_a_hand_rounded_interval(self) -> None:
+        """两个都给的时候按 req/s 走 —— 让 1/3 和 0.333 互相打架没有意义。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=4, surface_delay_seconds=2.0)
+        self.assertEqual(0.25, scope.delay_seconds)
+
+    def test_a_typo_cannot_become_a_flood(self) -> None:
+        """``500`` 当 req/s 用就是 500 req/s;夹住上界比照单全收更像个负责人。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=500)
+        self.assertEqual(0.1, scope.delay_seconds)
+        self.assertAlmostEqual(10.0, scope.requests_per_second, places=6)
+
+    def test_a_rate_too_slow_to_matter_lands_on_the_ceiling_not_on_a_faster_one(self) -> None:
+        """比上界更慢的声明被夹到 30s,绝不会被夹快。
+
+        夹一个 *下限* 才是危险的 —— 那会把"一分钟一个请求"悄悄变成十秒一个,等于
+        替程序决定它可以被多打。这里钉住方向:夹紧只会更慢。
+        """
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=0.000_001)
+        self.assertEqual(30.0, scope.delay_seconds)
+
+    def test_a_rate_and_an_interval_hit_the_same_wall(self) -> None:
+        """两种拼法撞的必须是同一堵墙,否则写错哪个会更快就取决于写法。"""
+        from agents.surface_discovery import MAX_DELAY_SECONDS, MIN_DELAY_SECONDS
+
+        for rate, interval in ((10_000, MIN_DELAY_SECONDS), (0.000_001, MAX_DELAY_SECONDS)):
+            with self.subTest(rate=rate):
+                self.assertEqual(
+                    self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                                rate_limit={"min_interval_seconds": interval}).delay_seconds,
+                    self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                                requests_per_second=rate).delay_seconds,
+                )
+
+    def test_an_unparseable_rate_falls_back_instead_of_guessing(self) -> None:
+        """``"fast"`` 不是速率。读不懂就退回老的读法,而不是当成 0 或当成无限快。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second="fast", surface_delay_seconds=1.5)
+        self.assertEqual(1.5, scope.delay_seconds)
+
+    def test_a_zero_rate_is_not_a_licence_to_flood(self) -> None:
+        """0 是个明显写错的值。它必须退回保守默认,而不是变成"不限速"。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=0)
+        self.assertGreater(scope.delay_seconds, 0)
+
+    def test_a_scope_file_without_the_field_behaves_exactly_as_before(self) -> None:
+        """老文件没这一维,读出来的节奏必须一个字节都不变。"""
+        legacy = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                             rate_limit={"min_interval_seconds": 0.5})
+        self.assertEqual(0.5, legacy.delay_seconds)
+        self.assertEqual(0.4, self._scope(program="p", authorization="a",
+                                          allowed_hosts=["x.com"]).delay_seconds)
+
+    def test_the_two_units_are_the_same_promise(self) -> None:
+        """``requests_per_second`` 是 ``delay_seconds`` 的另一种写法,不是第二个真相。"""
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            requests_per_second=2.5)
+        self.assertAlmostEqual(1 / scope.delay_seconds, scope.requests_per_second, places=6)
+
+
 class RequestMethodTests(unittest.TestCase):
     """方法真的传到了线上 —— 这件事只有服务器那一侧看得见。
 
