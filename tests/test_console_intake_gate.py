@@ -450,5 +450,169 @@ class GatePrimitiveTests(unittest.TestCase):
             )
 
 
+class ScopePreviewGateTests(unittest.TestCase):
+    """授权文档和单个目标共用**一个**待确认槽,但各走各的消费口。
+
+    这条边界值得单独钉:一个槽意味着"现在挂着什么"只有一处说了算,而两个消费口
+    意味着一条被篡改的文档线不会变成一次目标确认 —— 失败方向必须是"什么都不跑"。
+    """
+
+    DOCUMENT = {
+        "program": "nba-public",
+        "authorization": "HackerOne managed program",
+        "allowed_hosts": ["api.nba.com", "cdn.nba.com"],
+        "forbidden_hosts": ["cms.nba.com"],
+        "rate_limit": {"requests_per_second": 3},
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.now = 1_000.0
+        self.path = Path(self._tmp.name) / "intakes.jsonl"
+        self.state = IntakeState(self.path, now_fn=lambda: self.now, ttl_seconds=60)
+        self.summary = {
+            "program": "nba-public", "hosts": ["api.nba.com", "cdn.nba.com"],
+            "forbidden_hosts": ["cms.nba.com"], "max_fanout": 30,
+            "requests_per_second": 3.0, "allowed_methods": ["GET", "HEAD"],
+            "allow_request_body": False,
+        }
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _preview(self, **overrides):
+        return self.state.create_scope_preview(
+            document=dict(self.DOCUMENT), summary=dict(self.summary),
+            instruction="run the nba scope", source="paste",
+            user_id="u1", chat_id="c1", message_id="m1", **overrides,
+        )
+
+    def _rewrite_ledger(self, mutate) -> None:
+        lines = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            mutate(event)
+            lines.append(json.dumps(event, ensure_ascii=False))
+        self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _reread(path, now):
+        """第二个读者:同一个时钟,否则"过期"会替"被篡改"把测试蒙过去。"""
+        return IntakeState(path, now_fn=lambda: now)
+
+    def _record(self) -> dict:
+        return {"schema": "EngagementAuthorization/v1", "authorization_id": "nba-public-abc",
+                "document": dict(self.DOCUMENT), "hosts": list(self.summary["hosts"])}
+
+    def test_a_document_preview_round_trips_through_the_ledger(self) -> None:
+        preview = self._preview()
+        self.assertTrue(preview.intake_id.startswith("I-"))
+        self.assertEqual(2, preview.host_count)
+
+        # Another reader sees the same thing, replayed from the log alone.
+        replayed = self._reread(self.path, self.now).scope_pending(user_id="u1", chat_id="c1")
+        self.assertIsNotNone(replayed)
+        self.assertEqual(preview.preview_digest, replayed.preview_digest)
+        self.assertEqual(self.DOCUMENT, replayed.document)
+
+    def test_a_tampered_document_invalidates_the_preview(self) -> None:
+        """原文和它的摘要分两个字段存 —— 手改原文却留着摘要字段,正是要抓的那一下。
+
+        审批的人读的是摘要,真要跑的是原文。两者一旦能分开,授权记录就成了一句转述。
+        """
+        self._preview()
+        self._rewrite_ledger(lambda e: e.get("preview", {}).get("document", {}).__setitem__(
+            "allowed_hosts", ["api.nba.com", "cdn.nba.com", "attacker.example.com"]))
+        self.assertIsNone(self._reread(self.path, self.now).scope_pending(user_id="u1", chat_id="c1"))
+
+    def test_a_tampered_summary_invalidates_the_preview(self) -> None:
+        self._preview()
+        self._rewrite_ledger(lambda e: e.get("preview", {}).get("summary", {}).__setitem__("max_fanout", 200))
+        self.assertIsNone(self._reread(self.path, self.now).scope_pending(user_id="u1", chat_id="c1"))
+
+    def test_confirmation_must_match_what_was_shown(self) -> None:
+        preview = self._preview()
+        for bad in ({"intake_id": "I-deadbeef", "options_digest": preview.options_digest},
+                    {"intake_id": preview.intake_id, "options_digest": "0" * 64}):
+            with self.subTest(bad=bad), self.assertRaises(IntakeStateError):
+                self.state.consume_scope_confirmation(
+                    user_id="u1", chat_id="c1", message_id="m1", authorization=self._record(), **bad)
+        # A refused confirmation must not consume the preview.
+        self.assertIsNotNone(self.state.scope_pending(user_id="u1", chat_id="c1"))
+
+    def test_a_confirmed_document_binds_the_record_to_the_document(self) -> None:
+        from core.intake_state import canonical_digest
+
+        preview = self._preview()
+        record = self._record()
+        result = self.state.consume_scope_confirmation(
+            user_id="u1", chat_id="c1", message_id="m1", intake_id=preview.intake_id,
+            options_digest=preview.options_digest, authorization=record)
+        self.assertEqual("confirmed", result["state"])
+        self.assertEqual("nba-public-abc", result["authorization_id"])
+        self.assertEqual(canonical_digest(record), result["authorization_digest"])
+        self.assertEqual(preview.document_digest, result["document_digest"])
+        # The slot is empty and a replay returns the same receipt.
+        self.assertIsNone(self.state.scope_pending(user_id="u1", chat_id="c1"))
+        replay = self.state.consume_scope_confirmation(
+            user_id="u1", chat_id="c1", message_id="m1", intake_id=preview.intake_id,
+            options_digest=preview.options_digest, authorization=record)
+        self.assertEqual(result, replay)
+
+    def test_an_expired_document_preview_cannot_be_confirmed(self) -> None:
+        preview = self._preview()
+        self.now += 61
+        self.assertIsNone(self.state.scope_pending(user_id="u1", chat_id="c1"))
+        with self.assertRaises(IntakeStateError):
+            self.state.consume_scope_confirmation(
+                user_id="u1", chat_id="c1", message_id="m1", intake_id=preview.intake_id,
+                options_digest=preview.options_digest, authorization=self._record())
+
+    def test_one_slot_the_two_kinds_cannot_coexist(self) -> None:
+        """一个槽只放一样东西 —— 但不能静默把操作员手上那张卡换掉。"""
+        self._preview()
+        with self.assertRaises(IntakeStateError) as ctx:
+            self.state.create_preview(
+                target=TARGET, instruction=INSTRUCTION, profile_name=PROFILE, goal_id="g1",
+                user_id="u1", chat_id="c1", message_id="m2")
+        self.assertEqual("pending_intake_exists", str(ctx.exception))
+
+        # 反过来也一样:先有目标,再贴文档。
+        self.state.discard_pending(user_id="u1", chat_id="c1")
+        self.state.create_preview(
+            target=TARGET, instruction=INSTRUCTION, profile_name=PROFILE, goal_id="g1",
+            user_id="u1", chat_id="c1", message_id="m3")
+        with self.assertRaises(IntakeStateError) as ctx:
+            self._preview()
+        self.assertEqual("pending_intake_exists", str(ctx.exception))
+
+    def test_resubmitting_the_same_document_is_idempotent(self) -> None:
+        first = self._preview()
+        self.assertEqual(first.intake_id, self._preview().intake_id)
+
+    def test_neither_kind_can_be_consumed_through_the_other_door(self) -> None:
+        """路走错了要"什么也没发生",不是"拿另一张卡对付过去"。"""
+        from core.intake_state import target_card_from_preview
+
+        document_preview = self._preview()
+        with self.assertRaises(IntakeStateError):
+            self.state.consume_confirmation(
+                user_id="u1", chat_id="c1", message_id="m1", intake_id=document_preview.intake_id,
+                options_digest=document_preview.options_digest,
+                target_card={"schema": "TargetCard/v1"})
+
+        self.state.discard_pending(user_id="u1", chat_id="c1")
+        target_preview = self.state.create_preview(
+            target=TARGET, instruction=INSTRUCTION, profile_name=PROFILE, goal_id="g1",
+            user_id="u1", chat_id="c1", message_id="m4")
+        self.assertIsNotNone(target_card_from_preview(target_preview))
+        with self.assertRaises(IntakeStateError):
+            self.state.consume_scope_confirmation(
+                user_id="u1", chat_id="c1", message_id="m4", intake_id=target_preview.intake_id,
+                options_digest=target_preview.options_digest, authorization=self._record())
+        # 那张目标卡还在原地,没被一次错门调用吃掉。
+        self.assertIsNotNone(self.state.pending(user_id="u1", chat_id="c1"))
+
+
 if __name__ == "__main__":
     unittest.main()

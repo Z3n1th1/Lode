@@ -151,6 +151,78 @@ class IntakePreview:
         }
 
 
+# 一次授权文档跑动的旋钮。这几个值进了 ``options_digest``,所以操作员确认的就是
+# 他当时看到的那一组数字 —— 上限、速率、能力,一个都不能在确认之后偷偷变。
+_SCOPE_OPTION_KEYS = ("max_fanout", "requests_per_second", "allowed_methods", "allow_request_body")
+
+
+@dataclass(frozen=True)
+class ScopeIntakePreview:
+    """一次待确认的**授权文档**。
+
+    和 :class:`IntakePreview` 是两个类型而不是同一个多态体:那个的 ``preview_digest``
+    是用 ``as_preview()`` 重算出来的(见 :meth:`IntakeState._parse_preview`),给它加
+    字段会让**每一条**已写下的待确认 preview 校验失败 —— 升级的一瞬间,操作员手上
+    那张卡就凭空消失了。
+
+    ``document`` 是逐字原文,``summary`` 是给操作员看的派生摘要。两者分开存:摘要要能
+    被渲染和翻译,而原文是唯一能证明"程序到底写了什么"的东西。摘要里的 ``hosts`` /
+    ``forbidden_hosts`` 折进 ``scope_digest``,旋钮折进 ``options_digest`` —— 沿用
+    target 那条路已有的两个词,不另造一套。
+    """
+
+    intake_id: str
+    user_id: str
+    chat_id: str
+    message_id: str
+    source: str
+    document: Dict[str, Any]
+    document_digest: str
+    summary: Dict[str, Any]
+    instruction: str
+    instruction_digest: str
+    created_at: float
+    expires_at: float
+    scope_digest: str
+    options_digest: str
+    preview_digest: str
+    confirmation_message_id: str = ""
+
+    @property
+    def key(self) -> Tuple[str, str]:
+        return self.user_id, self.chat_id
+
+    @property
+    def host_count(self) -> int:
+        return len(self.summary.get("hosts") or [])
+
+    def as_preview(self) -> Dict[str, Any]:
+        return {
+            "schema": "ScopeIntakePreview/v1",
+            "intake_id": self.intake_id,
+            "source": self.source,
+            "document": self.document,
+            "document_digest": self.document_digest,
+            "summary": self.summary,
+            "instruction_digest": self.instruction_digest,
+            "scope_digest": self.scope_digest,
+            "options_digest": self.options_digest,
+            "preview_digest": self.preview_digest,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    def as_event(self) -> Dict[str, Any]:
+        return {
+            **self.as_preview(),
+            "user_id": self.user_id,
+            "chat_id": self.chat_id,
+            "message_id": self.message_id,
+            "instruction": self.instruction,
+            "confirmation_message_id": self.confirmation_message_id,
+        }
+
+
 def default_options() -> Dict[str, Any]:
     """The canonical all-off options object.
 
@@ -195,6 +267,7 @@ class IntakeState:
         self._now = now_fn or time.time
         self.ttl_seconds = ttl_seconds
         self._pending: Dict[Tuple[str, str], IntakePreview] = {}
+        self._scope_pending: Dict[Tuple[str, str], ScopeIntakePreview] = {}
         self._completed_by_message: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._completed_by_intake: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         with self._lock():
@@ -210,6 +283,7 @@ class IntakeState:
 
     def _reload(self) -> None:
         self._pending = {}
+        self._scope_pending = {}
         self._completed_by_message = {}
         self._completed_by_intake = {}
         if not self.path.is_file():
@@ -228,13 +302,22 @@ class IntakeState:
                 if preview is not None:
                     self._pending[preview.key] = preview
                 continue
+            if kind == "scope_preview_created":
+                data = event.get("preview")
+                preview = self._parse_scope_preview(data)
+                if preview is not None:
+                    self._scope_pending[preview.key] = preview
+                continue
             user_id = str(event.get("user_id", ""))
             chat_id = str(event.get("chat_id", ""))
             key = (user_id, chat_id)
             if kind == "preview_expired":
+                # 一个槽:过期就是把这一格清空,两种 preview 一起走。
                 self._pending.pop(key, None)
+                self._scope_pending.pop(key, None)
             elif kind == "confirmed":
                 self._pending.pop(key, None)
+                self._scope_pending.pop(key, None)
                 message_id = str(event.get("message_id", ""))
                 result = event.get("result")
                 if message_id and isinstance(result, dict):
@@ -278,6 +361,57 @@ class IntakeState:
         if any(_DIGEST_RE.fullmatch(item) is None for item in (preview.scope_digest, preview.options_digest, preview.preview_digest)):
             return None
         if preview.instruction_digest != hashlib.sha256(preview.instruction.encode("utf-8")).hexdigest():
+            return None
+        expected = canonical_digest({key: value for key, value in preview.as_preview().items() if key != "preview_digest"})
+        return preview if expected == preview.preview_digest else None
+
+    @staticmethod
+    def _parse_scope_preview(value: Any) -> Optional[ScopeIntakePreview]:
+        """Rebuild one document preview, or ``None`` if the line cannot be trusted.
+
+        这条多一道 target preview 没有的检查:``document_digest`` 必须真的等于
+        ``canonical_digest(document)``。原文和它的摘要分两个字段存,所以一行被手改
+        之后,摘要字段有可能被顺手留着 —— 那正好是"审的人读到的授权"和"真要跑的那份"
+        分开的地方,不能靠运气。
+        """
+        if not isinstance(value, dict):
+            return None
+        try:
+            document = value["document"]
+            summary = value["summary"]
+            if not isinstance(document, dict) or not isinstance(summary, dict):
+                return None
+            preview = ScopeIntakePreview(
+                intake_id=str(value["intake_id"]),
+                user_id=str(value.get("user_id", "")),
+                chat_id=str(value.get("chat_id", "")),
+                message_id=str(value.get("message_id", "")),
+                source=str(value.get("source", "")),
+                document=dict(document),
+                document_digest=str(value["document_digest"]),
+                summary=dict(summary),
+                instruction=str(value.get("instruction", "")),
+                instruction_digest=str(value["instruction_digest"]),
+                created_at=float(value["created_at"]),
+                expires_at=float(value["expires_at"]),
+                scope_digest=str(value["scope_digest"]),
+                options_digest=str(value["options_digest"]),
+                preview_digest=str(value["preview_digest"]),
+                confirmation_message_id=str(value.get("confirmation_message_id", "")),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not preview.intake_id or not preview.user_id or not preview.chat_id:
+            return None
+        if any(
+            _DIGEST_RE.fullmatch(item) is None
+            for item in (preview.document_digest, preview.scope_digest,
+                         preview.options_digest, preview.preview_digest)
+        ):
+            return None
+        if preview.instruction_digest != hashlib.sha256(preview.instruction.encode("utf-8")).hexdigest():
+            return None
+        if canonical_digest(preview.document) != preview.document_digest:
             return None
         expected = canonical_digest({key: value for key, value in preview.as_preview().items() if key != "preview_digest"})
         return preview if expected == preview.preview_digest else None
@@ -351,10 +485,13 @@ class IntakeState:
         )
         with self._lock():
             self._reload()
-            existing = self._pending.get(preview.key)
+            # 一个 Console 一个待确认槽 —— 两种 preview 抢同一格。不能说清"一样"就抛,
+            # 而不是把操作员手上那张卡悄悄换掉。
+            existing = self._pending.get(preview.key) or self._scope_pending.get(preview.key)
             if existing is not None and now < existing.expires_at:
                 if (
-                    existing.target == preview.target
+                    isinstance(existing, IntakePreview)
+                    and existing.target == preview.target
                     and existing.instruction_digest == preview.instruction_digest
                     and existing.profile_name == preview.profile_name
                     and existing.goal_id == preview.goal_id
@@ -364,9 +501,100 @@ class IntakeState:
                 raise IntakeStateError("pending_intake_exists")
             if existing is not None:
                 self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id, "ts": now})
+                self._pending.pop(preview.key, None)
+                self._scope_pending.pop(preview.key, None)
             self._append({"event": "preview_created", "preview": preview.as_event()})
             self._pending[preview.key] = preview
         return preview
+
+    def create_scope_preview(
+        self,
+        *,
+        document: Dict[str, Any],
+        summary: Dict[str, Any],
+        instruction: str,
+        source: str,
+        user_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> ScopeIntakePreview:
+        """Build the one pending **authorisation-document** preview for this (user, chat).
+
+        ``summary`` 由调用方派生(它是唯一能 import 解析器的那一层,``core/`` 不能
+        import ``agents/``)。这里只负责把它钉进 digest —— 操作员确认的是他当时看到的
+        那组数字,不是一个可以事后重算的东西。
+        """
+        if not isinstance(document, dict) or not document:
+            raise IntakeStateError("scope_document_required")
+        summary = dict(summary or {})
+        now = float(self._now())
+        document_digest = canonical_digest(document)
+        scope_digest = canonical_digest({
+            "allowed_hosts": [str(host) for host in (summary.get("hosts") or ())],
+            "forbidden_hosts": [str(host) for host in (summary.get("forbidden_hosts") or ())],
+        })
+        options_digest = canonical_digest({key: summary.get(key) for key in _SCOPE_OPTION_KEYS})
+        instruction_digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        base = {
+            "schema": "ScopeIntakePreview/v1",
+            "intake_id": f"I-{uuid.uuid4().hex[:12]}",
+            "source": source,
+            "document": document,
+            "document_digest": document_digest,
+            "summary": summary,
+            "instruction_digest": instruction_digest,
+            "scope_digest": scope_digest,
+            "options_digest": options_digest,
+            "created_at": now,
+            "expires_at": now + self.ttl_seconds,
+        }
+        preview = ScopeIntakePreview(
+            intake_id=str(base["intake_id"]),
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            source=source,
+            document=document,
+            document_digest=document_digest,
+            summary=summary,
+            instruction=instruction,
+            instruction_digest=instruction_digest,
+            created_at=now,
+            expires_at=now + self.ttl_seconds,
+            scope_digest=scope_digest,
+            options_digest=options_digest,
+            preview_digest=canonical_digest(base),
+        )
+        with self._lock():
+            self._reload()
+            existing = self._pending.get(preview.key) or self._scope_pending.get(preview.key)
+            if existing is not None and now < existing.expires_at:
+                if (
+                    isinstance(existing, ScopeIntakePreview)
+                    and existing.document_digest == document_digest
+                    and existing.instruction_digest == instruction_digest
+                ):
+                    return existing
+                raise IntakeStateError("pending_intake_exists")
+            if existing is not None:
+                self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id, "ts": now})
+                self._pending.pop(preview.key, None)
+                self._scope_pending.pop(preview.key, None)
+            self._append({"event": "scope_preview_created", "preview": preview.as_event()})
+            self._scope_pending[preview.key] = preview
+        return preview
+
+    def scope_pending(self, *, user_id: str, chat_id: str) -> Optional[ScopeIntakePreview]:
+        with self._lock():
+            self._reload()
+            preview = self._scope_pending.get((user_id, chat_id))
+            if preview is None:
+                return None
+            if float(self._now()) >= preview.expires_at:
+                self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id, "ts": float(self._now())})
+                self._scope_pending.pop((user_id, chat_id), None)
+                return None
+            return preview
 
     def pending(self, *, user_id: str, chat_id: str) -> Optional[IntakePreview]:
         with self._lock():
@@ -390,7 +618,11 @@ class IntakeState:
         """
         with self._lock():
             self._reload()
-            if self._pending.pop((user_id, chat_id), None) is None:
+            key = (user_id, chat_id)
+            # 一个槽:两种 preview 谁在都算"有东西待确认",丢弃就一起丢。
+            had_target = self._pending.pop(key, None) is not None
+            had_scope = self._scope_pending.pop(key, None) is not None
+            if not (had_target or had_scope):
                 return False
             self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id,
                           "ts": float(self._now())})
@@ -484,6 +716,75 @@ class IntakeState:
                 }
             )
             self._pending.pop(preview.key, None)
+            self._completed_by_message[(user_id, chat_id, message_id)] = dict(result)
+            return result
+
+    def consume_scope_confirmation(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        message_id: str,
+        intake_id: str,
+        options_digest: str,
+        authorization: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Consume the pending document preview, binding it to the record minted from it.
+
+        ``authorization`` 是调用方从**确认时手上那份原文**铸出来的授权记录。这里把
+        它的 digest 一起写进回执,于是"回执里那份记录"和"当初看到的那份文档"之间
+        多了一道可复核的链 —— 只看回执的人不必相信任何人转述。
+        """
+        with self._lock():
+            self._reload()
+            replay = self._completed_by_message.get((user_id, chat_id, message_id))
+            if replay is not None:
+                if (
+                    str(replay.get("intake_id", "")) != intake_id
+                    or str(replay.get("options_digest", "")) != options_digest
+                ):
+                    raise IntakeStateError("intake_confirmation_binding_mismatch")
+                return dict(replay)
+            preview = self._scope_pending.get((user_id, chat_id))
+            if preview is None:
+                raise IntakeStateError("no_pending_scope_intake_preview")
+            if float(self._now()) >= preview.expires_at:
+                self._append({"event": "preview_expired", "user_id": user_id, "chat_id": chat_id, "ts": float(self._now())})
+                self._scope_pending.pop(preview.key, None)
+                raise IntakeStateError("intake_preview_expired")
+            if intake_id != preview.intake_id or options_digest != preview.options_digest:
+                raise IntakeStateError("intake_confirmation_binding_mismatch")
+            result = {
+                "state": "confirmed",
+                "intake_id": preview.intake_id,
+                "authorization": authorization,
+                "authorization_digest": canonical_digest(authorization),
+                "authorization_id": str(authorization.get("authorization_id", "")),
+                "program": str(preview.summary.get("program") or ""),
+                # ``target`` 沿用这个字段名:对话卡片按同一个字段渲染两种 intake。
+                "target": str(preview.summary.get("program") or preview.source or "scope document"),
+                "instruction": preview.instruction,
+                "instruction_digest": preview.instruction_digest,
+                "document_digest": preview.document_digest,
+                "scope_digest": preview.scope_digest,
+                "options_digest": preview.options_digest,
+                "expires_at": preview.expires_at,
+            }
+            self._append(
+                {
+                    "event": "confirmed",
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "intake_id": preview.intake_id,
+                    "preview_digest": preview.preview_digest,
+                    "options_digest": preview.options_digest,
+                    "result": result,
+                    "ts": float(self._now()),
+                }
+            )
+            self._pending.pop(preview.key, None)
+            self._scope_pending.pop(preview.key, None)
             self._completed_by_message[(user_id, chat_id, message_id)] = dict(result)
             return result
 
