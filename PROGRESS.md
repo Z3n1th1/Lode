@@ -88,8 +88,37 @@ python lode.py sessions / progress / doctor
 | SignalHarbor（资讯） | 可用 | 独立 `news run` 管道；与 SRC 页面无关 |
 | intel / guardrails-mcp | 可用 | 独立包：`news/pipeline.py`、`notify/task_router.py` 在用 |
 
-HTTP 面共 **33 个 API 路由**，全集冻结在 `tests/test_route_contract.py`。改路由必须**显式**
-改那个集合，这是有意为之——它挡住过一批"文档有、代码没有"的幽灵路由。
+HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯一权威**；这里不写数字——
+写过一次 33，等发现时实际已经是 35）。改路由必须**显式**改那个集合，这是有意为之——它挡住过
+一批"文档有、代码没有"的幽灵路由。
+
+## 授权文档入口（一份 scope 文件 → 一次确认 → 每台主机一个 job）
+
+CLI 一直读 `scope-<program>.json`（`lode.py:_load_scope` → `SurfaceScope.from_mapping`）；
+控制台以前只会把对话里那个 URL 手工拼成 scope。现在三条入口共用一条链：
+
+```
+粘贴对话      ┐
+上传文件      ├─→ agents/scope_document（判定 + 解析，唯一一处）
+监听目录      ┘        ↓
+             core/intake_state 的待确认槽（和手打 URL 共用同一格，一格只放一样）
+                       ↓  操作员确认（回显 intake_id + options_digest）
+             console/engagement：EngagementAuthorization/v1 落盘（装文档**原文**）
+                       ↓
+             console/jobs：每个精确主机一个 engagement_host_run
+```
+
+- 判定只在服务端一处（`agents/scope_document.looks_like_scope_document`）。前端**不做镜像**：
+  两份判定会互相走样，而走样那一份就是会授权错东西的那一份。
+- 每个 job 的 scope 是 `from_mapping(原文)` 再**只**在主机轴上 `dataclasses.replace`。主机之外的
+  字段（方法、body 许可、速率、排除清单、超时）全部继承 canonical 解析——绝不重新推导。
+  `_scope_from_confirmed_card` 是反面教材：它只搬运 `forbidden_hosts`，方法维度在那条路上直接没了。
+- `allowed_domains` 非空、`allowed_ips` 含 CIDR、以及 `*.host` 一律拒绝：它们授权的是操作员没有
+  逐一看过的目标（`9045ee3` 的形状）。
+- 上限取文档自己写的 `max_fanout`（缺省 30，常量在 `agents/scope_document`，控制台从那里读）；
+  超出部分如实回报。
+- 速率：一次授权的所有 job 共用一个令牌桶，所以文档写 3 req/s 就是聚合 3 req/s，不是 3×N。
+- 监听目录**只铸待确认卡，绝不自动开跑**：放文件这个动作没有任何签名。
 
 ## 事件流契约（排障先看这里）
 
@@ -101,7 +130,13 @@ subtask_started   job_kind / target / title      ← 任务开场（由 JobRunne
 subtask_progress  phase / findings?              ← 阶段推进
 subtask_finished  status / error                 ← 终态
 user_message / assistant_message / mode_changed
+scope_preview     intake_id / summary / digest   ← 认出一份授权文档，待确认（无 document，见下）
 ```
+
+`scope_preview` 是唯一一个"还没发出任何请求"的事件：它只说"我认出了一份授权文档、
+它授权这些主机、等你确认"。**带原文的那一份不发进事件流**（`console/jobs.py` 在 emit 前
+剔掉 `document`）——原文留在 intake ledger，确认时按 digest 复读。抄一份进事件流只会让
+两份"真相"有机会互相打架。`tests/test_chat_api.py:616` 锁着这条。
 
 `core/event_log.EVENT_KINDS` 还声明了 `tool_call` / `tool_result` / `finding` /
 `approval_*` / `reasoning` / `assistant_delta`，前端已能渲染，但目前没有生产端发它们。
