@@ -1,6 +1,7 @@
 """Console application factory: middleware, routers and the static SPA."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -57,7 +58,22 @@ def create_app(
             _jobs.recover(ctx.state_dir)
         except Exception:  # noqa: BLE001 - recovery is best effort
             pass
+        # 监听目录:拖进来的授权文档会变成一张待确认卡,**不会**自动开跑。启动时先
+        # 扫一次,已经在里面的文件不用等第一个间隔。
+        watcher = None
+        try:
+            from console import scope_inbox
+
+            watcher = scope_inbox.start_watcher(ctx.state_dir)
+        except Exception:  # noqa: BLE001 - 没有它控制台照样能用,只是少了这条入口
+            watcher = None
         yield
+        if watcher is not None:
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         try:
             from console import jobs as _jobs
 

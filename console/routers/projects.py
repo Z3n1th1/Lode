@@ -296,10 +296,18 @@ def build(ctx: Ctx) -> APIRouter:
             scope_preview = intake.scope_pending_preview(ctx.state_dir)
         except OSError:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="intake_read_failed")
+        # 监听目录那些没被收下的文件:不说清楚,操作员只会看到"拖进去没反应"。
+        try:
+            from console import scope_inbox
+
+            rejects = scope_inbox.ScopeInbox(ctx.state_dir).rejects()
+        except Exception:  # noqa: BLE001 - 这一栏是附加信息,读不到不该让整条路失败
+            rejects = []
         return JSONResponse(
             content={"preview": intake.preview_view(preview) if preview else None,
                      # 一个槽,两种形状:UI 按哪个非空决定渲染哪张确认卡。
                      "scope_preview": intake.scope_preview_view(scope_preview) if scope_preview else None,
+                     "scope_rejects": rejects,
                      "ttl_seconds": intake.default_ttl_seconds()},
             headers=_NOSTORE,
         )

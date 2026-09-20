@@ -8,6 +8,7 @@ than what the operator was shown.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -576,6 +577,25 @@ class EngagementRouteTests(_GateCase):
         self.assertEqual(2, body["run"]["launched"])
         self.assertEqual(1, body["run"]["skipped"])
         self.assertIn("1 台超出", body["note"])
+
+    def test_the_pending_endpoint_reports_inbox_refusals(self) -> None:
+        """拖进去没反应是最糟的反馈 —— 理由必须能被 UI 读到。"""
+        from console import scope_inbox
+
+        # 监听循环本身也在扫这个目录,所以把间隔钉死,让这一轮手动扫描是唯一的动作。
+        with patch.dict(os.environ, {scope_inbox.INTERVAL_ENV: "600"}):
+            client = self.client({"engagement_host_run": _noop_run})
+        inbox = scope_inbox.ScopeInbox(self.state_dir)
+        inbox.root.mkdir(parents=True, exist_ok=True)
+        (inbox.root / "bad.json").write_text(
+            json.dumps({"authorization": "a", "allowed_domains": ["nba.com"]}), encoding="utf-8")
+        inbox.scan_once()
+        inbox.scan_once()
+
+        body = client.get("/api/v1/project/intake/pending").json()
+        self.assertEqual("scope_document_domains_not_allowed", body["scope_rejects"][-1]["reason"])
+        self.assertIn("nba.com", body["scope_rejects"][-1]["detail"])
+        self.assertIsNone(body["scope_preview"])
 
     def test_the_engagement_routes_require_a_session(self) -> None:
         app = create_app(state_dir=self.state_dir, password=PASSWORD, session_secret=SESSION_SECRET)
