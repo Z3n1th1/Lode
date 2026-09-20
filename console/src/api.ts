@@ -1,4 +1,5 @@
 import type { DashboardSnapshot } from './dashboard'
+import type { ScopePreview, ScopeReject } from './scopeDocument'
 
 export class ApiError extends Error {
   constructor(
@@ -265,8 +266,61 @@ export async function confirmProjectIntake(p: { intake_id: string; options_diges
 export async function discardProjectIntake(): Promise<{ ok: boolean; discarded: boolean }> {
   return (await (await request('/api/v1/project/intake/discard', { method: 'POST' })).json())
 }
-export async function loadPendingIntake(): Promise<{ preview: IntakePreview | null; ttl_seconds: number }> {
+export async function loadPendingIntake(): Promise<{
+  preview: IntakePreview | null
+  scope_preview: ScopePreview | null
+  scope_rejects: ScopeReject[]
+  ttl_seconds: number
+}> {
   return (await (await request('/api/v1/project/intake/pending', { cache: 'no-store' })).json())
+}
+
+// ---- 授权文档:一份 scope 文件 → 一次确认 → 每台主机一个 job ----
+// 和上面那条链共用同一个待确认槽,只是确认的东西从"一个目标"变成"一份授权"。
+// 判定在服务端:这里不做 looksLikeScopeDocument 的镜像 —— 两份判定会互相走样。
+export interface ScopeIntakePayload {
+  text?: string
+  document?: Record<string, unknown>
+  filename?: string
+  instruction?: string
+}
+export interface ScopeIntakePreviewResult extends ScopePreview { ok: boolean; status: string }
+export interface ScopeIntakeRun {
+  session_id: string
+  turn_id: string
+  job_ids: string[]
+  launched: number
+  created: number
+  /** true = 这次确认的 job 早就在跑(重放/续跑),没有第二次开跑。 */
+  reused: boolean
+  hosts: string[]
+  /** 超出文档自己写的上限、这次没起的台数。 */
+  skipped: number
+}
+export interface ScopeIntakeConfirmResult {
+  ok: boolean
+  status: string
+  intake_id: string
+  program: string
+  instruction: string
+  options_digest: string
+  document_digest: string
+  authorization_id: string
+  authorization_digest: string
+  authorization_ref: string
+  hosts: string[]
+  max_fanout: number
+  run: ScopeIntakeRun | null
+  note: string
+}
+export async function startScopeIntake(p: ScopeIntakePayload): Promise<ScopeIntakePreviewResult> {
+  return (await (await request('/api/v1/project/engagement/preview', { method: 'POST', body: JSON.stringify(p) })).json())
+}
+export async function confirmScopeIntake(p: { intake_id: string; options_digest: string }): Promise<ScopeIntakeConfirmResult> {
+  return (await (await request('/api/v1/project/engagement/confirm', { method: 'POST', body: JSON.stringify(p) })).json())
+}
+export async function discardScopeIntake(): Promise<{ ok: boolean; discarded: boolean }> {
+  return (await (await request('/api/v1/project/engagement/discard', { method: 'POST' })).json())
 }
 /** 提交队列。status 区分"确实没有待确认"和"台账文件/锁不在"——空队列有两种意思。
  *  取值与后端 _read_events 一致:available / partial / missing / unavailable。 */

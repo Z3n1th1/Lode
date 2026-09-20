@@ -1,5 +1,5 @@
-import { ChevronsUpDown, ShieldCheck } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { ChevronsUpDown, FileUp, ShieldCheck } from 'lucide-react'
+import { useRef, useState, type ReactNode } from 'react'
 
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -16,6 +16,7 @@ import { MenuItem, Popover, PopoverContent, PopoverTrigger } from '../ui/popover
 import { Switch } from '../ui/switch'
 import { cn } from '../../lib/utils'
 import { formatTimestamp } from '../../dashboard'
+import { rejectLabel, scopePreviewRows } from '../../scopeDocument'
 import { enabledOptionLabels, usePanels, type IntakeToggles } from '../../store/panels'
 
 /** 开关的文案与分组:顺序即阅读顺序。 */
@@ -52,24 +53,82 @@ export default function NewProjectModal() {
   const ok = usePanels((state) => state.intakeOk)
   const preview = usePanels((state) => state.intakePreview)
   const result = usePanels((state) => state.intakeResult)
+  // 授权文档那条路。它和上面那条共用同一个待确认槽,所以两组状态不会同时有效。
+  const scopePreview = usePanels((state) => state.scopePreview)
+  const scopeResult = usePanels((state) => state.scopeResult)
+  const scopeText = usePanels((state) => state.scopeText)
+  const scopeFilename = usePanels((state) => state.scopeFilename)
+  const scopeRejects = usePanels((state) => state.scopeRejects)
   const [profileOpen, setProfileOpen] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const selected = options.find((option) => option.value === form.engagement_profile)
   const enabledLabels = preview ? enabledOptionLabels(preview.options) : []
+  const scopeRows = scopePreview ? scopePreviewRows(scopePreview.summary) : []
 
   function toggle(key: keyof IntakeToggles, value: boolean): void {
     usePanels.getState().patchIntakeForm({ toggles: { ...form.toggles, [key]: value } })
+  }
+
+  /** 上传就是读成文本再走粘贴那条路 —— 所以只有一个判定、一道闸门。 */
+  async function pickFile(file: File | undefined): Promise<void> {
+    if (!file) return
+    const text = await file.text()
+    usePanels.getState().patchScopeText(text, file.name)
   }
 
   return (
     <Dialog open={open} onOpenChange={(next) => usePanels.getState().setNewProjectOpen(next)}>
       <DialogContent width={620}>
         <DialogHeader>
-          <DialogTitle>{result ? '已建卡' : preview ? '确认后再建卡' : '新建项目'}</DialogTitle>
+          <DialogTitle>
+            {scopeResult ? '已落授权记录'
+              : scopePreview ? '确认这份授权文档'
+              : result ? '已建卡'
+              : preview ? '确认后再建卡'
+              : '新建项目'}
+          </DialogTitle>
         </DialogHeader>
 
         <DialogBody>
-          {result ? (
+          {scopeResult ? (
+            <div className="grid gap-3">
+              <div className="flex items-center gap-2">
+                <Badge tone="ok">
+                  <ShieldCheck size={11} />
+                  已落盘
+                </Badge>
+                <span className="text-sm text-fg-3">授权记录是不可变的,一次 run 能指回它的原文</span>
+              </div>
+              <Row label="程序">{scopeResult.program}</Row>
+              <Row label="授权记录">{scopeResult.authorization_id}</Row>
+              <Row label="记录文件">{scopeResult.authorization_ref}</Row>
+              <Row label="文档摘要">{scopeResult.document_digest.slice(0, 16)}…</Row>
+              <Row label="授权主机">{scopeResult.hosts.length} 台</Row>
+              {scopeResult.run ? (
+                <>
+                  <Row label="会话">{scopeResult.run.session_id}</Row>
+                  <Row label="任务">{scopeResult.run.job_ids.length} 个</Row>
+                </>
+              ) : null}
+              <p className="text-sm text-fg-4">{scopeResult.note}</p>
+            </div>
+          ) : scopePreview ? (
+            <div className="grid gap-3">
+              <div className="grid gap-3 rounded-sm border border-accent/40 bg-accent-soft/40 p-3.5">
+                {scopeRows.map((row) => (
+                  <Row key={row.label} label={row.label}>
+                    <span className={row.warn ? 'text-warn' : undefined}>{row.value}</span>
+                  </Row>
+                ))}
+                <Row label="确认单">{scopePreview.options_digest.slice(0, 16)}…</Row>
+              </div>
+              <p className="text-sm text-fg-4">
+                确认之前不发起任何请求。确认后落授权记录,并按上面的台数开跑 ——{' '}
+                {formatTimestamp(scopePreview.expires_at ?? null)} 之前有效。
+              </p>
+            </div>
+          ) : result ? (
             <div className="grid gap-3">
               <div className="flex items-center gap-2">
                 <Badge tone="ok">
@@ -186,6 +245,54 @@ export default function NewProjectModal() {
                 </div>
               </div>
 
+              <div className="border-t border-line pt-3.5">
+                <span className="font-mono text-2xs text-fg-4">或者:贴一份授权文档(scope 文件)</span>
+                <p className="mt-1.5 text-xs text-fg-4">
+                  程序文档写的常是"所有流量 ≤ 3 req/s"加一长串精确主机名。贴**整份** JSON,
+                  每台主机会各自起一个任务,共用一份预算。域名通配不收 —— 只收精确主机名。
+                </p>
+                <textarea
+                  className="mt-2 h-24 w-full resize-y rounded-md border border-line bg-transparent p-2.5 font-mono text-xs text-fg outline-none transition-colors focus:border-line-strong"
+                  spellCheck={false}
+                  placeholder='{"program": "…", "authorization": "…", "allowed_hosts": ["api.example.com"]}'
+                  value={scopeText}
+                  onChange={(event) => usePanels.getState().patchScopeText(event.target.value)}
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(event) => void pickFile(event.target.files?.[0])}
+                  />
+                  <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+                    <FileUp size={12} />
+                    选文件
+                  </Button>
+                  <span className="min-w-0 flex-1 truncate font-mono text-2xs text-fg-4">
+                    {scopeFilename || (scopeText ? `已粘贴 ${scopeText.length} 字符` : '还没有内容')}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={submitting}
+                    onClick={() => void usePanels.getState().submitScopeDocument()}
+                  >
+                    读这份文档
+                  </Button>
+                </div>
+                {scopeRejects.length ? (
+                  <ul className="mt-2 grid gap-1">
+                    {scopeRejects.slice(-3).map((reject, index) => (
+                      <li key={`${reject.file}-${index}`} className="text-xs text-warn">
+                        {rejectLabel(reject)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+
               <p
                 className={cn(
                   'min-h-5 text-sm',
@@ -209,7 +316,30 @@ export default function NewProjectModal() {
         </DialogBody>
 
         <DialogFooter>
-          {result ? (
+          {scopeResult ? (
+            <Button variant="outline" size="sm" onClick={() => usePanels.getState().setNewProjectOpen(false)}>
+              完成
+            </Button>
+          ) : scopePreview ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={submitting}
+                onClick={() => void usePanels.getState().discardScopeDocument()}
+              >
+                放弃
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={submitting}
+                onClick={() => void usePanels.getState().confirmScopeDocument()}
+              >
+                {submitting ? '开跑中' : '确认并开跑'}
+              </Button>
+            </>
+          ) : result ? (
             <>
               <Button variant="outline" size="sm" onClick={() => usePanels.getState().setNewProjectOpen(false)}>
                 完成

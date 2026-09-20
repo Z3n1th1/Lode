@@ -11,6 +11,8 @@ import {
   toolResultHasMore
 } from '../../chatTools'
 import { cn } from '../../lib/utils'
+import { scopePreviewRows, type ScopeSummary } from '../../scopeDocument'
+import { usePanels } from '../../store/panels'
 import { Badge, severityTone } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Fold, Well } from '../../components/ui/fold'
@@ -256,6 +258,44 @@ export default function LedgerRow({ event, clock, node, modes, pending, onStop }
             ) : (
               <span className="font-mono text-xs text-fg-4">已放行</span>
             )}
+          </div>
+        </Slab>
+      </RowShell>
+    )
+  }
+
+  if (kind === 'scope_preview') {
+    // 一份授权文档在对话里被认出来了。这一行是"去确认"的入口 —— 判定和确认都在
+    // 服务端,这里只把服务端给的 summary 摆出来。
+    const summary = (event.summary ?? {}) as ScopeSummary
+    return (
+      <RowShell seq={event.seq} clock={clock}>
+        <Slab rule="border-l-accent">
+          <div className="flex flex-wrap items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-base leading-6 font-medium text-fg">一份待确认的授权文档</p>
+              <div className="mt-2 grid gap-1.5">
+                {scopePreviewRows(summary).map((row) => (
+                  <div
+                    key={row.label}
+                    className="grid grid-cols-[64px_minmax(0,1fr)] items-baseline gap-3"
+                  >
+                    <span className="font-mono text-2xs text-fg-4">{row.label}</span>
+                    <span
+                      className={cn(
+                        'min-w-0 break-all font-mono text-xs',
+                        row.warn ? 'text-warn' : 'text-fg-2'
+                      )}
+                    >
+                      {row.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void usePanels.getState().openNewProject()}>
+              去确认
+            </Button>
           </div>
         </Slab>
       </RowShell>

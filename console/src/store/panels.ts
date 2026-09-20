@@ -6,7 +6,9 @@ import {
   ApiError,
   PROJECT_PAGE_SIZE,
   confirmProjectIntake,
+  confirmScopeIntake,
   discardProjectIntake,
+  discardScopeIntake,
   loadFindings,
   loadModelPool,
   loadPendingIntake,
@@ -21,6 +23,7 @@ import {
   loadSystem,
   loadTrajectory,
   startProjectIntake,
+  startScopeIntake,
   submitSessionGuidance,
   type FindingRow,
   type IntakeConfirmResult,
@@ -31,11 +34,13 @@ import {
   type ProjectDetail,
   type ProjectResults,
   type SessionGuidanceRow,
+  type ScopeIntakeConfirmResult,
   type SrcAutopilotView,
   type SystemInfo,
   type TrajectoryEvent
 } from '../api'
 import { formatTimestamp } from '../dashboard'
+import { refusalText, type ScopePreview, type ScopeReject } from '../scopeDocument'
 import { useAuth, type Route } from './auth'
 import { useChat } from './chat'
 
@@ -136,6 +141,15 @@ const INTAKE_HINT: Record<string, string> = {
   canonical_target_card_mismatch: '落盘的卡和确认单不一致,没有开跑'
 }
 
+/** 文档那条路的原因码比目标多,所以走 refusalText 那张表,而不是再加一份。 */
+function scopeErrorText(error: unknown): string {
+  const api = error instanceof ApiError ? error : null
+  const body = (api?.body ?? {}) as { detail?: string; items?: string }
+  const detail = String(body.detail || '')
+  if (!detail) return `失败:${(error as Error).message}`
+  return refusalText(detail, String(body.items || ''))
+}
+
 export interface IntakeToggles {
   scan_enabled: boolean
   fingerprint_precise: boolean
@@ -223,6 +237,15 @@ interface PanelState {
   intakePreview: IntakePreview | null
   /** 已落卡的确认结果,给操作者看 target_id 与卡文件。 */
   intakeResult: IntakeConfirmResult | null
+  /** 待确认的**授权文档**。和 intakePreview 抢同一格,所以两者不会同时非空。 */
+  scopePreview: ScopePreview | null
+  /** 已落授权记录的确认结果。 */
+  scopeResult: ScopeIntakeConfirmResult | null
+  /** 拖进监听目录但没收下的文件 —— 不说出来,操作员只会看到"拖进去没反应"。 */
+  scopeRejects: ScopeReject[]
+  /** 粘贴框里的文本,以及这份内容来自哪个文件(上传时才有)。 */
+  scopeText: string
+  scopeFilename: string
   resultsOpen: boolean
   results: ProjectResults | null
   resultsLoading: boolean
@@ -241,6 +264,10 @@ interface PanelState {
   submitIntake: () => Promise<void>
   confirmIntake: () => Promise<void>
   discardIntake: () => Promise<void>
+  patchScopeText: (text: string, filename?: string) => void
+  submitScopeDocument: () => Promise<void>
+  confirmScopeDocument: () => Promise<void>
+  discardScopeDocument: () => Promise<void>
   openIntakeRun: () => Promise<void>
   openResults: (projectId: string) => Promise<void>
   setResultsOpen: (open: boolean) => void
@@ -278,6 +305,11 @@ export const usePanels = create<PanelState>()((set, get) => ({
   intakeOk: '',
   intakePreview: null,
   intakeResult: null,
+  scopePreview: null,
+  scopeResult: null,
+  scopeRejects: [],
+  scopeText: '',
+  scopeFilename: '',
   resultsOpen: false,
   results: null,
   resultsLoading: false,
@@ -425,7 +457,7 @@ export const usePanels = create<PanelState>()((set, get) => ({
   async openNewProject() {
     // 重开弹窗时先把"已经在等确认"的预览捞回来:15 分钟内刷新页面不该丢掉它,
     // 也不该让人重新填一遍表单 —— 那样会撞上 pending_intake_exists。
-    set({ intakeError: '', intakeOk: '', intakeResult: null, newProjectOpen: true })
+    set({ intakeError: '', intakeOk: '', intakeResult: null, scopeResult: null, newProjectOpen: true })
     if (!get().profileOptions.length) {
       const profiles = await loadProfiles().catch(() => [])
       set({
@@ -437,6 +469,9 @@ export const usePanels = create<PanelState>()((set, get) => ({
       // 直接落在确认步:确认单本身就是"还有一个在等确认"的说明。
       set({ intakePreview: pending.preview })
     }
+    // 文档那条路共用这一格;拖进监听目录但没收下的文件也从这里读回来,不让一次
+    // 静默的拖放变成"产品没反应"。
+    set({ scopePreview: pending?.scope_preview ?? null, scopeRejects: pending?.scope_rejects ?? [] })
     const { intakeForm, profileOptions } = get()
     if (!intakeForm.engagement_profile && profileOptions.length) {
       set({ intakeForm: { ...intakeForm, engagement_profile: profileOptions[0].value } })
@@ -479,12 +514,19 @@ export const usePanels = create<PanelState>()((set, get) => ({
       })
     } catch (error) {
       const conflict = error instanceof ApiError && error.status === 409
-      const pending = conflict
-        ? (error.body as { pending?: IntakePreview } | undefined)?.pending
+      const body = conflict
+        ? (error.body as { pending?: IntakePreview; pending_kind?: string } | undefined)
         : undefined
-      if (pending) {
+      if (body?.pending_kind === 'document') {
+        // 挡路的是一份授权文档。它和目标预览是两个形状,不能塞进 intakePreview ——
+        // 那会让弹窗按目标的字段去渲染一份文档,渲染出来的是错的,不是空的。
+        set({
+          scopePreview: (body.pending as unknown as ScopePreview) ?? null,
+          intakeError: '待确认队列里已经有一份授权文档,先确认或放弃它'
+        })
+      } else if (body?.pending) {
         // 已有待确认的预览:把它摆出来,由操作者决定确认还是放弃后重填。
-        set({ intakePreview: pending, intakeError: '已有一个待确认的预览,先确认或放弃它' })
+        set({ intakePreview: body.pending, intakeError: '已有一个待确认的预览,先确认或放弃它' })
       } else {
         set({
           intakeError:
@@ -538,6 +580,62 @@ export const usePanels = create<PanelState>()((set, get) => ({
         intakePreview: null,
         ...(await readIntakeQueue(get().intakes, get().intakeQueueStatus))
       })
+    } catch {
+      set({ intakeError: '取消失败' })
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  patchScopeText(text, filename) {
+    set({ scopeText: text, scopeFilename: filename ?? '', intakeError: '', intakeOk: '' })
+  },
+
+  async submitScopeDocument() {
+    const { scopeText, scopeFilename } = get()
+    set({ intakeError: '', intakeOk: '', intakeSubmitting: true })
+    if (!scopeText.trim()) {
+      set({ intakeSubmitting: false, intakeError: '先粘贴一份 scope JSON,或者选一个文件' })
+      return
+    }
+    try {
+      // 上传和粘贴走同一个路由:差别只是带不带 filename(它只标来源,不参与判定)。
+      const preview = await startScopeIntake(
+        scopeFilename ? { text: scopeText, filename: scopeFilename } : { text: scopeText }
+      )
+      set({ scopePreview: preview, scopeRejects: [] })
+    } catch (error) {
+      set({ intakeError: scopeErrorText(error) })
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  async confirmScopeDocument() {
+    const preview = get().scopePreview
+    if (!preview) return
+    set({ intakeSubmitting: true, intakeError: '' })
+    try {
+      // 不带 session_id:由服务端为这次确认开会话,运行流不混进操作者正在读的对话。
+      const result = await confirmScopeIntake({
+        intake_id: preview.intake_id,
+        options_digest: preview.options_digest
+      })
+      set({ scopeResult: result, scopePreview: null, scopeText: '', scopeFilename: '' })
+    } catch (error) {
+      const expired = error instanceof ApiError && error.status === 410
+      set({ intakeError: expired ? '预览已失效,重新贴一次' : scopeErrorText(error) })
+      if (expired) set({ scopePreview: null })
+    } finally {
+      set({ intakeSubmitting: false })
+    }
+  },
+
+  async discardScopeDocument() {
+    set({ intakeSubmitting: true, intakeError: '', intakeOk: '' })
+    try {
+      await discardScopeIntake()
+      set({ scopePreview: null, scopeText: '', scopeFilename: '' })
     } catch {
       set({ intakeError: '取消失败' })
     } finally {
