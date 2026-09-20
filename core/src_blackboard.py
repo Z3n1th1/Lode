@@ -14,7 +14,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
-from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from core.file_lock import AdvisoryFileLock, replace_with_retry
 
@@ -51,6 +51,44 @@ def _safe_url(value: Any) -> str:
             if key:
                 names.append(f"{quote(key, safe='._-')}=[redacted]")
         return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", "&".join(dict.fromkeys(names)), ""))
+    except ValueError:
+        return ""
+
+
+# 哪些查询参数是凭据:名字命中就整条丢掉。两个用法的分界线就在这里 —— 落盘和给模型
+# 看的一律打码(``_safe_url``);真要发出去的那一份必须把凭据整条拿掉、其余保留原值
+# (``probe_url``),因为"不回放捡来的凭据"是 ROE 的硬要求。
+SENSITIVE_QUERY_KEY = re.compile(
+    r"(?i)(?:token|auth|authorization|cookie|session|secret|password|passwd|api[-_]?key|signature|sig)"
+)
+
+
+def probe_url(value: Any) -> str:
+    """The URL we may actually fetch: credential params dropped, the rest kept.
+
+    ``_safe_url`` replaces *every* value with ``[redacted]`` — correct for what gets
+    persisted and shown, and a guaranteed 404 when requested.  Those two jobs were
+    conflated: the redacted form was the only form, and it was also what the Explorer
+    was handed, so every candidate carrying a plain id was fetched as
+    ``?token=[redacted]&id=[redacted]``.  This is the executable twin.
+
+    A param whose *name* looks like a credential is removed whole rather than
+    masked — masking would still send the name and an obviously bogus value, and
+    replaying the real one is exactly what is not allowed.
+    """
+    raw = _text(value, 500)
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return ""
+        if parsed.username or parsed.password:
+            return ""
+        kept = [
+            (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if _text(key, 80) and not SENSITIVE_QUERY_KEY.search(str(key))
+        ]
+        return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/",
+                           urlencode(kept, doseq=True) if kept else "", ""))
     except ValueError:
         return ""
 
@@ -93,10 +131,21 @@ def _digest(*parts: Any) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
-def _bounded_list(value: Any, limit: int = MAX_ITEMS) -> List[Dict[str, Any]]:
+def _bounded_list(value: Any, limit: int = MAX_ITEMS, *, keep: str = "tail") -> List[Dict[str, Any]]:
+    """Bound a list to the end that actually matters.
+
+    ``tail`` (the default) is for append-only lists — facts, hints, events, the
+    timeline. The newest are at the end and those are the ones to keep.
+
+    ``head`` is for ``intents``, which are *stored* in descending priority order
+    (see ``sync_candidates``). Taking the tail there kept the 2000 lowest-priority
+    intents and threw away the best ones — the same inversion as the prompt
+    builder's, one layer down.
+    """
     if not isinstance(value, list):
         return []
-    return [item for item in value[-limit:] if isinstance(item, dict)]
+    rows = [item for item in value if isinstance(item, dict)]
+    return rows[:limit] if keep == "head" else rows[-limit:]
 
 
 class SrcBlackboard:
@@ -144,6 +193,9 @@ class SrcBlackboard:
                 url = _safe_url(candidate.get("url"))
                 if not cid or not url:
                     continue
+                # 执行用的那一份。展示用的 ``url`` 把每个参数值都打码了,拿它去请求
+                # 必然 404 —— 而黑板同时是执行的唯一真相源,所以两份都要带。
+                probe = probe_url(candidate.get("probe_url")) or url
                 fact_id = "F-" + _digest("candidate", cid)
                 fact = facts.get(fact_id)
                 if fact is None:
@@ -152,6 +204,7 @@ class SrcBlackboard:
                         "kind": "src_candidate",
                         "candidate_id": cid,
                         "url": url,
+                        "probe_url": probe,
                         "priority": _priority(candidate.get("priority")),
                         "sources": [_text(item, 40) for item in (candidate.get("sources") or [])[:12]],
                         "run_id": _text(run_id, 80),
@@ -177,6 +230,8 @@ class SrcBlackboard:
                         "kind": "src_authorized_review",
                         "candidate_id": cid,
                         "target": url,
+                        # 真正会被请求的那个 URL;``target`` 是给人看的去敏形式。
+                        "probe_url": probe,
                         "priority": _priority(candidate.get("priority")),
                         "phase": _text(candidate.get("next_phase"), 64) or "A-passive-triage",
                         "status": "queued",
@@ -820,7 +875,11 @@ class SrcBlackboard:
         for key in ("facts", "intents", "dead_ends", "hints", "claims", "events"):
             if not isinstance(value.get(key), list):
                 raise RuntimeError("src_blackboard_state_shape_invalid")
-            value[key] = _bounded_list(value[key], MAX_EVENTS if key == "events" else MAX_ITEMS)
+            value[key] = _bounded_list(
+                value[key],
+                MAX_EVENTS if key == "events" else MAX_ITEMS,
+                keep="head" if key == "intents" else "tail",
+            )
         # 向后兼容:老状态文件没有 timeline/workmem,补默认值(不报错,不丢数据)。
         if not isinstance(value.get("timeline"), list):
             value["timeline"] = []

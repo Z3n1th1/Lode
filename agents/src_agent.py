@@ -243,7 +243,8 @@ def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
-                           max_intents: int = 50, max_dead_ends: int = 30,
+                           max_intents: int = 50, max_other_intents: int = 20,
+                           max_dead_ends: int = 30,
                            max_hints: int = 30) -> str:
     """Serialize blackboard snapshot to structured text for LLM context."""
     lines: List[str] = []
@@ -264,11 +265,19 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
     else:
         lines.append("## Facts: (none)")
 
-    intents = (snapshot.get("intents") or [])[-max_intents:]
-    queued = [i for i in intents if i.get("status") == "queued"]
-    other = [i for i in intents if i.get("status") != "queued"]
+    # 先分再截,而且要在**完整**列表上分。
+    #
+    # 黑板里 intents 是按优先级降序存的,所以老写法 ``[-max_intents:]`` 每次都在
+    # 取分数最低的那一段:候选多于 50 个时,分数最高的那批从来没进过 reasoner 的
+    # 上下文,模型看不到最该看的 intent。facts 不同 —— 它是插入序,取尾部才是"最近
+    # 的 N 条",别跟着一起改。
+    intents = [i for i in (snapshot.get("intents") or []) if isinstance(i, dict)]
+    queued_all = [i for i in intents if i.get("status") == "queued"]
+    queued = queued_all[:max_intents]
+    other_all = [i for i in intents if i.get("status") != "queued"]
+    other = other_all[:max_other_intents]
     if queued:
-        lines.append(f"\n## Queued Intents ({len(queued)} available)")
+        lines.append(f"\n## Queued Intents ({len(queued_all)} available)")
         for i in queued:
             deps = i.get("depends_on") or []
             dep_note = f" deps={','.join(str(d) for d in deps)}" if deps else ""
@@ -281,8 +290,8 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
         lines.append("\n## Queued Intents: (none)")
 
     if other:
-        lines.append(f"\n## Other Intents ({len(other)})")
-        for i in other[:20]:
+        lines.append(f"\n## Other Intents ({len(other_all)})")
+        for i in other:
             lines.append(
                 f"- {i.get('intent_id', '?')}: status={i.get('status', '?')} "
                 f"target={i.get('target', '?')}"
@@ -943,7 +952,9 @@ class SrcAgentLoop:
         # 以领取到的实时 intent 为准(调用方传进来的快照可能已过期)。
         intent = claim["intent"]
         claimed_intent_id = intent["intent_id"]
-        target_url = str(intent.get("target") or target_url).strip()
+        # probe_url 才真的去取:``target`` 是去敏后的展示形式(每个参数值都是
+        # [redacted]),请求它必然是 404 —— 而候选队列只存展示形式。
+        target_url = str(intent.get("probe_url") or intent.get("target") or target_url).strip()
 
         # Fetch
         fetch_result = _fetch_for_analysis(

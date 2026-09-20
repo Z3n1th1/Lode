@@ -107,6 +107,36 @@ class TestBlackboardContext(unittest.TestCase):
         self.assertIn("H-001", ctx)
         self.assertIn("Queued Intents (1 available)", ctx)
 
+    def test_truncation_keeps_the_highest_scoring_intents(self):
+        """黑板把 intents 按优先级降序存,所以取尾部就是取最低分的那一段。
+
+        60 个 intent、上限 50:老写法永远丢掉分数最高的 10 个 —— 模型看不到最该
+        看的那些,而且候选越多越严重。对照组是 facts:它是插入序,取尾部才是对的。
+        """
+        intents = [
+            {"intent_id": f"I-{index:03d}", "target": f"https://example.com/p{index}",
+             "priority": 100 - index, "phase": "A-passive-triage", "status": "queued",
+             "candidate_id": f"SC-{index:03d}"}
+            for index in range(60)
+        ]
+        ctx = _blackboard_to_context({"facts": [], "intents": intents, "dead_ends": [], "hints": []})
+        self.assertIn("I-000", ctx)                 # priority 100 —— 最该被看见的
+        self.assertNotIn("I-059", ctx)              # priority 41 —— 截掉
+        self.assertIn("Queued Intents (60 available)", ctx)
+
+    def test_non_queued_intents_are_capped_after_the_split(self):
+        """先分再截:已完成的 intent 不能把 queued 的名额挤掉。"""
+        intents = [{"intent_id": f"I-q{index}", "target": "https://example.com/", "priority": 90,
+                    "status": "queued", "candidate_id": f"SC-q{index}"} for index in range(3)]
+        intents += [{"intent_id": f"I-d{index}", "target": "https://example.com/", "priority": 95,
+                     "status": "dead_end", "candidate_id": f"SC-d{index}"} for index in range(40)]
+        ctx = _blackboard_to_context({"facts": [], "intents": intents, "dead_ends": [], "hints": []},
+                                     max_intents=2, max_other_intents=1)
+        for index in range(2):
+            self.assertIn(f"I-q{index}", ctx)
+        self.assertIn("I-d0", ctx)                  # other 只留最前面那条
+        self.assertNotIn("I-d1", ctx)
+
 
 class TestSanitizeHeaders(unittest.TestCase):
     def test_redacts_sensitive(self):

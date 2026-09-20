@@ -324,5 +324,35 @@ class SrcBlackboardDagClaimTests(unittest.TestCase):
             self.assertEqual([], board.set_dependencies(second, [first])["depends_on"])
 
 
+    def test_snapshot_trims_intents_from_the_top_not_the_bottom(self) -> None:
+        """intents 是**按优先级降序**存的,所以裁剪的必须是尾部。
+
+        以前 ``_bounded_list`` 对每一张表都取 ``[-limit:]``:对只追加的 facts/
+        hints/events 是对的,对 intents 就是把最能干的 2000 个丢掉、留下最差的
+        2000 个。上限调小来测,是为了让这条断言真的跑到那条分支上。
+        """
+        from unittest import mock
+
+        from core import src_blackboard as bb_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bb.json"
+            state = {
+                "schema": "SrcBlackboard/v1", "revision": 0, "updated_at": 0.0,
+                "facts": [{"fact_id": f"F-{i}"} for i in range(10)],
+                "intents": [{"intent_id": f"I-{i}", "priority": 100 - i} for i in range(10)],
+                "dead_ends": [], "hints": [], "claims": [], "events": [], "timeline": [],
+            }
+            path.write_text(json.dumps(state), encoding="utf-8")
+            board = SrcBlackboard(path, default_lease_seconds=60)
+            board.ensure()          # snapshot() 不加锁创建,所以先让锁的 sidecar 存在
+            with mock.patch.object(bb_module, "MAX_ITEMS", 3):
+                snapshot = board.snapshot()
+
+        self.assertEqual(["I-0", "I-1", "I-2"], [row["intent_id"] for row in snapshot["intents"]])
+        # facts 是插入序,取尾部 = 最近的三条(别跟着 intents 一起改)
+        self.assertEqual(["F-7", "F-8", "F-9"], [row["fact_id"] for row in snapshot["facts"]])
+
+
 if __name__ == "__main__":
     unittest.main()

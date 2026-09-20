@@ -32,7 +32,8 @@ if str(_CORE_DIR) not in sys.path:
 
 from core.file_lock import AdvisoryFileLock, replace_with_retry
 from agents.surface_discovery import SurfaceResult, SurfaceScope, surface_to_dict
-from core.src_blackboard import SrcBlackboard
+from core.src_blackboard import SENSITIVE_QUERY_KEY as _SENSITIVE_QUERY_KEY
+from core.src_blackboard import SrcBlackboard, probe_url as _probe_url
 
 
 SCHEMA = "SrcAutopilotRun/v1"
@@ -40,9 +41,6 @@ SUMMARY_SCHEMA = "SrcAutopilotSummary/v1"
 MAX_ROUNDS = 8
 MAX_CANDIDATES = 500
 MAX_NO_NEW_ROUNDS = 2
-_SENSITIVE_QUERY_KEY = re.compile(
-    r"(?i)(?:token|auth|authorization|cookie|session|secret|password|passwd|api[-_]?key|signature|sig)"
-)
 _HIGH_SIGNAL = {
     "admin", "auth", "oauth", "sso", "user", "users", "profile", "account",
     "order", "orders", "payment", "pay", "upload", "download", "export",
@@ -64,7 +62,12 @@ _SOURCE_WEIGHT = {
 
 
 def _safe_query(query: str) -> str:
-    """Keep parameter names for triage, but never persist query values."""
+    """Keep parameter names for triage, but never persist query values.
+
+    This is the *display* form. It goes into the candidate queue, the markdown
+    report and the reasoner's context — and it must never be requested, because
+    ``[value]`` is not a value. See ``probe_url`` for the executable twin.
+    """
     names: List[str] = []
     for key, _value in parse_qsl(query or "", keep_blank_values=True):
         key = str(key).strip()
@@ -74,7 +77,15 @@ def _safe_query(query: str) -> str:
     return "&".join(dict.fromkeys(names))
 
 
-def _canonical_url(value: Any, scope: SurfaceScope, *, base_url: str = "") -> tuple[str, str] | None:
+def _canonical_url(value: Any, scope: SurfaceScope, *, base_url: str = "") -> tuple[str, str, str] | None:
+    """(display url, scope reason, executable url) — or ``None`` if out of scope.
+
+    Two URLs, deliberately. ``display`` masks every query value, which is what may
+    be persisted and shown; ``probe`` drops credential-bearing params whole and
+    keeps the rest, which is what may be fetched. The Explorer used to be handed
+    ``display``, so any candidate with a plain id was requested as
+    ``?token=[redacted]&id=[redacted]`` and came back 404 every time.
+    """
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -91,13 +102,14 @@ def _canonical_url(value: Any, scope: SurfaceScope, *, base_url: str = "") -> tu
     parsed = urlsplit(raw)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
+    scheme = parsed.scheme.lower()
     clean_path = parsed.path or "/"
-    query = _safe_query(parsed.query)
-    clean = urlunsplit((parsed.scheme.lower(), parsed.netloc, clean_path, query, ""))
-    allowed, reason = scope.check_url(clean)
+    display = urlunsplit((scheme, parsed.netloc, clean_path, _safe_query(parsed.query), ""))
+    allowed, reason = scope.check_url(display)
     if not allowed:
         return None
-    return clean, reason
+    probe = _probe_url(urlunsplit((scheme, parsed.netloc, clean_path, parsed.query, ""))) or display
+    return display, reason, probe
 
 
 def _score_candidate(url: str, sources: Iterable[str]) -> int:
@@ -127,6 +139,8 @@ def _candidate_id(url: str) -> str:
 class CandidateRecord:
     url: str
     score: int
+    # 真正去取的那个 URL(凭据参数已整条丢掉)。``url`` 只用于展示和落盘。
+    probe_url: str = ""
     sources: set[str] = field(default_factory=set)
     first_seen_round: int = 0
     last_seen_round: int = 0
@@ -140,6 +154,7 @@ class CandidateRecord:
         return {
             "candidate_id": self.candidate_id,
             "url": self.url,
+            "probe_url": self.probe_url,
             "path": urlsplit(self.url).path or "/",
             "priority": self.score,
             "sources": sorted(self.sources),
@@ -371,6 +386,7 @@ class SrcAutopilot:
             records[str(raw["url"])] = CandidateRecord(
                 url=str(raw["url"]),
                 score=int(raw.get("priority", 0)),
+                probe_url=str(raw.get("probe_url") or ""),
                 sources={str(item) for item in (raw.get("sources") or ())},
                 first_seen_round=int(raw.get("first_seen_round", 0)),
                 last_seen_round=int(raw.get("last_seen_round", 0)),
@@ -402,17 +418,20 @@ class SrcAutopilot:
                 if canonical is None:
                     blocked_count += 1
                     continue
-                clean_url, _reason = canonical
+                clean_url, _reason, live_url = canonical
                 if clean_url in records:
                     record = records[clean_url]
                     record.sources.update(sources)
                     record.score = max(record.score, _score_candidate(clean_url, record.sources))
                     record.last_seen_round = round_number
+                    if not record.probe_url:
+                        record.probe_url = live_url
                     continue
                 new_count += 1
                 records[clean_url] = CandidateRecord(
                     url=clean_url,
                     score=_score_candidate(clean_url, sources),
+                    probe_url=live_url,
                     sources=sources,
                     first_seen_round=round_number,
                     last_seen_round=round_number,

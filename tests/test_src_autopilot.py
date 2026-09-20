@@ -53,6 +53,48 @@ class SrcAutopilotTests(unittest.TestCase):
         self.assertIn("token=[redacted]", serialized)
         self.assertTrue(all(item["requires_human_review"] for item in candidates))
 
+    def test_the_executable_url_outlives_the_redaction(self) -> None:
+        """展示形式每个参数值都是 [redacted]/[value] —— 拿它去请求必然是 404。
+
+        这就是"候选活着"的全部意义:一个 id 是好的探针,`[value]` 不是。
+
+        | 原文 | 展示(落盘/给模型) | 执行 |
+        |---|---|---|
+        | `?token=secret-value` | `?token=[redacted]` | 无查询串 |
+        | `?customer_id=123` | `?customer_id=[value]` | `?customer_id=123` |
+        | `?sig=private-signature` | `?sig=[redacted]` | 无查询串 |
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = SrcAutopilot(self._scope(), root / "state.json", root / "out", max_rounds=3)
+            agent.run_round(["https://example.com"], results=[self._result()])
+            candidates = json.loads(
+                (root / "out" / "src-autopilot-candidates.json").read_text(encoding="utf-8"))["candidates"]
+            board = SrcBlackboard(root / "src-blackboard.json").snapshot()
+
+        by_url = {item["url"]: item for item in candidates}
+        self.assertEqual("https://example.com/api/v1/users",
+                         by_url["https://example.com/api/v1/users?token=[redacted]"]["probe_url"])
+        self.assertEqual("https://example.com/admin/export?customer_id=123",
+                         by_url["https://example.com/admin/export?customer_id=[value]"]["probe_url"])
+        self.assertEqual("https://api.example.com/graphql",
+                         by_url["https://api.example.com/graphql?sig=[redacted]"]["probe_url"])
+
+        # 凭据值一个都没落盘 —— 修的是"能不能请求",不是"少打点码"。
+        serialized = json.dumps(candidates, ensure_ascii=False)
+        self.assertNotIn("secret-value", serialized)
+        self.assertNotIn("private-signature", serialized)
+
+        # 黑板同时是执行的唯一真相源,所以两份都要在:intent.target 给人看,
+        # intent.probe_url 拿去请求。
+        intents = {item["target"]: item for item in board["intents"]}
+        intent = intents["https://example.com/admin/export?customer_id=[redacted]"]
+        self.assertEqual("https://example.com/admin/export?customer_id=123", intent["probe_url"])
+        probes = json.dumps([item.get("probe_url") for item in board["intents"]], ensure_ascii=False)
+        self.assertNotIn("[value]", probes)
+        self.assertNotIn("[redacted]", probes)
+        self.assertNotIn("secret-value", probes)
+
     def test_duplicate_round_converges_and_restart_does_not_repeat_network_work(self) -> None:
         calls = []
 
