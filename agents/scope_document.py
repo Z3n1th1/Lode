@@ -136,8 +136,13 @@ def _hosts_from_seed_urls(document: Mapping[str, Any]) -> Tuple[str, ...]:
 
 
 def _ordered_declared_hosts(document: Mapping[str, Any], scope: SurfaceScope) -> Tuple[str, ...]:
-    """Every exact host the document names, in document order, de-duplicated."""
-    candidates = list(scope.allowed_hosts) + list(_hosts_from_seed_urls(document))
+    """Every exact host the document names, in document order, de-duplicated.
+
+    ``allowed_ips`` 里的**精确**地址也算主机:``check_url`` 对 IP 目标只查
+    ``allowed_ips``,所以把它们漏掉等于"文档里写了但永远跑不了"。带 ``/`` 的网段不算
+    —— 那是一片地址,和域模式是同一件事(见 :func:`parse_scope_document`)。
+    """
+    candidates = list(scope.allowed_hosts) + list(_hosts_from_seed_urls(document)) + list(scope.allowed_ips)
     seen: set[str] = set()
     ordered: list[str] = []
     for item in candidates:
@@ -182,6 +187,15 @@ def parse_scope_document(document: Mapping[str, Any]) -> ScopeDocument:
         raise ScopeDocumentError(
             "scope_document_domains_not_allowed",
             detail="、".join(scope.allowed_domains),
+        )
+
+    ranges = [item for item in scope.allowed_ips if "/" in str(item)]
+    if ranges:
+        # CIDR 是"这一整片地址",和域模式同一件事、同一个理由:授权了操作员没有
+        # 逐一看过的目标。精确地址照收(check_url 对 IP 只查 allowed_ips)。
+        raise ScopeDocumentError(
+            "scope_document_ip_range_not_allowed",
+            detail="、".join(str(item) for item in ranges),
         )
 
     hosts: list[str] = []

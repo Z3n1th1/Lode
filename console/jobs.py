@@ -8,11 +8,13 @@ guarded — it must never fail a job.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -41,7 +43,8 @@ def get_log(state_dir: Path | str, session_id: str) -> EventLog:
 
 
 # -- job handlers ------------------------------------------------------------
-def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: str = "") -> Dict[str, Any]:
+def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: str = "",
+                    authorization_id: str = "", authorization_digest: str = "") -> Dict[str, Any]:
     """The persisted authorisation record for one run (``SrcRunScope/v1``).
 
     It has to be *true*, because it is the only thing a reviewer can read afterwards
@@ -50,6 +53,9 @@ def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: st
     from the record — the answer lived in a constant inside ``src_agent.py``. Same
     for ``engagement``: it is the request budget's identity, and a budget nobody can
     name is a budget nobody can audit.
+
+    ``authorization_id`` / ``authorization_digest`` 只在这条 run 是从一份授权文档
+    起的时候才有值,它们把这一次 run 指回那份原文 —— 有名字的授权才审得动。
     """
     return {
         "schema": "SrcRunScope/v1",
@@ -57,6 +63,8 @@ def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: st
         "program": scope.program,
         "engagement": str(getattr(scope, "engagement", "") or ""),
         "authorization": scope.authorization,
+        "authorization_id": str(authorization_id or ""),
+        "authorization_digest": str(authorization_digest or ""),
         "allowed_domains": list(scope.allowed_domains),
         "allowed_hosts": list(scope.allowed_hosts),
         "allowed_methods": list(getattr(scope, "allowed_methods", ()) or ()),
@@ -69,12 +77,14 @@ def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: st
     }
 
 
-def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, target_url: str) -> Dict[str, Any]:
+def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, target_url: str,
+               authorization_id: str = "", authorization_digest: str = "") -> Dict[str, Any]:
     """The work itself: one autopilot round, then the LLM agent loop.
 
     Split out of the handlers because *which* engagements are allowed is decided
-    by the caller (a URL typed into the conversation vs a confirmed TargetCard),
-    while what happens afterwards is the same.
+    by the caller (a URL typed into the conversation vs a confirmed TargetCard vs
+    one host of a confirmed authorisation document), while what happens
+    afterwards is the same.
     """
     from agents.src_agent import run_src_agent
     from agents.src_autopilot import SrcAutopilot
@@ -88,7 +98,9 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     explorer = (job.payload.get("explorer_prefer") or "").strip() or os.environ.get("SRC_EXPLORER_PREFER", "").strip()
 
     try:
-        scope_doc = _scope_document(scope, run_id=run_id, reasoner=reasoner, explorer=explorer)
+        scope_doc = _scope_document(scope, run_id=run_id, reasoner=reasoner, explorer=explorer,
+                                    authorization_id=authorization_id,
+                                    authorization_digest=authorization_digest)
         staged = out_dir / ".scope.json.tmp"
         staged.write_text(json.dumps(scope_doc, ensure_ascii=False, indent=2), encoding="utf-8")
         replace_with_retry(staged, out_dir / "scope.json")
@@ -287,6 +299,77 @@ def _handler_target_run(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     return _run_scope(job, ctx, scope, run_id=run_id, target_url=job.target)
 
 
+ENGAGEMENT_HOST_RUN_KIND = "engagement_host_run"
+
+
+def _is_ip_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _scope_from_engagement_document(document: Any, *, host: str, authorization_id: str,
+                                    run_id: str, engagement: str) -> Any:
+    """One host's slice of a confirmed authorisation document.
+
+    每个 job 只拿到它自己那一台主机:文档授权的是"N 台主机各自可打",不是"N 台合起来
+    构成一张更大的网"。把它折成一台是为了让 ``job.target`` 有意义 —— 一个覆盖整份
+    清单的 scope 会让每台主机的运行都能碰到清单里的其他所有机器。
+
+    主机之外的一切 —— 允许的方法、能不能带请求体、速率、排除清单、超时 —— 全部继承
+    :meth:`SurfaceScope.from_mapping` 的结果,这里**绝不重新推导**。上面那个
+    ``_scope_from_confirmed_card`` 就是反面教材:它只搬运 ``forbidden_hosts``,授权
+    文档里的方法维度和 body 许可在那条路上直接没了。
+    """
+    from agents.surface_discovery import SurfaceScope
+
+    base = SurfaceScope.from_mapping(document)
+    scope = replace(
+        base,
+        program=f"console-{run_id}",
+        authorization=f"engagement_authorization:{authorization_id}",
+        engagement=engagement,
+        allowed_domains=(),
+        # IP 目标只按 allowed_ips 匹配(见 SurfaceScope.check_url),所以按主机是哪种
+        # 地址放到对应的那一栏,而不是两栏都塞。
+        allowed_hosts=() if _is_ip_host(host) else (host,),
+        allowed_ips=(host,) if _is_ip_host(host) else (),
+    )
+    scope.require_authorization()
+    return scope
+
+
+def _handler_engagement_host_run(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """Run one host of a confirmed authorisation document.
+
+    记录按 digest 复读,所以确认之后被动过的授权不会悄悄生效 —— 和 TargetCard 那条路
+    同一个规矩,只是这次复读的是一整份文档。
+    """
+    from console.engagement import EngagementAuthorizationStore, EngagementStateError
+
+    state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
+    run_id = str(ctx.job.payload.get("run_id") or job.job_id)
+    authorization_id = str(ctx.job.payload.get("authorization_id") or "")
+    host = str(ctx.job.payload.get("host") or "")
+    resolved = EngagementAuthorizationStore(state_dir).load(
+        authorization_id, expected_digest=str(ctx.job.payload.get("authorization_digest") or ""))
+    record = resolved["authorization"]
+    # 这一台必须真的在那份授权里 —— payload 是持久化记录,不能凭它就发请求。
+    if host not in (record.get("hosts") or []):
+        raise EngagementStateError("host_not_in_authorization")
+    scope = _scope_from_engagement_document(
+        record["document"], host=host, authorization_id=authorization_id, run_id=run_id,
+        engagement=str(record.get("engagement") or record.get("program") or ""))
+    allowed, reason = scope.check_url(job.target)
+    if not allowed:
+        raise EngagementStateError(f"target_not_in_confirmed_scope:{reason}")
+    return _run_scope(job, ctx, scope, run_id=run_id, target_url=job.target,
+                      authorization_id=authorization_id,
+                      authorization_digest=resolved["authorization_digest"])
+
+
 def start_target_run(
     state_dir: Path | str,
     *,
@@ -333,6 +416,90 @@ def start_target_run(
     )
     get_runner(state_dir).submit(job)
     return {"session_id": session_id, "job_id": job.job_id, "reused": False}
+
+
+def start_engagement_run(state_dir: Path | str, *, confirmed: Dict[str, Any],
+                         session_id: str = "") -> Dict[str, Any]:
+    """Start one job per host of a consumed document confirmation.
+
+    幂等键是 **(authorization_id, host)**,不是 intake:一次授权可能有 200 台主机,
+    而它们不是一次提交 —— 中途崩了再确认一次,缺的那几台要能续上,已经起了的不能
+    重复起。同一次授权的所有 job 共用一个 ``turn_id``,所以它们渲染在同一次对话里,
+    "一次停止停掉全部"也照旧成立。
+
+    主机顺序就是文档顺序,截断到文档自己写的 ``max_fanout``(缺省 30)。超出部分
+    如实回报,不静默丢。
+    """
+    from console.engagement import EngagementStateError
+
+    registry = get_registry(state_dir)
+    record = confirmed.get("authorization") if isinstance(confirmed.get("authorization"), dict) else {}
+    authorization_id = str(record.get("authorization_id") or "")
+    authorization_digest = str(confirmed.get("authorization_digest") or "")
+    hosts = [str(host) for host in (record.get("hosts") or []) if str(host)]
+    if not authorization_id or not authorization_digest or not hosts:
+        raise EngagementStateError("authorization_record_invalid")
+
+    try:
+        cap = max(1, int(record.get("max_fanout")))
+    except (TypeError, ValueError):
+        raise EngagementStateError("authorization_record_invalid") from None
+    launched_hosts = hosts[:cap]
+    skipped = len(hosts) - len(launched_hosts)
+
+    existing = {
+        str(item.payload.get("host") or ""): item
+        for item in registry.list(limit=0)
+        if item.kind == ENGAGEMENT_HOST_RUN_KIND
+        and str(item.payload.get("authorization_id") or "") == authorization_id
+    }
+    # 已经起过的那几台决定了这次挂在哪个会话里 —— 续跑要接回原来那次对话,不是
+    # 另开一个。
+    session_id = session_id or (next(iter(existing.values())).session_id if existing else "")
+    session_id = session_id or f"src-{secrets.token_hex(6)}"
+    turn_id = existing and next(iter(existing.values())).turn_id or f"T-{secrets.token_hex(4)}"
+    program = str(record.get("program") or "")
+    engagement = str(record.get("engagement") or program)
+    instruction = str(confirmed.get("instruction") or "")
+
+    jobs: List[JobRecord] = []
+    created = 0
+    for host in launched_hosts:
+        found = existing.get(host)
+        if found is not None:
+            jobs.append(found)
+            continue
+        job = registry.create(
+            session_id=session_id, turn_id=turn_id, kind=ENGAGEMENT_HOST_RUN_KIND,
+            target=f"https://{host}/",
+            payload={
+                "_state_dir": str(state_dir),
+                "run_id": f"SL-{int(time.time())}-{secrets.token_hex(3)}",
+                "via": "engagement",
+                "intake_id": str(confirmed.get("intake_id") or ""),
+                "authorization_id": authorization_id,
+                "authorization_digest": authorization_digest,
+                "host": host,
+                "program": program,
+                "engagement": engagement,
+                "instruction": instruction,
+                "title": instruction[:120] or host,
+            },
+        )
+        jobs.append(job)
+        created += 1
+        get_runner(state_dir).submit(job)
+    return {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "authorization_id": authorization_id,
+        "job_ids": [job.job_id for job in jobs],
+        "launched": len(jobs),
+        "created": created,
+        "reused": created == 0,
+        "hosts": launched_hosts,
+        "skipped": skipped,
+    }
 
 
 def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
@@ -468,7 +635,8 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 
 
 HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan,
-            "chat_turn": _handler_chat_turn, TARGET_RUN_KIND: _handler_target_run}
+            "chat_turn": _handler_chat_turn, TARGET_RUN_KIND: _handler_target_run,
+            ENGAGEMENT_HOST_RUN_KIND: _handler_engagement_host_run}
 
 
 # -- report back into the conversation ---------------------------------------
@@ -678,7 +846,7 @@ def shutdown_all(*, wait: bool = False) -> None:
 
 
 __all__ = [
-    "HANDLERS", "TARGET_RUN_KIND", "active_jobs", "events_path", "get_log",
-    "get_registry", "get_runner", "recover", "session_dir", "shutdown_all",
-    "start_target_run", "ACTIVE",
+    "HANDLERS", "TARGET_RUN_KIND", "ENGAGEMENT_HOST_RUN_KIND", "active_jobs", "events_path",
+    "get_log", "get_registry", "get_runner", "recover", "session_dir", "shutdown_all",
+    "start_engagement_run", "start_target_run", "ACTIVE",
 ]
