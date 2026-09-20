@@ -93,7 +93,9 @@ REASONER_SYSTEM = """\
 1. status="queued" 的 intent 是未验证的表面观察，不是漏洞。
 2. dead_ends 已经试过了，不要重新建议。
 3. hints 是之前探索的线索。
-4. 只能被动分析（GET/HEAD），不能发 POST。
+4. 能力面以下面这行为准 —— 不要假设更多，也不要假设更少。没被声明的方法，
+   沙箱会直接拒掉，写进计划的请求只会浪费一轮:
+   {capabilities}
 5. 优先级：高 priority + 带参数的 API > 静态路径 > 纯资源文件。
 6. 每个选中的 intent 必须给出具体假设（如"res_id 参数可能存在 SQLi"）。
 7. 若发现某个 intent 必须先拿到另一个 intent 的结果才能验证（例如先取到 token 再测越权），
@@ -151,8 +153,11 @@ EXPLORER_SYSTEM = """\
 - 发现不了就说发现不了，不编造
 
 ## Sandboxed HTTP Tool
-可请求额外 GET/HEAD（scope 内，最多 3 个）：
-  "http_actions": [{"method": "GET", "url": "https://...", "reason": "为什么需要"}]
+可请求额外的方法,上限 {max_actions} 个、scope 内:
+  {capabilities}
+  "http_actions": [{"method": "GET", "url": "https://...", "reason": "为什么需要",
+                    "body": "需要请求体时才写", "content_type": "application/x-www-form-urlencoded"}]
+没被授权的方法会被拒,拒绝原因会原样回到你面前 —— 想换动词之前先看上面那行。
 结果会在 follow-up 给你。不需要就省略。
 
 ## 需要打法细节就点名要
@@ -629,12 +634,22 @@ class SrcAgentLoop:
             self._doctrine_text = _skills.compose_prompt(self.config.skill_pack)
         return self._doctrine_text
 
-    def _system(self, base: str) -> str:
+    def _system(self, base: str, *, capabilities: bool = True) -> str:
         """作业规范 + 角色契约 + 已激活的打法。
 
         这三段合起来才是模型看到的 system prompt:doctrine 只有一份(技能包),角色只带
         自己那份输出契约,激活的卡是这一趟临时加上去的专家。
+
+        ``capabilities`` 默认开:角色契约里的 ``{capabilities}`` 占位符换成**这份授权
+        文档**说的能力行。用 replace 而不是 ``.format()`` —— 这两段里有 JSON 示例,
+        ``.format()`` 会当场把花括号吃掉。
+
+        关掉它(base 里没有占位符时本来也是空操作)是给不希望 prompt 依赖 scope 的
+        调用方留的;默认行为是"模型看到的 = 沙箱会执行的",两边同一份来源。
         """
+        if capabilities:
+            base = base.replace("{capabilities}", self.config.scope.capability_line())
+            base = base.replace("{max_actions}", str(MAX_HTTP_ACTIONS))
         parts = [part for part in (self._doctrine(), base, self._activated_section()) if part]
         return "\n\n".join(parts)
 

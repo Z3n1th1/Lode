@@ -126,6 +126,37 @@ class RunIdentityTests(unittest.TestCase):
         self.assertEqual(1.0, card_scope.delay_seconds)
 
 
+class PersistedRunScopeTests(unittest.TestCase):
+    """``SrcRunScope/v1`` 是事后唯一能读的授权记录,所以它必须说真话。
+
+    它以前只记域/主机列表,不记能力 —— "这次跑到底允不允许 POST"从记录里答不出来,
+    答案在 agents/src_agent.py 的一个常量里。engagement 同理:一个没人叫得出名字的
+    预算,没人审得动。
+    """
+
+    def test_the_record_carries_the_capability_and_the_budget_identity(self) -> None:
+        from agents.surface_discovery import SurfaceScope
+
+        scope = SurfaceScope(
+            "nba", "written authorization", engagement="turn-T-1",
+            allowed_hosts=("api.nba.com",), allowed_methods=("POST",), allow_request_body=True,
+        )
+        doc = jobs._scope_document(scope, run_id="SL-1", reasoner="deepseek", explorer="claude")
+
+        self.assertEqual("SrcRunScope/v1", doc["schema"])
+        self.assertEqual("turn-T-1", doc["engagement"])
+        self.assertEqual(["api.nba.com"], doc["allowed_hosts"])
+        self.assertEqual(["GET", "HEAD", "POST"], doc["allowed_methods"])
+        self.assertIs(True, doc["allow_request_body"])
+
+    def test_a_read_only_scope_records_read_only(self) -> None:
+        scope = _scope("https://a.example.com/")
+        doc = jobs._scope_document(scope, run_id="SL-2")
+        self.assertEqual(["GET", "HEAD"], doc["allowed_methods"])
+        self.assertIs(False, doc["allow_request_body"])
+        self.assertEqual("console-r1", doc["engagement"])   # 没有 turn 时退回 run
+
+
 class SurfaceScanProducerTests(unittest.TestCase):
     """``surface_scan`` had a handler and a renderer but no producer — nothing in
     the product could ever create one, so the cheap half of a hunt was unreachable."""

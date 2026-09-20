@@ -242,11 +242,19 @@ class SurfaceScope:
         return str(method or "").strip().upper() in self.allowed_methods
 
     def capability_line(self) -> str:
-        """What this scope permits, in one line, for a prompt."""
-        line = "允许的方法: " + ", ".join(self.allowed_methods)
-        if self.allow_request_body and set(self.allowed_methods) - set(_SAFE_METHODS):
-            line += ";允许带请求体"
-        return line
+        """What this scope permits, in one line, for a prompt.
+
+        The prompts used to hardcode "只能 GET/HEAD,不能发 POST" — true by default and
+        a lie the moment a scope declares more. A model told it cannot POST while the
+        sandbox would allow one simply never tries; a model told it can, when it
+        cannot, writes plans that die at the gate.
+        """
+        methods = ", ".join(self.allowed_methods)
+        writable = bool(set(self.allowed_methods) - set(_SAFE_METHODS))
+        if writable:
+            tail = "可以带请求体" if self.allow_request_body else "不允许带请求体"
+            return f"允许的方法: {methods}（{tail}）"
+        return f"允许的方法: {methods}（这份授权只有只读方法）"
 
     def require_authorization(self) -> None:
         if not self.authorization:

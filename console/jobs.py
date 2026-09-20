@@ -41,6 +41,32 @@ def get_log(state_dir: Path | str, session_id: str) -> EventLog:
 
 
 # -- job handlers ------------------------------------------------------------
+def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: str = "") -> Dict[str, Any]:
+    """The persisted authorisation record for one run (``SrcRunScope/v1``).
+
+    It has to be *true*, because it is the only thing a reviewer can read afterwards
+    that says what the run was permitted to do. It used to carry the host lists and
+    nothing about capabilities, so "was this run allowed to POST?" was unanswerable
+    from the record — the answer lived in a constant inside ``src_agent.py``. Same
+    for ``engagement``: it is the request budget's identity, and a budget nobody can
+    name is a budget nobody can audit.
+    """
+    return {
+        "schema": "SrcRunScope/v1",
+        "run_id": run_id,
+        "program": scope.program,
+        "engagement": str(getattr(scope, "engagement", "") or ""),
+        "authorization": scope.authorization,
+        "allowed_domains": list(scope.allowed_domains),
+        "allowed_hosts": list(scope.allowed_hosts),
+        "allowed_methods": list(getattr(scope, "allowed_methods", ()) or ()),
+        "allow_request_body": bool(getattr(scope, "allow_request_body", False)),
+        "reasoner_prefer": reasoner,
+        "explorer_prefer": explorer,
+        "created_at": time.time(),
+    }
+
+
 def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, target_url: str) -> Dict[str, Any]:
     """The work itself: one autopilot round, then the LLM agent loop.
 
@@ -60,12 +86,7 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     explorer = (job.payload.get("explorer_prefer") or "").strip() or os.environ.get("SRC_EXPLORER_PREFER", "").strip()
 
     try:
-        scope_doc = {
-            "schema": "SrcRunScope/v1", "run_id": run_id, "program": scope.program,
-            "authorization": scope.authorization, "allowed_domains": list(scope.allowed_domains),
-            "allowed_hosts": list(scope.allowed_hosts), "reasoner_prefer": reasoner,
-            "explorer_prefer": explorer, "created_at": time.time(),
-        }
+        scope_doc = _scope_document(scope, run_id=run_id, reasoner=reasoner, explorer=explorer)
         staged = out_dir / ".scope.json.tmp"
         staged.write_text(json.dumps(scope_doc, ensure_ascii=False, indent=2), encoding="utf-8")
         replace_with_retry(staged, out_dir / "scope.json")

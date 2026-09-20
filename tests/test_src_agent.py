@@ -994,5 +994,56 @@ class TestHttpActionAudit(unittest.TestCase):
             self.assertEqual(0, rows[0]["status"])
 
 
+class TestCapabilityInPrompt(unittest.TestCase):
+    """模型看到的 = 沙箱会执行的,两边同一份来源。
+
+    角色契约以前硬编码"只能 GET/HEAD,不能发 POST":默认成立,一旦 scope 声明了
+    更多就是谎话。告诉模型"不能 POST"而沙箱其实放行,它永远不会试;反过来告诉它
+    "能"而沙箱拒掉,它写出来的计划全在闸门那儿死掉。
+    """
+
+    def _loop(self, tmp, **scope_kwargs):
+        config = AgentConfig(blackboard_path=Path(tmp) / "bb.json", scope=_make_scope(**scope_kwargs))
+        return SrcAgentLoop(config)
+
+    def test_a_read_only_scope_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._loop(tmp)._system(REASONER_SYSTEM)
+        self.assertIn("允许的方法: GET, HEAD", prompt)
+        self.assertIn("只有只读方法", prompt)
+        self.assertNotIn("{capabilities}", prompt)
+
+    def test_a_writable_scope_says_what_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp, allowed_methods=("POST", "PUT"), allow_request_body=True)
+            prompt = loop._system(EXPLORER_SYSTEM)
+        self.assertIn("允许的方法: GET, HEAD, POST, PUT", prompt)
+        self.assertIn("可以带请求体", prompt)
+        self.assertNotIn("{capabilities}", prompt)
+
+    def test_a_writable_scope_without_a_body_channel_says_that_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp, allowed_methods=("POST",))
+            prompt = loop._system(REASONER_SYSTEM)
+        self.assertIn("不允许带请求体", prompt)
+
+    def test_the_prompt_line_comes_from_the_scope_itself(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp, allowed_methods=("POST",), allow_request_body=True)
+            self.assertIn(loop.config.scope.capability_line(), loop._system(REASONER_SYSTEM))
+
+    def test_the_sandbox_limit_is_not_hardcoded_in_the_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._loop(tmp)._system(EXPLORER_SYSTEM)
+        from agents.src_agent import MAX_HTTP_ACTIONS
+
+        self.assertIn(f"上限 {MAX_HTTP_ACTIONS} 个", prompt)
+
+    def test_capabilities_can_be_left_alone_for_a_custom_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = self._loop(tmp)._system("BASE {capabilities}", capabilities=False)
+        self.assertIn("{capabilities}", raw)
+
+
 if __name__ == "__main__":
     unittest.main()
