@@ -4,13 +4,16 @@
 
 ## 两类风险分开控制
 
-对 SRC 目标：只运行明确书面授权范围内的任务。自动 surface 只发低频 GET，不提交表单，不执行文章、ZIP 或 PoC 中的代码。请求前检查 host 范围、禁止项、URL 凭据和语义写操作；重定向不跟随。GET 语义拦截是额外防线，不能证明未知业务接口无副作用。只在运营方允许的资产、测试账号和已审核的读取入口开始。
+对 SRC 目标：只运行明确书面授权范围内的任务。自动 surface 只发低频 GET，不提交表单，不执行文章、ZIP 或 PoC 中的代码。请求前检查 host 范围、禁止项、URL 凭据、方法准入和语义写操作；重定向不跟随。GET 语义拦截是额外防线，不能证明未知业务接口无副作用。只在运营方允许的资产、测试账号和已审核的读取入口开始。
 
 对执行平台：目标返回的 HTML、JS、XML、文章和模型输出均是不可信数据。抓到的脚本仅按文本解析，不执行、不安装依赖。资讯模型没有工具，只接收有界的公开标题及摘要。不要为追求自动化开启 always-approve、任意 shell、运行未锁定的 npx 包或挂载 Docker socket。
 
 ## 当前已实现
 
 - Surface 每次抓取前重新检查 scope，并拒绝删除、更新、退出、支付、发送等明显有副作用的 URL，以及未知 operation selector。候选 API 路径不会因为被提取到就自动被访问。
+- **默认只读，写权限由授权文档显式声明**。`SurfaceScope.allowed_methods`（默认 `GET`/`HEAD`，恒并集：声明什么都拿不掉这两个）与 `allow_request_body` 是唯一的能力来源；模型提示词里的能力行由同一份 scope 生成，不是硬编码。空/缺失/非法的声明等于只读，所以这个字段出现之前写的 scope 文件行为不变。
+- **写权限闸门**。「URL 里出现某个改状态词」是启发式而不是证据（`DropDownOptions` 会因驼峰切词命中 update），所以它只在文档**没有声明任何写方法**时硬拦（`state_changing_endpoint`）；声明之后降级为跟随请求的警告。控制点因此从"URL 里有没有某个词"换成"操作员签了什么"。`unknown_operation_selector`（`?action=sendEmail`）不受此降级影响，仍硬拦 —— 只有它自己点名了已被声明的方法（`?_method=POST` 且 POST 已声明）才放行。拒绝原因分开表述（`method_not_allowed` / `body_not_allowed` / `state_changing_endpoint` / `unknown_operation_selector`），不再一律叫 write_blocked。
+- 每条非读动作写 `http-actions.jsonl`（run 目录内，请求体全文 + 响应指纹），黑板与事件流只留指纹（`sha256[:12]` + 长度 + content-type）。被拦下来的尝试也记录。
 - 动作策略重新检查语义操作。上层把 GET 判为 allow，也不能覆盖下层识别出的写动作。默认无 operator allowlist/ownership proof 时，创建、修改和未知方法都进入人工门；删除始终进入人工门。
 - `human_gate` 在没有独立审批权威时是 hard-blocked。`gateway_request` 在执行内核缺失或物理出站未确认时不进行 live execution。
 - Blackboard 提供跨进程 claim、heartbeat、过期回收和状态原子写；它协调任务，不负责约束外部 runner 的实际网络权限。

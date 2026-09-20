@@ -40,7 +40,7 @@ if str(_CORE_DIR) not in sys.path:
 
 from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason, _request_text
 from core.rate_limit import limiter_for
-from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
+from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED, operation_selector_method
 from core import skills as _skills
 
 # Auto-load .env config (API keys, etc.)
@@ -226,18 +226,26 @@ _HYPOTHESIS_BRIEF = {
 }
 
 
-def _shape_signals_section(names: Any) -> str:
+def _shape_signals_section(names: Any, url: str = "") -> str:
     """The Explorer's 'what to look for' block, or '' when the shape says nothing.
 
     Empty is a real answer: a static asset with no parameters gives the Explorer no
     prior, and inventing one would be worse than letting the model read the response.
+
+    ``state_changing_endpoint`` is not a hypothesis — it is a warning that this request
+    itself does something. It only ever reaches here when the authorisation document
+    declared a write method (otherwise the gate refused the fetch), so the wording says
+    "confirm this is the change you meant", not "you may not do this".
     """
     wanted = [str(name) for name in (names or []) if str(name) in _HYPOTHESIS_BRIEF]
-    if not wanted:
+    notes: List[str] = []
+    if _readonly_url_reason(url) == "state_changing_url":
+        notes.append("  - state_changing_endpoint: 这条 URL 自己带改状态的动作词。这次请求"
+                     "是**改动**而不是读取 —— 发之前确认这就是你要的改动,并把结果当改动记录。")
+    notes.extend(f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted)
+    if not notes:
         return ""
-    lines = [f"Shape signals (from the URL, not a claim):"]
-    lines.extend(f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted)
-    return "\n".join(lines) + "\n\n"
+    return "Shape signals (from the URL, not a claim):\n" + "\n".join(notes) + "\n\n"
 
 
 def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
@@ -416,8 +424,12 @@ def _fetch_for_analysis(
 
     The order of the gates is the whole point, and so is the fact that there is only
     one copy of them: URL in scope → *method* declared by the authorisation document
-    → body declared → not a state-changing URL → budget → send. A caller that skips
-    this function skips all five.
+    → body declared → the write gate → budget → send. A caller that skips this
+    function skips all five.
+
+    The write gate is the one that reads the document rather than the URL: a
+    state-changing-looking path is refused only while no write method has been
+    declared, and an operation selector is refused unless it names a declared method.
 
     ``method`` is echoed back in the result: the timeline and the prompt both report
     what ran, and an audit line that says "GET" for a request that was not a GET is
@@ -434,9 +446,25 @@ def _fetch_for_analysis(
     payload = body.encode("utf-8") if isinstance(body, str) and body else None
     if payload and not scope.allow_request_body:
         return _refused("body_not_allowed", verb)
+    # 写权限闸门。两件事分开了:
+    #
+    # * ``unknown_operation_selector``(``?action=sendEmail``)保留硬拦 —— 它说的是
+    #   "这个 URL 自己会挑一个操作",光有方法授权覆盖不了它。唯一放行的情况是选择器
+    #   本身点名了一个方法(``?_method=POST``)而且那份方法被声明过。
+    # * ``state_changing_url`` 只在**文档还没声明任何写方法**时是硬拦。声明之后它降级
+    #   成标记(见 core.src_blackboard 的 state_changing_endpoint,以及提示词里那节):
+    #   控制点从"URL 里有没有某个词"换成"操作员签的那份文档说了什么"。
+    #
+    # 错误串也拆开了。以前不管什么原因都叫 write_blocked:,于是 URL 里带 "update" 的
+    # 一个 POST 被说成"写操作被拦",而真正的原因是方法没被声明 —— 那是误归因,
+    # 操作员照着一个错的理由去改 scope 只会更困惑。
     read_reason = _readonly_url_reason(url)
-    if read_reason:
-        return _refused(f"write_blocked:{read_reason}", verb)
+    if read_reason == "unknown_operation_selector":
+        named = operation_selector_method(url)
+        if not (named and scope.allows_method(named)):
+            return _refused("unknown_operation_selector", verb)
+    elif read_reason and not scope.declares_write:
+        return _refused("state_changing_endpoint", verb)
     # 限速交给全局桶(见 core/rate_limit)。以前是调用方传 last_request_at 进来、
     # 自己 sleep —— 那份"间隔"是每个 agent 运行各一份,并发起来就是 N 倍速率。
     limiter = limiter_for(scope)
@@ -1158,7 +1186,7 @@ class SrcAgentLoop:
             hypothesis=hypothesis or "general security analysis",
             check_description=check_description or "look for security-relevant patterns",
             hints_section=hints_section,
-            shape_section=_shape_signals_section(intent.get("hypotheses")),
+            shape_section=_shape_signals_section(intent.get("hypotheses"), target_url),
             status=fetch_result["status"],
             headers_text=_sanitize_headers(fetch_result["headers"]),
             body_limit=BODY_LIMIT,

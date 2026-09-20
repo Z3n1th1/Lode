@@ -77,13 +77,15 @@ python src_agent.py --scope scope.json --blackboard .\out\src-blackboard.json --
 每一轮循环:
 
 1. **Reason** —— 读取黑板全量快照,选出 `queued` intent,并生成漏洞假设;提示词明确“候选未经验证,不得重复建议死路”。
-2. **Explore** —— `claim` 一个 intent,对目标做 scope 校验后的 **GET/HEAD**,把响应消毒(剥离 cookie/auth,body 截断)后交给 LLM 分析,产出 `fact` / `dead_end` / `hint` 写回黑板。
+2. **Explore** —— `claim` 一个 intent，对目标做 scope 校验后的请求（默认 GET/HEAD；写方法必须由授权文档显式声明），把响应消毒(剥离 cookie/auth,body 截断)后交给 LLM 分析,产出 `fact` / `dead_end` / `hint` 写回黑板。
 3. 黑板更新后进入下一轮,直到没有可挖 intent 或触达 `--max-cycles` 硬上限。
 
 `SrcAgentLoop` 在每一步都 fail-closed:
 
 - 初始化即调用 `scope.require_authorization()`，授权缺失直接失败；
-- 每次请求前 `scope.check_url()` + `_readonly_url_reason()`，只发只读方法，并按 `scope.delay_seconds` 限速；
+- 每次请求前按序过五道闸门：`scope.check_url()`（在不在范围里）→ 方法准入（`allowed_methods` 声明过没有）→ body 准入（`allow_request_body`）→ 写权限闸门 → `scope.delay_seconds` 限速。**默认只读**：授权文档不声明，就只有 GET/HEAD。
+- 写权限闸门。URL 里出现"删除/更新/发送"之类的词是启发式，不是证据（`DropDownOptions` 会被切成 drop+down）。所以它只在授权文档**没有声明任何写方法**时是硬拦（`state_changing_endpoint`）；声明之后降级成跟着请求走的警告 —— 控制点是操作员签的那份文档，不是 URL 里有没有某个词。`?action=sendEmail` 这类**操作选择器**不受影响，仍然硬拦，除非它自己点名了一个已被声明的方法（`?_method=POST` + POST 已声明）。
+- 每条非读动作落 `http-actions.jsonl`（run 目录内，含请求体全文与响应指纹）；黑板与时间线只留指纹。被拦下来的尝试同样记录。
 - Explorer 只允许报告可追溯到响应内容的发现,防止幻觉；
 - 任意异常收敛为 `dead_end`,绝不静默成功；
 - C 阶段 intent 带 `requires_human_review=True`,写操作/爆破/凭据复用/跨租户访问不会自动执行。

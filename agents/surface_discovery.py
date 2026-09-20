@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from core.rate_limit import limiter_for
+from core.src_blackboard import state_changing_reason
 
 
 API_PREFIXES = {
@@ -109,34 +110,14 @@ def _as_bool(value: Any) -> bool:
 
 
 def _readonly_url_reason(value: str) -> str:
-    """Additional GET safety check, not proof of a server's implementation."""
-    from urllib.parse import parse_qsl, unquote
+    """Additional GET safety check, not proof of a server's implementation.
 
-    parsed = urlsplit(value)
-    decoded = parsed.path + "?" + parsed.query
-    for _ in range(3):
-        next_value = unquote(decoded)
-        if next_value == decoded:
-            break
-        decoded = next_value
-    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", decoded).lower()
-    tokens = set(re.findall(r"[a-z]+", words))
-    state_changes = {
-        "delete", "remove", "destroy", "purge", "erase", "clear", "drop", "wipe",
-        "update", "edit", "modify", "reset", "cancel", "disable", "revoke",
-        "logout", "signout", "unsubscribe", "send", "resend", "sms", "email",
-        "pay", "payment", "refund", "transfer", "purchase", "checkout",
-        "activate", "deactivate", "grant", "upload", "create", "register",
-    }
-    if tokens & state_changes or any(word in words for word in (
-        "\u5220\u9664", "\u4fee\u6539", "\u66f4\u65b0", "\u6ce8\u9500", "\u9000\u51fa", "\u652f\u4ed8", "\u9000\u6b3e", "\u53d1\u9001",
-    )):
-        return "state_changing_url"
-    selectors = {"action", "op", "operation", "do", "cmd", "method", "_method", "function", "func"}
-    for key, item in parse_qsl(decoded.partition("?")[2], keep_blank_values=True):
-        if key.lower() in selectors and item.lower() not in {"get", "head", "options", "read", "list", "view", "search", "query"}:
-            return "unknown_operation_selector"
-    return ""
+    The word list moved to ``core.src_blackboard.state_changing_reason`` when the
+    blackboard and the agent gate needed the same answer — three copies of "what
+    counts as state-changing" would drift apart, and the gate is the one that has to
+    be right. The name stays because it is imported by ``agents/src_agent.py``.
+    """
+    return state_changing_reason(value)
 
 
 def _is_ip(value: str) -> bool:
@@ -240,6 +221,18 @@ class SurfaceScope:
     def allows_method(self, method: str) -> bool:
         """Whether this authorisation document permits ``method``."""
         return str(method or "").strip().upper() in self.allowed_methods
+
+    @property
+    def declares_write(self) -> bool:
+        """True once the document names a method beyond GET/HEAD.
+
+        This is the switch the write gate turns on: until the operator has signed for
+        *some* write verb, a URL that reads like a mutation stays a hard block. After
+        it, the same signal is a warning attached to the request instead of a wall —
+        the control point moved from "is there a word in the URL" to "what did the
+        operator authorise".
+        """
+        return bool(set(self.allowed_methods) - set(_SAFE_METHODS))
 
     def capability_line(self) -> str:
         """What this scope permits, in one line, for a prompt.

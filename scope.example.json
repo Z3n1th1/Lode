@@ -1,10 +1,13 @@
 {
+  "_comment": "allowed_methods 是授权文档的能力维度:不写(或写空/写非法值)等于只读。GET/HEAD 是恒并集,声明什么都拿不掉。要发写方法必须同时声明 allow_request_body 才允许带请求体,并且写入会在 run 目录的 http-actions.jsonl 留全文。详见 docs/security-boundary.md。",
   "program": "replace-with-authorized-program",
   "authorization": "",
   "allowed_domains": [],
   "allowed_hosts": [],
   "allowed_ips": [],
   "forbidden_hosts": [],
+  "allowed_methods": ["GET", "HEAD"],
+  "allow_request_body": false,
   "seed_urls": [],
   "rate_limit": {
     "timeout_seconds": 8,
@@ -12,4 +15,3 @@
   },
   "max_items": 200
 }
-

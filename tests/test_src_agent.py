@@ -26,6 +26,7 @@ from agents.src_agent import (
     _fetch_for_analysis,
     _parse_json_response,
     _sanitize_headers,
+    _shape_signals_section,
     run_src_agent,
 )
 from agents.surface_discovery import SurfaceScope
@@ -176,9 +177,15 @@ class TestFetchForAnalysis(unittest.TestCase):
         self.assertIn("scope_rejected", result["error"])
 
     def test_write_blocked(self):
+        """原因说准确:这是"URL 读起来像改状态",不是笼统的 write_blocked。
+
+        以前不管什么原因都叫 write_blocked:,于是 URL 里带 "update" 的一个 POST 被
+        说成"写操作被拦",而真正的原因是方法没被声明 —— 操作员照着一个错的理由去
+        改 scope 只会更困惑。
+        """
         scope = _make_scope()
         result = _fetch_for_analysis("https://example.com/api/deleteUser", scope)
-        self.assertIn("write_blocked", result["error"])
+        self.assertEqual("state_changing_endpoint", result["error"])
 
     def test_successful_fetch(self):
         scope = _make_scope()
@@ -902,6 +909,107 @@ class TestFetchGate(unittest.TestCase):
                 result = _fetch_for_analysis(call.pop("url"), _make_scope(), **call)
                 self.assertNotEqual("", result["method"])
                 self.assertIn("error", result)
+
+
+class TestWriteGate(unittest.TestCase):
+    """治理语义变更:控制点从"URL 里有没有某个词"换成"操作员签了什么"。
+
+    一条 URL 里出现 "update" 是启发式,不是证据 —— DropDownOptions 会被切成
+    drop+down、UpdateStatus 会被切成 update。以前这种误判一律硬拦;现在它只在文档
+    **没有声明任何写方法**时才是墙,声明之后降级成跟着请求走的警告。
+    """
+
+    def test_the_word_list_still_blocks_while_nothing_is_declared(self):
+        scope = _make_scope()
+        for url in ("https://example.com/api/deleteUser",
+                    "https://example.com/api/UpdateStatus",
+                    "https://example.com/api/DropDownOptions"):
+            with self.subTest(url=url):
+                self.assertEqual("state_changing_endpoint",
+                                 _fetch_for_analysis(url, scope)["error"])
+
+    def test_declaring_a_write_method_turns_the_wall_into_a_warning(self):
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        seen: List[str] = []
+
+        def requester(method, url, **kwargs):
+            seen.append(method)
+            return 200, "{}", {}
+
+        result = _fetch_for_analysis("https://example.com/api/deleteUser", scope,
+                                     method="POST", body="id=1", requester=requester)
+        self.assertEqual("", result["error"])
+        self.assertEqual(["POST"], seen)
+        self.assertEqual(200, result["status"])
+
+    def test_an_operation_selector_stays_blocked_even_with_write_methods(self):
+        """``?action=sendEmail`` 说的是"这个 URL 自己会挑一个操作" —— 方法授权覆盖不了它。"""
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://example.com/api/x?action=sendEmail", scope,
+                                     method="POST", body="to=a@b.c",
+                                     requester=lambda *a, **k: (200, "{}", {}))
+        self.assertEqual("unknown_operation_selector", result["error"])
+
+    def test_a_selector_that_names_a_declared_method_is_covered(self):
+        """唯一放行的情况:选择器自己点名了方法(?_method=POST),而那份方法被声明过。"""
+        seen: List[Tuple] = []
+
+        def requester(method, url, **kwargs):
+            seen.append((method, kwargs.get("body")))
+            return 200, "{}", {}
+
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://example.com/api/x?_method=POST", scope,
+                                     method="POST", body="a=1", requester=requester)
+        self.assertEqual("", result["error"])
+        self.assertEqual([("POST", b"a=1")], seen)
+
+    def test_a_selector_naming_an_undeclared_method_is_still_blocked(self):
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://example.com/api/x?_method=DELETE", scope,
+                                     method="POST", body="a=1",
+                                     requester=lambda *a, **k: (200, "{}", {}))
+        self.assertEqual("unknown_operation_selector", result["error"])
+
+    def test_the_signals_reach_the_blackboard(self):
+        """标记要跟着候选走到意图上 —— 否则提示词里那节没有来源。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            board = SrcBlackboard(Path(tmp) / "bb.json", default_lease_seconds=60)
+            board.sync_candidates([
+                {"candidate_id": "SC-1", "priority": 80, "url": "https://example.com/api/deleteUser"},
+                {"candidate_id": "SC-2", "priority": 70, "url": "https://example.com/api/users"},
+            ], run_id="SA-1")
+            snapshot = board.snapshot()
+        marks = {row["target"]: row["state_changing_endpoint"] for row in snapshot["intents"]}
+        self.assertIs(True, marks["https://example.com/api/deleteUser"])
+        self.assertIs(False, marks["https://example.com/api/users"])
+
+    def test_the_explorer_is_told_it_is_a_change_not_a_read(self):
+        section = _shape_signals_section([], "https://example.com/api/deleteUser")
+        self.assertIn("state_changing_endpoint", section)
+        self.assertIn("改动", section)
+        self.assertEqual("", _shape_signals_section([], "https://example.com/api/users"))
+
+    def test_no_decision_is_named_write_blocked_any_more(self):
+        """四个原因各说各的:方法 / body / 改状态端点 / 操作选择器。"""
+        read_only = _make_scope()
+        writable = _make_scope(allowed_methods=("POST",))
+        cases = {
+            "method_not_allowed:POST": (
+                read_only, "https://example.com/api/users", dict(method="POST", body="a=1")),
+            "body_not_allowed": (
+                writable, "https://example.com/api/users", dict(method="POST", body="a=1")),
+            "state_changing_endpoint": (
+                read_only, "https://example.com/api/deleteUser", {}),
+            "unknown_operation_selector": (
+                read_only, "https://example.com/api/x?action=ping", {}),
+        }
+        for expected, (scope, url, call) in cases.items():
+            with self.subTest(expected=expected):
+                result = _fetch_for_analysis(
+                    url, scope, requester=lambda *a, **k: (200, "{}", {}), **call)
+                self.assertEqual(expected, result["error"])
+                self.assertNotIn("write_blocked", result["error"])
 
 
 class TestHttpActionAudit(unittest.TestCase):

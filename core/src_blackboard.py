@@ -14,7 +14,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from core.file_lock import AdvisoryFileLock, replace_with_retry
 
@@ -167,6 +167,90 @@ def _safe_text(value: Any, limit: int) -> str:
     return _SECRET_TEXT.sub("[redacted]", _text(value, limit))
 
 
+# ---------------------------------------------------------------------------
+# "Does this URL read like a state-changing operation?"
+# ---------------------------------------------------------------------------
+#
+# A word list over a URL. That is a heuristic and not proof of anything — which is
+# exactly why there is one copy of it, one named list of words, and why it lives in
+# the shared layer: the crawler, the blackboard and the agent gate all have to agree
+# on what "state-changing" means, and the decision to *block* or *warn* belongs to the
+# caller (the gate, which knows what the authorisation document declared).
+_STATE_CHANGING_WORDS = frozenset({
+    "delete", "remove", "destroy", "purge", "erase", "clear", "drop", "wipe",
+    "update", "edit", "modify", "reset", "cancel", "disable", "revoke",
+    "logout", "signout", "unsubscribe", "send", "resend", "sms", "email",
+    "pay", "payment", "refund", "transfer", "purchase", "checkout",
+    "activate", "deactivate", "grant", "upload", "create", "register",
+})
+_STATE_CHANGING_CJK = ("删除", "修改", "更新", "注销", "退出", "支付", "退款", "发送")
+_OPERATION_SELECTOR_KEYS = frozenset({
+    "action", "op", "operation", "do", "cmd", "method", "_method", "function", "func",
+})
+_READ_SELECTOR_VALUES = frozenset({
+    "get", "head", "options", "read", "list", "view", "search", "query",
+})
+_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _decoded_target(value: str) -> str:
+    """Path + query, percent-decoded up to three times (``%2528`` → ``(``)."""
+    parsed = urlsplit(value)
+    decoded = parsed.path + "?" + parsed.query
+    for _ in range(3):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def state_changing_reason(value: str) -> str:
+    """``"state_changing_url"``, ``"unknown_operation_selector"`` or ``""``.
+
+    Weak by design. ``DropDownOptions`` and ``UpdateStatus`` both get split at the
+    camel boundary, so ``update`` inside a compound word counts — that is a false
+    positive, kept deliberately: the cost of asking the operator once is lower than
+    the cost of missing a real mutation. What changed is *who pays*: the gate only
+    ever hard-blocks on this when the authorisation document declared no write
+    method, so a scope that has declared them turns the same signal into a warning
+    instead of a wall.
+
+    ``unknown_operation_selector`` is checked *before* the word list and is never
+    downgraded that way — it says the URL picks its own operation, which a declared
+    method cannot speak for.
+    """
+    decoded = _decoded_target(value or "")
+    # 操作选择器**先判**。反过来的话,``?_method=DELETE`` 会被词表接走(delete 是个
+    # 改状态词),于是它拿到的是"改状态端点"这个可降级的结论 —— 而它其实是"这个 URL
+    # 自己点名了一个方法",那是另一条、且不该被降级的闸门。
+    for key, item in parse_qsl(decoded.partition("?")[2], keep_blank_values=True):
+        if str(key).lower() in _OPERATION_SELECTOR_KEYS and str(item).lower() not in _READ_SELECTOR_VALUES:
+            return "unknown_operation_selector"
+    words = _CAMEL_BOUNDARY.sub(" ", decoded).lower()
+    tokens = set(re.findall(r"[a-z]+", words))
+    if tokens & _STATE_CHANGING_WORDS or any(word in words for word in _STATE_CHANGING_CJK):
+        return "state_changing_url"
+    return ""
+
+
+def operation_selector_method(value: str) -> str:
+    """The HTTP method a ``?_method=POST``-style selector names, or ``""``.
+
+    This is the one case where a selector can be *covered* rather than merely
+    suspicious: if it names a method and the authorisation declared that method, the
+    operator has already said what this endpoint is for.
+    """
+    decoded = _decoded_target(value or "")
+    for key, item in parse_qsl(decoded.partition("?")[2], keep_blank_values=True):
+        if str(key).lower() in _OPERATION_SELECTOR_KEYS:
+            candidate = str(item).strip().upper()
+            if candidate in _HTTP_METHODS:
+                return candidate
+    return ""
+
+
 def _priority(value: Any) -> int:
     try:
         return max(0, min(100, int(float(value))))
@@ -269,6 +353,9 @@ class SrcBlackboard:
                 # 形状给的检查方向(0–3 条)。确定性纯函数,同一个 url 永远同一组 ——
                 # 所以这里自己算,不读生产者的字段。
                 signals = hypotheses(url)
+                # 形状事实,不是判决:URL 读起来像改状态。闸门拿它决定硬拦还是警告
+                # (取决于文档声明了什么),提示词拿它提醒模型这是次改动。
+                state_changing = state_changing_reason(url) == "state_changing_url"
                 fact_id = "F-" + _digest("candidate", cid)
                 fact = facts.get(fact_id)
                 if fact is None:
@@ -279,6 +366,7 @@ class SrcBlackboard:
                         "url": url,
                         "probe_url": probe,
                         "hypotheses": signals,
+                        "state_changing_endpoint": state_changing,
                         "priority": _priority(candidate.get("priority")),
                         "sources": [_text(item, 40) for item in (candidate.get("sources") or [])[:12]],
                         "run_id": _text(run_id, 80),
@@ -308,6 +396,7 @@ class SrcBlackboard:
                         "probe_url": probe,
                         # 形状给的检查方向;Explorer 的提示词里会带这一节。
                         "hypotheses": signals,
+                        "state_changing_endpoint": state_changing,
                         "priority": _priority(candidate.get("priority")),
                         "phase": _text(candidate.get("next_phase"), 64) or "A-passive-triage",
                         "status": "queued",
