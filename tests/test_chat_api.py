@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from console import jobs as console_jobs  # noqa: E402
 from console.app import create_app  # noqa: E402
 from agents import src_chat as agents_src_chat  # noqa: E402
+from agents import scope_document  # noqa: E402
 from core import intent_router  # noqa: E402
 
 PASSWORD = "strong-local-password"
@@ -291,7 +292,7 @@ class EscalationTests(_ChatCase):
         seen: list = []
         client = self._client_with_stubbed_loop(seen)
         text = "扫描一下 " + " ".join(f"https://h{i}.example.com" for i in range(5))
-        with patch.object(console_jobs, "DEFAULT_MAX_FANOUT", 2):
+        with patch.object(scope_document, "DEFAULT_MAX_FANOUT", 2):
             resp = client.post(f"/api/v1/chat/sessions/{self.SESSION}/messages",
                                json={"text": text, "mode": "pentest"})
             self.assertEqual(202, resp.status_code, resp.text)

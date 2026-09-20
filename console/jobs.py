@@ -21,7 +21,7 @@ from core.event_log import EventLog
 from core.intake_state import IntakeStateError
 from core.job_registry import ACTIVE, JobRecord, JobRegistry
 from core.job_runner import JobContext, JobRunner
-from core.targets import MAX_ENTRIES, public_target_reason
+from core.targets import public_target_reason
 
 _LOCK = threading.Lock()
 _ENTRIES: Dict[str, Dict[str, Any]] = {}
@@ -361,17 +361,11 @@ def _handler_surface_scan(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     return {"summary_ref": str(out_dir / "src-blackboard.json"), "progress": {"phase": "done"}}
 
 
-# 一次粘贴默认最多起这么多任务。清单里 200 个域名不等于 200 个猎场:池子只有几个
-# worker,排到队列尾部的那些等于挂着一堆不会动的行。超出部分在对话里说清楚,不静默丢。
+# 一次粘贴最多起这么多任务。数字本身在 agents/scope_document 里 —— 授权文档也能写
+# ``max_fanout``,两个来源必须是同一个常量,否则"上限是多少"就取决于走的哪个入口。
 #
-# 30 而不是 20,是因为速率已经是硬盖(见 core/rate_limit):令牌桶在一次 engagement 内
-# 共享,30 个 job 并不会让程序看到 30 倍的请求量,只是让管道在等模型的时候不空转。
-# 一次授权文档可以写 ``max_fanout`` 把它调小 —— 程序文档里写了"别抬上限"的时候,
-# 那句话是授权的边界,不是一个可以代码里覆盖的建议。
-DEFAULT_MAX_FANOUT = 30
-# 上限的依据是 targets.py 那份"一次能识别的资产数",不是拍脑袋:超过它,文档里
-# 就有一部分主机根本没经过那道闸门。
-HARD_MAX_FANOUT = MAX_ENTRIES
+# 一个 job 一个桶那会儿这个数是安全阀;现在速率是硬盖(见 core/rate_limit),
+# 它管的是队列有多长,不是程序会被打多快。清单里 200 个域名不等于 200 个猎场。
 
 
 def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
@@ -382,6 +376,7 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
     subtask it launches.
     """
     from agents import src_chat
+    from agents.scope_document import DEFAULT_MAX_FANOUT
     from core import intent_router, modes, skills
 
     state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
