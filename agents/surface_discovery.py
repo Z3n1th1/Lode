@@ -67,6 +67,47 @@ def _host(value: str) -> str:
     return str(value or "").strip().lower().strip("[]").rstrip(".")
 
 
+def _as_tuple(value: Any) -> tuple:
+    """A string is one value, not a sequence of characters.
+
+    ``for item in (data.get("allowed_domains") or ())`` iterates a *string*
+    character by character, so a scope file that wrote ``"allowed_methods": "POST"``
+    silently became ``P``, ``O``, ``S``, ``T`` — four unknowns that fail open in the
+    only place that matters. Hand-written scope files are exactly where this happens.
+    """
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(value)
+    return ()
+
+
+# 方法词表与顺序都是固定的:两份声明了同一个集合的 scope 必须写出同一个 tuple,
+# 否则它们的桶/缓存/比较都会因为书写顺序不同而不同。
+_METHOD_ORDER = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
+_METHOD_VOCABULARY = frozenset(_METHOD_ORDER)
+# 只读是底线,不是默认值:声明什么都拿不掉这两个。
+_SAFE_METHODS = ("GET", "HEAD")
+
+
+def _method_tuple(value: Any) -> tuple[str, ...]:
+    """Upper-cased, de-duplicated, filtered to the vocabulary.  GET/HEAD always in.
+
+    An empty, missing or garbage declaration means *read-only*, not "everything" and
+    not "nothing": fail-closed here is "you may still look", which keeps a scope file
+    that predates this field working exactly as it did.
+    """
+    declared = {str(item).strip().upper() for item in _as_tuple(value) if str(item).strip()}
+    allowed = (declared & _METHOD_VOCABULARY) | set(_SAFE_METHODS)
+    return tuple(method for method in _METHOD_ORDER if method in allowed)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _readonly_url_reason(value: str) -> str:
     """Additional GET safety check, not proof of a server's implementation."""
     from urllib.parse import parse_qsl, unquote
@@ -142,16 +183,29 @@ class SurfaceScope:
     allowed_hosts: tuple[str, ...] = ()
     allowed_ips: tuple[str, ...] = ()
     forbidden: tuple[str, ...] = ()
+    # 能力维度:这份授权文档允许**做什么**,不只是允许**去哪里**。
+    #
+    # 以前只读是 agents/src_agent.py 里一个硬编码的 {"GET","HEAD"},所以授权文档从
+    # 来没有说过"这个 worker 可以做什么" —— 想放宽就只能在代码里放宽,那是把治理
+    # 从句面搬进源码。默认仍然只有 GET/HEAD,而且是恒并集:声明什么都拿不掉。
+    allowed_methods: tuple[str, ...] = _SAFE_METHODS
+    # 允许带请求体。单独一个开关,因为"可以发 POST"和"可以发任意 body"是两件事。
+    allow_request_body: bool = False
     timeout_seconds: float = 8.0
     delay_seconds: float = 0.4
+
+    def __post_init__(self) -> None:
+        # 归一化放在类型上,不只放在 from_mapping 里:直接构造 SurfaceScope 的调用方
+        # 同样不该拿到一份"GET/HEAD 被声明掉"的授权。幂等,所以两种路径的结果一致。
+        object.__setattr__(self, "allowed_methods", _method_tuple(self.allowed_methods))
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "SurfaceScope":
         nested = value.get("scope")
         data = nested if isinstance(nested, Mapping) else value
-        domains = tuple(str(item).strip() for item in (data.get("allowed_domains") or ()) if str(item).strip())
-        hosts = tuple(str(item).strip() for item in (data.get("allowed_hosts") or data.get("hosts") or ()) if str(item).strip())
-        forbidden = tuple(str(item).strip() for item in (data.get("forbidden") or data.get("forbidden_hosts") or ()) if str(item).strip())
+        domains = tuple(str(item).strip() for item in _as_tuple(data.get("allowed_domains")) if str(item).strip())
+        hosts = tuple(str(item).strip() for item in _as_tuple(data.get("allowed_hosts") or data.get("hosts")) if str(item).strip())
+        forbidden = tuple(str(item).strip() for item in _as_tuple(data.get("forbidden") or data.get("forbidden_hosts")) if str(item).strip())
         rate = data.get("rate_limit") if isinstance(data.get("rate_limit"), Mapping) else {}
         timeout = value.get("timeout_seconds", rate.get("timeout_seconds", 8))
         delay = value.get("surface_delay_seconds", rate.get("surface_delay_seconds", rate.get("min_interval_seconds", 0.4)))
@@ -175,11 +229,24 @@ class SurfaceScope:
             engagement=engagement,
             allowed_domains=domains,
             allowed_hosts=hosts,
-            allowed_ips=tuple(str(item).strip() for item in (data.get("allowed_ips") or ()) if str(item).strip()),
+            allowed_ips=tuple(str(item).strip() for item in _as_tuple(data.get("allowed_ips")) if str(item).strip()),
             forbidden=forbidden,
+            allowed_methods=_method_tuple(data.get("allowed_methods") or data.get("methods")),
+            allow_request_body=_as_bool(data.get("allow_request_body")),
             timeout_seconds=timeout,
             delay_seconds=delay,
         )
+
+    def allows_method(self, method: str) -> bool:
+        """Whether this authorisation document permits ``method``."""
+        return str(method or "").strip().upper() in self.allowed_methods
+
+    def capability_line(self) -> str:
+        """What this scope permits, in one line, for a prompt."""
+        line = "允许的方法: " + ", ".join(self.allowed_methods)
+        if self.allow_request_body and set(self.allowed_methods) - set(_SAFE_METHODS):
+            line += ";允许带请求体"
+        return line
 
     def require_authorization(self) -> None:
         if not self.authorization:
@@ -375,21 +442,48 @@ def _extract_robots(text: str, result: SurfaceResult, scope: SurfaceScope) -> No
             result.add_path(line.split("<loc>", 1)[1].split("</loc>", 1)[0], "sitemap", scope)
 
 
-def _fetch_text(url: str, *, timeout: float, max_bytes: int = 1_500_000) -> tuple[int, str, dict[str, str]]:
-    request = Request(url, headers={"User-Agent": "pentest-agent-src-surface/1.0", "Accept": "text/html,application/json,text/plain,*/*;q=0.5"})
+def _request_text(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int = 1_500_000,
+    body: bytes | None = None,
+    content_type: str = "",
+) -> tuple[int, str, dict[str, str]]:
+    """The one place a request is actually sent.
+
+    Every method goes through here, so there is exactly one thing to audit and one
+    place where the transport is decided. The method is passed to :class:`Request`
+    rather than defaulted — a HEAD that quietly ran as a GET would make the audit
+    trail a lie, which is worse than not having one.
+    """
+    headers = {
+        "User-Agent": "pentest-agent-src-surface/1.0",
+        "Accept": "text/html,application/json,text/plain,*/*;q=0.5",
+    }
+    if body:
+        headers["Content-Type"] = content_type or "application/x-www-form-urlencoded"
+    request = Request(url, data=body or None, headers=headers, method=str(method).upper())
     opener = build_opener(_NoRedirect())
     try:
         with opener.open(request, timeout=timeout) as response:
-            body = response.read(max_bytes)
+            payload = response.read(max_bytes)
             headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
             charset_match = re.search(r"charset=([\w.-]+)", headers.get("content-type", ""), re.I)
             charset = charset_match.group(1) if charset_match else "utf-8"
-            return int(response.status), body.decode(charset, errors="replace"), headers
+            return int(response.status), payload.decode(charset, errors="replace"), headers
     except HTTPError as exc:
         # 把响应头留下:3xx 的 Location 就在这里面,后面跟一跳要用。
         return int(exc.code), "", {str(key).lower(): str(value) for key, value in (exc.headers or {}).items()}
     except (OSError, URLError, TimeoutError, ValueError):
         return 0, "", {}
+
+
+def _fetch_text(url: str, *, timeout: float, max_bytes: int = 1_500_000) -> tuple[int, str, dict[str, str]]:
+    """GET. Name and signature unchanged on purpose — this is the injected seam that
+    nine existing tests hand a fake fetcher to."""
+    return _request_text("GET", url, timeout=timeout, max_bytes=max_bytes)
 
 
 class _NoRedirect(HTTPRedirectHandler):

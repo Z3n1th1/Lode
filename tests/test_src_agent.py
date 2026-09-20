@@ -21,6 +21,7 @@ from agents.src_agent import (
     AgentConfig,
     EXPLORER_SYSTEM,
     REASONER_SYSTEM,
+    HTTP_ACTION_LOG,
     _blackboard_to_context,
     _fetch_for_analysis,
     _parse_json_response,
@@ -818,6 +819,179 @@ class TestTierRouting(unittest.TestCase):
         import core.llm_pool as pool
         with patch.object(pool, "provider_pool", lambda: []):
             self.assertIsNone(pool.complete("s", "u", timeout=1))
+
+
+class TestFetchGate(unittest.TestCase):
+    """闸门顺序:在范围内 → 方法已声明 → body 已声明 → 不是改状态 URL → 限速 → 发。
+
+    以前只有三道(scope / 只读 URL / 限速),而且没有任何地方说得出"这份授权允许
+    做什么" —— 只读是源码里的一个常量。
+    """
+
+    def test_a_post_is_refused_by_a_read_only_scope(self):
+        result = _fetch_for_analysis("https://example.com/api/v1/items", _make_scope(),
+                                     method="POST", body="q=1")
+        self.assertEqual("method_not_allowed:POST", result["error"])
+        self.assertEqual("POST", result["method"])
+        self.assertEqual(0, result["status"])
+
+    def test_a_declared_method_without_a_declared_body_is_refused(self):
+        """"可以发 POST"和"可以发任意 body"是两件事。"""
+        scope = _make_scope(allowed_methods=("POST",))
+        result = _fetch_for_analysis("https://example.com/api/v1/items", scope,
+                                     method="POST", body="q=1")
+        self.assertEqual("body_not_allowed", result["error"])
+
+    def test_an_out_of_scope_url_is_refused_before_the_method_check(self):
+        """顺序有意义:范围错了就不该继续往下问方法。"""
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://evil.com/x", scope, method="POST", body="q=1")
+        self.assertIn("scope_rejected", result["error"])
+        self.assertEqual("POST", result["method"])
+
+    def test_a_declared_post_goes_through_the_second_seam(self):
+        seen: List[Tuple] = []
+
+        def requester(method, url, **kwargs):
+            seen.append((method, url, kwargs.get("body"), kwargs.get("content_type")))
+            return 200, '{"ok": true}', {"content-type": "application/json"}
+
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://example.com/api/v1/items", scope, method="POST",
+                                     body='{"q": 1}', content_type="application/json",
+                                     requester=requester)
+        self.assertEqual("", result["error"])
+        self.assertEqual("POST", result["method"])
+        self.assertEqual(200, result["status"])
+        self.assertEqual([("POST", "https://example.com/api/v1/items", b'{"q": 1}',
+                           "application/json")], seen)
+
+    def test_a_head_never_becomes_a_get(self):
+        """以前 HEAD 是"校验通过之后按 GET 执行" —— 审计行写 GET,实际不是。"""
+        seen: List[str] = []
+
+        def requester(method, url, **kwargs):
+            seen.append(method)
+            return 200, "", {}
+
+        result = _fetch_for_analysis("https://example.com/", _make_scope(),
+                                     method="HEAD", requester=requester)
+        self.assertEqual(["HEAD"], seen)
+        self.assertEqual("HEAD", result["method"])
+
+    def test_get_still_uses_the_injected_fetcher_untouched(self):
+        """一堆测试注入的是 GET 形状的 fetcher;这个接缝的签名不能动。"""
+        calls: List[str] = []
+
+        def fetcher(url, **kwargs):
+            calls.append(url)
+            return 200, "ok", {}
+
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        result = _fetch_for_analysis("https://example.com/api/v1/items", scope, fetcher=fetcher)
+        self.assertEqual(["https://example.com/api/v1/items"], calls)
+        self.assertEqual("GET", result["method"])
+
+    def test_every_result_says_which_method_ran(self):
+        for call in (
+            dict(url="https://evil.com/x"),
+            dict(url="https://example.com/api/deleteUser"),   # 改状态 URL,硬拦
+            dict(url="https://example.com/api/v1/items", method="POST"),
+        ):
+            with self.subTest(**call):
+                result = _fetch_for_analysis(call.pop("url"), _make_scope(), **call)
+                self.assertNotEqual("", result["method"])
+                self.assertIn("error", result)
+
+
+class TestHttpActionAudit(unittest.TestCase):
+    """非读动作:完整记录落 run 目录,黑板只留指纹。
+
+    黑板的去敏只有一个弱正则(core.src_blackboard._SECRET_TEXT),拿它当"请求体
+    不会外泄"的保证是不成立的 —— 所以请求体只写进 http-actions.jsonl。
+    """
+
+    def test_a_post_body_is_audited_in_full_and_only_fingerprinted_on_the_blackboard(self):
+        secret = '{"card": "4111111111111111", "pin": "1234"}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            bb.sync_candidates([{"candidate_id": "SC-1", "priority": 80,
+                                 "url": "https://example.com/api/v1/items"}], run_id="SA-1")
+            intent_id = bb.snapshot()["intents"][0]["intent_id"]
+            rounds = {"n": 0}
+
+            def complete(system, user, **kw):
+                if "Reasoner" in system:
+                    return json.dumps({"reasoning": "t", "should_stop": False,
+                                       "selected_intents": [{"intent_id": intent_id,
+                                                             "hypothesis": "h", "check_description": "c"}]})
+                rounds["n"] += 1
+                if rounds["n"] == 1:
+                    return json.dumps({
+                        "analysis": "x", "findings": [], "conclusion": "inconclusive",
+                        "http_actions": [{"method": "POST", "url": "https://example.com/api/v1/items",
+                                          "body": secret, "reason": "probe"}],
+                    })
+                return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end",
+                                   "dead_end_reason": "n"})
+
+            scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+            run_src_agent(bb_path, scope, max_cycles=2,
+                          fetcher=lambda url, **kw: (200, "{}", {}),
+                          requester=lambda method, url, **kw: (200, '{"ok": true}',
+                                                               {"content-type": "application/json"}),
+                          llm_complete_fn=complete, worker_id="test-w")
+
+            audit = Path(tmp) / HTTP_ACTION_LOG
+            self.assertTrue(audit.is_file(), "非读动作没有落审计")
+            rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(1, len(rows))
+            self.assertEqual("POST", rows[0]["method"])
+            self.assertEqual(secret, rows[0]["request_body"])          # 全文只在这一个文件里
+            self.assertEqual(12, len(rows[0]["request"]["sha256_12"]))
+
+            board_text = bb_path.read_text(encoding="utf-8")
+            self.assertNotIn(secret, board_text)
+            self.assertNotIn("4111111111111111", board_text)
+            self.assertIn("sha256=", board_text)                       # 指纹进了时间线
+
+    def test_a_refused_action_is_still_audited(self):
+        """被拦下来的那次尝试本身就是要审计的东西 —— 不然"谁试过什么"没有记录。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            bb.sync_candidates([{"candidate_id": "SC-1", "priority": 80,
+                                 "url": "https://example.com/api/v1/items"}], run_id="SA-1")
+            intent_id = bb.snapshot()["intents"][0]["intent_id"]
+            rounds = {"n": 0}
+
+            def complete(system, user, **kw):
+                if "Reasoner" in system:
+                    return json.dumps({"reasoning": "t", "should_stop": False,
+                                       "selected_intents": [{"intent_id": intent_id,
+                                                             "hypothesis": "h", "check_description": "c"}]})
+                rounds["n"] += 1
+                if rounds["n"] == 1:
+                    return json.dumps({
+                        "analysis": "x", "findings": [], "conclusion": "inconclusive",
+                        "http_actions": [{"method": "DELETE",
+                                          "url": "https://example.com/api/v1/items",
+                                          "reason": "try it"}],
+                    })
+                return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end",
+                                   "dead_end_reason": "n"})
+
+            run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                          fetcher=lambda url, **kw: (200, "{}", {}),
+                          llm_complete_fn=complete, worker_id="test-w")
+
+            rows = [json.loads(line) for line in
+                    (Path(tmp) / HTTP_ACTION_LOG).read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(1, len(rows))
+            self.assertEqual("DELETE", rows[0]["method"])
+            self.assertEqual(0, rows[0]["status"])
 
 
 if __name__ == "__main__":

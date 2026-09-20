@@ -4,10 +4,13 @@ Borrows Cairn's 3-phase OODA (Bootstrap/Reason/Explore) and Muteki's
 cheap-planner / expensive-executor split.  Uses the existing blackboard,
 scope checker, surface fetcher, and the shared LLM client (core.llm_client).
 
-The agent NEVER performs POST, form submission, or state mutation on the
-target.  All HTTP traffic is GET-only through the scope-checked fetcher
-inherited from surface_discovery.  Findings are recorded as blackboard
-hints/facts requiring human review through the verifier_agent framework.
+The agent's HTTP surface is exactly what the authorisation document declares:
+``SurfaceScope.allowed_methods`` (default GET/HEAD) plus ``allow_request_body``.
+An undeclared method is refused before the request is sent, and every non-read
+action is written to ``http-actions.jsonl`` in the run directory — as a full
+record there, and as a fingerprint only on the blackboard.  Findings are recorded
+as blackboard hints/facts requiring human review through the verifier_agent
+framework.
 
 Usage:
   python src_agent.py --scope scope.json --blackboard bb.json --max-cycles 10
@@ -21,6 +24,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
-from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason
+from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason, _request_text
 from core.rate_limit import limiter_for
 from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
 from core import skills as _skills
@@ -377,30 +381,76 @@ def _sanitize_headers(headers: Dict[str, str]) -> str:
     return "\n".join(lines) if lines else "    (none)"
 
 
+def _refused(error: str, method: str) -> Dict[str, Any]:
+    return {"status": 0, "body": "", "headers": {}, "error": error, "method": method}
+
+
+def _sha12(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _fingerprint(body: str, content_type: str = "") -> str:
+    """A body's identity without its contents — what the blackboard is allowed to keep."""
+    if not body:
+        return "empty"
+    stamp = f"sha256={_sha12(body)} len={len(body)}"
+    return f"{stamp} type={content_type}" if content_type else stamp
+
+
 def _fetch_for_analysis(
     url: str,
     scope: SurfaceScope,
     *,
+    method: str = "GET",
+    body: str = "",
+    content_type: str = "",
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None,
+    requester: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None,
 ) -> Dict[str, Any]:
-    """Scope-checked GET fetch for LLM analysis. Returns structured result."""
+    """Scope-checked request for LLM analysis. Returns structured result.
+
+    The order of the gates is the whole point, and so is the fact that there is only
+    one copy of them: URL in scope → *method* declared by the authorisation document
+    → body declared → not a state-changing URL → budget → send. A caller that skips
+    this function skips all five.
+
+    ``method`` is echoed back in the result: the timeline and the prompt both report
+    what ran, and an audit line that says "GET" for a request that was not a GET is
+    worse than no audit line.
+    """
+    verb = str(method or "GET").strip().upper() or "GET"
     ok, reason = scope.check_url(url)
     if not ok:
-        return {"status": 0, "body": "", "headers": {}, "error": f"scope_rejected:{reason}"}
+        return _refused(f"scope_rejected:{reason}", verb)
+    if not scope.allows_method(verb):
+        # 方法准入:授权文档没写这个动词,就是没授权。以前"只读"写在源码里,
+        # 文档从来没说过能做什么。
+        return _refused(f"method_not_allowed:{verb}", verb)
+    payload = body.encode("utf-8") if isinstance(body, str) and body else None
+    if payload and not scope.allow_request_body:
+        return _refused("body_not_allowed", verb)
     read_reason = _readonly_url_reason(url)
     if read_reason:
-        return {"status": 0, "body": "", "headers": {}, "error": f"write_blocked:{read_reason}"}
+        return _refused(f"write_blocked:{read_reason}", verb)
     # 限速交给全局桶(见 core/rate_limit)。以前是调用方传 last_request_at 进来、
     # 自己 sleep —— 那份"间隔"是每个 agent 运行各一份,并发起来就是 N 倍速率。
     limiter = limiter_for(scope)
     if limiter is not None:
         limiter.acquire(url)
-    get = fetcher or _fetch_text
     try:
-        status, body, headers = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
+        if verb == "GET":
+            # GET 继续走注入的 fetcher(签名一个字没变,九个测试依赖它)。
+            send = fetcher or _fetch_text
+            status, text, headers = send(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
+        else:
+            # 其余方法走第二条接缝 —— 不往老签名上加参数,就不必改任何既有 fetcher。
+            send = requester or _request_text
+            status, text, headers = send(verb, url, timeout=scope.timeout_seconds,
+                                         max_bytes=1_500_000, body=payload,
+                                         content_type=content_type)
     except Exception as exc:
-        return {"status": 0, "body": "", "headers": {}, "error": str(exc)[:300]}
-    return {"status": status, "body": body, "headers": headers, "error": ""}
+        return _refused(str(exc)[:300], verb)
+    return {"status": status, "body": text, "headers": headers, "error": "", "method": verb}
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +473,9 @@ class AgentConfig:
     max_parallel_explore: int = 3
     worker_id: str = ""
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None
+    # 非 GET 的第二条接缝。老签名上加参数会逼所有既有注入方一起改,所以 GET 走
+    # fetcher(签名不变)、其余方法走这里。
+    requester: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None
     llm_complete_fn: Optional[Callable[..., Optional[str]]] = None
     timeout: float = 60.0
     # 记忆检索:新 intent 先查 facts_as_of / 历史死路与线索,复用经验(PentAGI 的检索层)。
@@ -456,7 +509,9 @@ MAX_EXPLORE_PER_CYCLE = 5
 MAX_PARALLEL_EXPLORE = 5
 MAX_HTTP_ACTIONS = 3
 BODY_LIMIT = 15_000
-_ALLOWED_METHODS = {"GET", "HEAD"}
+# 非读动作的完整审计留在 run 目录里,黑板/时间线只留指纹 —— 时间线的去敏只有
+# core/src_blackboard.py 那个弱正则,不该拿它当"body 不会外泄"的保证。
+HTTP_ACTION_LOG = "http-actions.jsonl"
 
 
 # Transient failures (network drop, unreachable target, model unavailable,
@@ -696,6 +751,48 @@ class SrcAgentLoop:
         try:
             self.blackboard.timeline_append(kind, intent_id=intent_id, summary=summary)
         except Exception:  # noqa: BLE001 - timeline is advisory
+            pass
+
+    def _record_http_action(self, url: str, body: str, content_type: str,
+                            result: Mapping[str, Any], reason: str) -> None:
+        """Audit one sandboxed action.
+
+        Split in two on purpose. The full request and response go to
+        ``http-actions.jsonl`` in the run directory — that is the record a reviewer
+        reads, and it is the only place a request body is written down. The
+        blackboard timeline gets a *fingerprint* only: the blackboard's whole
+        redaction is one regex (``core.src_blackboard._SECRET_TEXT``), and a request
+        body is exactly the sort of thing that walks past a regex.
+        """
+        method = str(result.get("method") or "GET")
+        headers = result.get("headers") or {}
+        response_body = str(result.get("body") or "")
+        if method not in {"GET", "HEAD"}:
+            self._timeline(
+                "http_action", "",
+                f"{method} {url} → {result.get('status')} body={_fingerprint(body, content_type)} "
+                f"reason={reason[:80]}",
+            )
+        record = {
+            "at": time.time(),
+            "method": method,
+            "url": url,
+            "reason": reason,
+            "error": str(result.get("error") or ""),
+            "status": result.get("status"),
+            "request": {"content_type": content_type, "length": len(body or ""),
+                        "sha256_12": _sha12(body or "")},
+            "response": {"content_type": str(headers.get("content-type") or ""),
+                         "length": len(response_body), "sha256_12": _sha12(response_body)},
+            # 只在这一个文件里留全文;黑板/事件流里只有指纹。
+            "request_body": body or "",
+        }
+        try:
+            path = Path(self.config.blackboard_path).parent / HTTP_ACTION_LOG
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
             pass
 
     def _maybe_compress_timeline(self, snapshot: Optional[Mapping[str, Any]] = None) -> None:
@@ -1017,7 +1114,8 @@ class SrcAgentLoop:
         try:
             self.blackboard.timeline_append(
                 "fetch", intent_id=claimed_intent_id,
-                summary=f"GET {target_url} → {fetch_result['status']} ({len(fetch_result['body'])}B)",
+                summary=(f"{fetch_result.get('method') or 'GET'} {target_url} → "
+                         f"{fetch_result['status']} ({len(fetch_result['body'])}B)"),
             )
         except Exception:  # noqa: BLE001 - timeline is advisory
             pass
@@ -1087,21 +1185,25 @@ class SrcAgentLoop:
                     continue
                 method = str(action.get("method", "GET")).upper().strip()
                 action_url = str(action.get("url", "")).strip()
+                action_body = str(action.get("body", "") or "")
+                content_type = str(action.get("content_type", "") or "")
                 reason = str(action.get("reason", ""))[:200]
-                if method not in _ALLOWED_METHODS:
-                    action_results.append(f"BLOCKED {method} {action_url}: only GET/HEAD allowed")
-                    continue
                 if not action_url:
                     continue
+                # 准入只有一处 —— _fetch_for_analysis 里的那五道闸门。这里再写一份
+                # "允许哪些动词"就是第二份治理,而第二份迟早和第一份不一样。
                 fr = _fetch_for_analysis(
                     action_url, self.config.scope,
-                    fetcher=self.config.fetcher,
+                    method=method, body=action_body, content_type=content_type,
+                    fetcher=self.config.fetcher, requester=self.config.requester,
                 )
+                # 被拦下来的尝试同样要审计:否则"模型试过什么"没有任何记录。
+                self._record_http_action(action_url, action_body, content_type, fr, reason)
                 if fr["error"]:
-                    action_results.append(f"BLOCKED {method} {action_url}: {fr['error'][:120]}")
+                    action_results.append(f"BLOCKED {fr['method']} {action_url}: {fr['error'][:120]}")
                 else:
                     action_results.append(
-                        f"--- {method} {action_url} (reason: {reason}) ---\n"
+                        f"--- {fr['method']} {action_url} (reason: {reason}) ---\n"
                         f"Status: {fr['status']}\n"
                         f"Headers:\n{_sanitize_headers(fr['headers'])}\n"
                         f"Body ({min(len(fr['body']), BODY_LIMIT)} chars):\n"
@@ -1224,6 +1326,7 @@ def run_src_agent(
     explorer_prefer: str = "",
     worker_id: str = "",
     fetcher: Optional[Callable] = None,
+    requester: Optional[Callable] = None,
     llm_complete_fn: Optional[Callable] = None,
     timeout: float = 60.0,
     enable_recall: bool = True,
@@ -1246,6 +1349,7 @@ def run_src_agent(
         max_parallel_explore=max_parallel_explore,
         worker_id=worker_id,
         fetcher=fetcher,
+        requester=requester,
         llm_complete_fn=llm_complete_fn,
         timeout=timeout,
         enable_recall=enable_recall,
