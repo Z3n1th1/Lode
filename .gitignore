@@ -13,6 +13,9 @@ runtime-smoke/
 src-agent-runs/
 src-autopilot-data/
 out-*/
+# --out-dir 的默认值就是 ./out(lode.py 的 scan/auto 两个子命令),里面是真实目标的
+# surface 数据(paths/scripts/fingerprints)。上面那行只挡了 out-*,漏了默认目录。
+out/
 
 # ---- Python ----
 __pycache__/

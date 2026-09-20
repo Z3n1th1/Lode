@@ -193,8 +193,24 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 已知限制
 
-1. **没对真实目标跑过完整扫描。** 所有验证止于单元/集成测试 + 本机冒烟。真实目标的
-   误报率、耗时、单源限速、候选质量都还没有数据。这是当前最大的未知。
+1. **真实目标跑过,但只到 surface 这一层,而且只走 CLI。** 2026-09-19/20 对 nba.com 跑了两次
+   `lode.py scan`（输入是仓库根的 `scope-nba.json` + `targets-nba-hot.txt`，产物在 `out/`，
+   两者都没进 git；`out/` 也未 ignore，注意别误提交）：
+
+   | 轮次 | 目标 | 可达 | paths | api_urls | scripts | 失败 |
+   |---|---|---|---|---|---|---|
+   | `out/nba-hot.log` | 45 | 40 | 44 | **0** | 20 | 5 `base_unreachable` |
+   | `out/nba-batch.log` | 12 | 11 | 45 | 3 | 268 | 1 `base_unreachable` |
+
+   范围闸门在真实目标上确实拦下过请求（`blocked:…host_not_in_scope`，courtside-next.nba.com
+   不在 scope 里）——这是 scope 治理目前唯一的真机证据。
+
+   仍然未知的是**跑得出东西**：findings 一个都没有，候选面极薄（hot 那轮 `api_urls` 是 0）。
+   上面「候选来自 robots/HTML、Explorer 只发 GET」是**解释**，不是已验证的结论。
+
+   另外：**控制台那条授权文档入口到现在只有测试 + 截图验证，没在真实程序上走过一次。**
+   `ai-pentest-evidence/projects/` 是空的（只有一个 lock 文件）——「新建项目 → 预览 → 确认」
+   这条路还没被真实使用过。
 2. 主动渗透仍**依赖外部 Strix runner** 和未随仓库提供的私有 skill/契约；缺失时阻断。
 3. 飞书没有真实租户验收：没有 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，没向真实群发过消息。
 4. `notify/task_router.py` 里 `from runner_contract import RunnerBlockedError` 指向一个**仓库里
@@ -204,16 +220,23 @@ cd console; npm run typecheck; npm run test; npm run build
 7. `deepseek-flash` **默认开启思考模式**：小 `max_tokens` 会被思考吃光而返回**空 content**
    （实测 8 token 全进 `reasoning_content`）。请求里加 `"thinking": {"type": "disabled"}`
    可关闭（实测有效、`reasoning_tokens` 归零）。扫描循环里大量调用受影响，值得评估。
-8. `PROGRESS.md` 本文是新的；`README_TEST.md` / `USAGE.md` / `docs/*.md` 部分章节仍描述已删
-   功能，未逐篇清理。
+8. `README_TEST.md` / `USAGE.md` / `docs/*.md` 部分章节仍描述已删功能，未逐篇清理。
+   `docs/security-boundary.md` 是唯一跟得上代码的（写权限、能力维度那几段）。
 
-## 近期三层历史
+## 近期历史（新在前）
 
+- `fd2ee8b`…`90a1c85`（2026-09-21）**授权文档入口链 + 多并发收尾**：一份 scope 文档只有一处
+  解析（`agents/scope_document`），三条入口共用，确认后落 `EngagementAuthorization/v1`，
+  每台精确主机一个 job 且共用同一个令牌桶；写闸门改成读操作员签的文档（`602eac8`）。
+  细节见上面「授权文档入口」和「接下来」两节。
+- `add4c99` / `c19f156`（2026-09-20）**多并发打底**：一次 engagement 一个令牌桶且跨进程
+  （`core/rate_limit.FileTokenBucket`），池子宽度 `LODE_JOB_WORKERS`（缺省 8），速率改取
+  程序文档的原话单位 req/s。`c19f156` 当时按 program 建桶 → 一次粘贴 20 目标 = 20 个桶，
+  `add4c99` 修掉了这个泄漏。
 - `f1ad831` 删掉重构留下的死代码（control_plane shim、H1 intake 层、会话管理操作、
   陈旧 pnpm 锁），抽出 `core/file_lock.replace_with_retry`。
 - `658559d` 收敛成单一对话面：新增 `UnifiedChat` + 事件流前端，删除
   `/api/v1/src-agent/*`（12 路由）、旧 Strix 对话子系统、三个早已 404 的死面板。
-- `ecd078c` / `c0d7603` P6 死代码 / P4 统一对话 + 模式 + 意图路由 + 技能包。
 
 ## 纪律
 
