@@ -1,9 +1,10 @@
 # Lode 当前进度
 
-更新时间：2026-09-13（重写。旧版停留在 P2 之前的状态，提到的 `/dsh`、`/arl`、
-intel 路由、17 面板抽屉、`pentest-agent/` 目录都已不存在。）
+更新时间：2026-09-21（最近一次改动：授权文档入口链 + 多并发收尾。旧版停留在 2026-09-13，
+旧版提到的 `/dsh`、`/arl`、intel 路由、17 面板抽屉、`pentest-agent/` 目录都已不存在。）
 
 这份文件是下一次接手的起点。**以代码和测试为准**，本文件的数字若与代码冲突，以代码为准。
+先读「接下来」，再读「当前状态」。
 
 ## 一句话架构
 
@@ -45,7 +46,8 @@ cd console; npm install; npm run build; cd ..
 
 ### 怎么开始挖洞
 
-1. 头部**模式选择器**选「SRC 黑盒」。
+1. 头部**模式选择器**选「挖洞」（`console/src/views/chat/ModeSelect.tsx`；另一个是「对话」，
+   配置在 `config/modes.yaml`）。
 2. 对话框里直接说，例如：`在授权范围内对 https://example.com 做只读侦察`。
 3. 回合会自己升级成 `src_loop` 子任务，进度以卡片形式流在对话里；
    黑板/DAG/候选队列在左侧「控制面板 → SRC 黑板」。
@@ -91,6 +93,32 @@ python lode.py sessions / progress / doctor
 HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯一权威**；这里不写数字——
 写过一次 33，等发现时实际已经是 35）。改路由必须**显式**改那个集合，这是有意为之——它挡住过
 一批"文档有、代码没有"的幽灵路由。
+
+## 接下来（接手先看这里）
+
+前三件事是同一个主题：**多并发的收尾**。速率盖子已经做完了（见下一节），剩下的是
+"并发起来的那些任务，操作员看不看得见、命令行享不享得到、断了能不能接着跑"。
+每条都附了"怎么证明它还没做"，别只信本文。
+
+1. **队列可见性 + 背压。** 池子宽度是 `LODE_JOB_WORKERS`（`core/job_runner.py:25`，缺省 8），
+   `ThreadPoolExecutor` 的队列无上限、也不可见——`console/` 里 grep 不到 `queued` /
+   `backpressure`。一次确认 30 台主机就是 30 行，其中 22 行在排队，界面上分不出"在等"和
+   "卡死"。
+2. **命令行批并发。** `lode.py:116` 的 `cmd_scan` 还是 `for target in targets` 串行。控制台
+   已经会按主机 fan-out 了，命令行不会——同一份授权文档，两个入口的吞吐不一样。
+3. **长跑可恢复。** `JobRegistry.recover` 在 `auto_resume=True` 时会重新入队
+   （`core/job_registry.py:209`），但**没有任何调用方传它**：`console/app.py:58` 用缺省值，
+   于是重启把未完成的 job 一律标成 `interrupted`。也没有 job 内的检查点，所以"接着跑"目前
+   指的是"从头再跑一遍"。先用 `grep -rn "auto_resume=True"` 确认这条是否仍然成立。
+4. **候选质量**（前三件做完再做）。候选来自 robots/HTML，而 Explorer 只发 GET，所以
+   "有候选"从来不等于"验证得下去"——跑出 0 findings 的主因在这里，不在引擎。
+   模板折叠已落在 `src_autopilot._candidate_id` 一带（改它**不要**动 `candidate_id` 的算法，
+   那会破坏重启安全）。`authz_boundary` 这类假设今天无法验证：没有 header/凭据通道。
+5. **engine seam。** `core/governed_request.py` **还不存在**。治理现在重复在
+   `agents/surface_discovery.py` 和 `agents/src_agent.py` 两处，`intel/network.py` 是第二条
+   无治理的出站。想接 codex/cc/pi 之前先把这条收成单一收口。
+
+明确**不做**：header/cookie 通道、逐主机速率覆盖、真正把 Pi/CC/Codex 接上。
 
 ## 授权文档入口（一份 scope 文件 → 一次确认 → 每台主机一个 job）
 
@@ -155,10 +183,13 @@ D:\Environment\Python\miniforge\envs\py310\python.exe -m pytest -q
 cd console; npm run typecheck; npm run test; npm run build
 ```
 
-当前基线（2026-09-13，连续三次结果一致）：
+当前基线（2026-09-21 实测）：
 
-- Python **354 passed, 7 skipped**
-- 前端 **33 passed**，`vue-tsc` 与 `vite build` 干净
+- Python **680 passed, 7 skipped**（`py310`，约 35s）
+- 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
+
+（2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
+`typecheck` 跑的是 `tsc --noEmit`，别再去找 vue-tsc。）
 
 ## 已知限制
 
