@@ -85,6 +85,48 @@ class TypedTargetScopeTests(unittest.TestCase):
         _scope("https://a.example.com/").require_authorization()
 
 
+class ReadOnlyByConstructionTests(unittest.TestCase):
+    """没有授权文档的两条路按构造只读,而且要是**显式**的。
+
+    能力只能来自操作员签的那份文档。这两条路上没有文档,所以既没有可推导的东西,
+    也不该从别处推 —— 从开关推、从模型推、从"缺省恰好比较宽"推,都是在发明授权。
+    把字段显式写出来,未来某次改动就没法不小心把这条路放开。
+    """
+
+    def test_a_typed_url_is_read_only(self) -> None:
+        scope = _scope("https://api.nba.com/")
+        self.assertEqual(("GET", "HEAD"), scope.allowed_methods)
+        self.assertFalse(scope.allow_request_body)
+
+    def test_a_confirmed_card_is_read_only(self) -> None:
+        card = {"scope": {"allowed_hosts": ["api.nba.com"], "forbidden_hosts": []},
+                "target_id": "t-1"}
+        scope = jobs._scope_from_confirmed_card(card, target_id="t-1", run_id="r1",
+                                                engagement="turn-x", delay=0.5)
+        self.assertEqual(("GET", "HEAD"), scope.allowed_methods)
+        self.assertFalse(scope.allow_request_body)
+
+    def test_a_card_cannot_declare_a_capability_even_if_the_data_says_so(self) -> None:
+        """卡里就算塞了 allowed_methods 也没用 —— 卡的 schema 里根本没有这一栏。"""
+        card = {"scope": {"allowed_hosts": ["api.nba.com"], "forbidden_hosts": [],
+                          "allowed_methods": ["GET", "POST"], "allow_request_body": True},
+                "target_id": "t-1"}
+        scope = jobs._scope_from_confirmed_card(card, target_id="t-1", run_id="r1",
+                                                engagement="turn-x", delay=0.5)
+        self.assertEqual(("GET", "HEAD"), scope.allowed_methods)
+        self.assertFalse(scope.allow_request_body)
+
+    def test_only_the_document_path_can_carry_a_capability(self) -> None:
+        """对照:授权文档那条路必须继承方法维度,否则这次改动就只做了一半。"""
+        scope = jobs._scope_from_engagement_document(
+            {"program": "p", "authorization": "a", "allowed_hosts": ["a.example", "b.example"],
+             "allowed_methods": ["GET", "POST"], "allow_request_body": True},
+            host="a.example", authorization_id="A-1", run_id="r1", engagement="e",
+        )
+        self.assertEqual(("GET", "HEAD", "POST"), scope.allowed_methods)
+        self.assertTrue(scope.allow_request_body)
+
+
 class RunIdentityTests(unittest.TestCase):
     """一次对话 = 一次 engagement;一次对话里的所有 job 合起来只有一份预算。
 

@@ -310,6 +310,10 @@ export interface ScopeIntakeConfirmResult {
   authorization_ref: string
   hosts: string[]
   max_fanout: number
+  /** 这次 run 允许的动词。只列出闸门真会发的那些,声明了但恒被拒的不在其中。 */
+  allowed_methods: string[]
+  allow_request_body: boolean
+  requests_per_second: number
   run: ScopeIntakeRun | null
   note: string
 }

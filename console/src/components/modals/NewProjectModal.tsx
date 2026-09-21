@@ -105,6 +105,17 @@ export default function NewProjectModal() {
               <Row label="记录文件">{scopeResult.authorization_ref}</Row>
               <Row label="文档摘要">{scopeResult.document_digest.slice(0, 16)}…</Row>
               <Row label="授权主机">{scopeResult.hosts.length} 台</Row>
+              {/* 预览时看得到「能力」,确认之后反倒没有了 —— 对一个"这次允许做什么"的
+                  记录来说方向是反的,所以这里补回来。文案与 scopePreviewRows 一致。 */}
+              {scopeResult.allowed_methods.length ? (
+                <Row label="能力">
+                  {scopeResult.allowed_methods.join('、')}
+                  {`(${scopeResult.allow_request_body ? '可以带请求体' : '不允许带请求体'})`}
+                </Row>
+              ) : null}
+              {scopeResult.requests_per_second ? (
+                <Row label="速率">{`${scopeResult.requests_per_second} req/s(所有任务共用一个预算)`}</Row>
+              ) : null}
               {scopeResult.run ? (
                 <>
                   <Row label="会话">{scopeResult.run.session_id}</Row>

@@ -390,6 +390,11 @@ def build(ctx: Ctx) -> APIRouter:
             "authorization_ref": result["authorization_ref"],
             "hosts": result["hosts"],
             "max_fanout": result["max_fanout"],
+            # 确认之后操作员还要能看到"这次允许做什么"。预览页有「能力」那一行,
+            # 确认响应以前把它丢了。
+            "allowed_methods": result["allowed_methods"],
+            "allow_request_body": result["allow_request_body"],
+            "requests_per_second": result["requests_per_second"],
             "run": run,
             "note": note,
         }, headers=_NOSTORE)

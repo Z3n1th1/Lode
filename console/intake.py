@@ -334,6 +334,11 @@ def _scope_result(source: Dict[str, Any], materialized: Dict[str, Any]) -> Dict[
         "authorization_ref": materialized["authorization_ref"],
         "hosts": list(record.get("hosts") or []),
         "max_fanout": int(record.get("max_fanout") or 0),
+        # 能力面提上来一层。预览时操作员看得到「能力」那一行,确认之后反而看不到 ——
+        # 对一个"这次允许做什么"的记录来说方向是反的。
+        "allowed_methods": list(record.get("allowed_methods") or []),
+        "allow_request_body": bool(record.get("allow_request_body")),
+        "requests_per_second": float(record.get("requests_per_second") or 0.0),
     }
 
 

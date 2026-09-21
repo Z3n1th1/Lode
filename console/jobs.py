@@ -212,6 +212,13 @@ def _typed_target_scope(job: JobRecord, *, run_id: str, target_url: str) -> Any:
     Reaching further is now something the operator says explicitly, by naming the
     hosts — a run must never widen itself on the strength of a redirect or a
     suffix.
+
+    **Read-only, explicitly.**  There is no authorisation document on this path, so
+    there is nothing to derive a capability from — and deriving one from anything
+    else (a toggle, the model, a default that happens to be permissive) would be
+    inventing authorisation.  The two fields are passed rather than left to the
+    dataclass default so that a future edit cannot widen this path by accident;
+    ``tests/test_console_scope.py`` pins it.
     """
     from agents.surface_discovery import SurfaceScope
     from urllib.parse import urlparse
@@ -230,6 +237,8 @@ def _typed_target_scope(job: JobRecord, *, run_id: str, target_url: str) -> Any:
         engagement=_engagement(job, run_id=run_id),
         allowed_domains=tuple(domains), allowed_hosts=tuple(hosts),
         forbidden=tuple(forbidden), delay_seconds=_scope_delay(job),
+        # 这条路没有授权文档,所以按构造只读 —— 显式写出来,不靠 dataclass 缺省。
+        allowed_methods=("GET", "HEAD"), allow_request_body=False,
     )
 
 
@@ -260,6 +269,14 @@ def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: 
     path that used to inherit ``SurfaceScope``'s dataclass default while the typed
     path used the payload/env one, so the same operator got two different paces
     depending on how the run started.
+
+    **Read-only, explicitly.**  A ``TargetCard``'s scope has exactly two keys
+    (``allowed_hosts`` / ``forbidden_hosts`` — see ``core.intake_state``), so there is
+    nowhere for a capability to be declared on this path even if the code wanted to
+    read one.  Naming the fields makes that a decision instead of a coincidence, and
+    ``tests/test_console_scope.py`` keeps it that way.  This is the path the
+    authorisation-document chain was built to replace: a typed URL never did carry a
+    method dimension, and ``_scope_from_engagement_document`` is where one arrives now.
     """
     from agents.surface_discovery import SurfaceScope
 
@@ -274,6 +291,7 @@ def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: 
         allowed_hosts=hosts,
         forbidden=forbidden,
         delay_seconds=delay,
+        allowed_methods=("GET", "HEAD"), allow_request_body=False,
     )
 
 
