@@ -35,7 +35,40 @@ class SrcAutopilotTests(unittest.TestCase):
                 "/api/v1/users?token=secret-value": ["openapi"],
                 "/admin/export?customer_id=123": ["js"],
             },
+            "requests": [
+                {"url": "https://example.com/", "status": 200},
+                {"url": "https://example.com/robots.txt", "status": 404},
+            ],
+            "errors": ["blocked:https://example.com/logout:state_changing_url"],
         }
+
+    def test_the_crawler_is_audited_too(self) -> None:
+        """爬虫的请求要进和 agent 同一份 http-actions.jsonl。
+
+        在 auto 那条路上 cmd_scan 会写 surface-*.json、auto 不写,于是爬虫花掉的额度
+        (真机实测一轮 60 里占 21 个)在任何文件里都找不到 —— 而红线 10 要的是"测试全程留痕"。
+        """
+        from agents.src_agent import HTTP_ACTION_LOG
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bb_path = root / "src-blackboard.json"
+            agent = SrcAutopilot(self._scope(), root / "state.json", root,
+                                 max_rounds=1, blackboard_path=bb_path,
+                                 discover_fn=lambda *a, **kw: self._result())
+            agent.run_round(["https://example.com/"])
+
+            path = bb_path.parent / HTTP_ACTION_LOG
+            self.assertTrue(path.is_file(), "爬虫的请求没有落审计")
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+            self.assertTrue(rows)
+            self.assertTrue(all(row["kind"] == "crawl" for row in rows))
+            self.assertTrue(all(row["method"] == "GET" for row in rows))
+            decisions = [row["decision"] for row in rows]
+            self.assertEqual(2, decisions.count("allowed"), decisions)
+            # 被挡下来的那次也要留痕,不然"它想过什么"没有记录。
+            self.assertIn("refused:state_changing_url", decisions)
 
     def test_first_round_builds_prioritized_deduplicated_queue_without_persisting_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

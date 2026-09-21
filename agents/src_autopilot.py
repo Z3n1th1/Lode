@@ -420,11 +420,56 @@ class SrcAutopilot:
         for target in targets:
             result = discover(self.scope, target, max_scripts=self.max_scripts,
                               budget=self.request_budget)
+            self._audit_crawl(result)
             payload = surface_to_dict(result) if isinstance(result, SurfaceResult) else result
             if not isinstance(payload, Mapping):
                 raise RuntimeError("src_autopilot_discovery_result_invalid")
             payloads.append(payload)
         return payloads
+
+    def _audit_crawl(self, result: Any) -> None:
+        """爬虫发出去的请求也要留痕。
+
+        在 ``auto`` 这条路上 ``cmd_scan`` 会写 ``surface-*.json``,``auto`` 不写 —— 于是
+        爬虫花掉的那部分额度(实测一轮 60 里占 21 个)在任何文件里都找不到。红线 10 要的是
+        "测试全程留痕",所以它和 agent 走同一份 ``http-actions.jsonl``(在 run 目录里)。
+
+        记的是"发过什么",不是响应内容:响应仍只留指纹或不留。
+        """
+        if isinstance(result, Mapping):
+            payload: Mapping[str, Any] = result
+        elif isinstance(result, SurfaceResult):
+            payload = surface_to_dict(result)
+        else:
+            return
+        blackboard_path = getattr(self.blackboard, "state_path", None)
+        if blackboard_path is None:
+            return
+        try:
+            from agents.src_agent import record_http_action
+        except Exception:  # noqa: BLE001 - 审计失败不该让爬虫结果丢掉
+            return
+        label = f"surface discovery ({payload.get('target') or ''})"
+        for row in payload.get("requests") or ():
+            if not isinstance(row, Mapping):
+                continue
+            record_http_action(
+                blackboard_path, url=str(row.get("url") or ""),
+                result={"status": row.get("status"), "headers": {}, "body": "",
+                        "method": "GET", "error": ""},
+                reason=label, kind="crawl")
+        for entry in payload.get("errors") or ():
+            text = str(entry)
+            if not text.startswith("blocked:"):
+                continue
+            # ``blocked:<url>:<reason>`` —— rpartition 取最后一个冒号,所以带端口的 URL
+            # 和带冒号的 reason 都不会切错。
+            url, _, reason = text[len("blocked:"):].rpartition(":")
+            record_http_action(
+                blackboard_path, url=url or text,
+                result={"status": 0, "headers": {}, "body": "", "method": "GET",
+                        "error": reason or "blocked"},
+                reason=label, kind="crawl")
 
     def _merge_results(
         self,

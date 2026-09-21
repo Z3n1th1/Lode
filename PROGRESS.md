@@ -324,8 +324,18 @@ cd console; npm run typecheck; npm run test; npm run build
     GraphQL `query` 时放行(**空 body 不是证明**);`PUT/PATCH` 可声明但恒拒。
   - `RequestBudget`:每轮 60(硬顶 120),爬虫与 agent 共用,接上零调用者的
     `JobContext.spend_request`。速率盖"多快",它盖"多少"。
-  - 每次出站都进 `http-actions.jsonl`(三个出口: intent 首取 / http_actions 循环 /
-    控制台 fetch_url),带 `kind` 与 `decision`。
+  - 每次出站都进 `http-actions.jsonl`（**四个**出口：intent 首取 / `http_actions` 循环 /
+    控制台 `fetch_url` / **爬虫**），带 `kind` 与 `decision`。爬虫那条是补的：`auto` 路径
+    不像 `cmd_scan` 那样写 `surface-*.json`，所以它花掉的额度（真机实测一轮 60 里占 21）
+    原先在任何文件里都找不到。校验方式是 `requests_used == allowed 行数`。
+  - **真机实测（login-dev.nba.com，`allowed_methods: [GET, HEAD, OPTIONS, POST]`，额度 60）**：
+    `cycles_run 6 / explored 15 / dead_ends 14 / findings 1 / stop_reason request_budget_exhausted`。
+    发出去的非 GET 是 3 个 OPTIONS（都 404 —— 候选少了 `/openidm` 前缀，是候选质量问题，
+    不是探测档的问题）。那 1 条 finding 是 medium 置信的**信息类**观察：模型用
+    `x-forgerock-transactionid` 与 `x-akamai-transformed` 的差异区分「边缘 404」和「源站真实
+    路由」，自己标注为"信息，非漏洞"，并说明未取得任何未授权访问。顺带被拦下的有一条
+    `GET /users?_action=validateGoto` → `unknown_operation_selector`（`_action` 补进选择器键名
+    后当场抓到；补之前它会发出去）。
   - 提示词/doctrine 不再硬写 GET-only;`lode.py doctor` 会报分类器可用性与当前额度。
 - `9f9fa11` / `2fa7c4e`（2026-09-21）**hunt 第一次真的跑起来了**。两处修复：`agents/src_agent.py`
   的 `max_tokens` 截断（上面「已知限制 7」——这是 hunt 从来没跑过第 1 圈的唯一原因），以及
