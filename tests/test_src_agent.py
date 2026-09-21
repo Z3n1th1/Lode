@@ -1145,7 +1145,9 @@ class TestHttpActionAudit(unittest.TestCase):
     """
 
     def test_a_post_body_is_audited_in_full_and_only_fingerprinted_on_the_blackboard(self):
-        secret = '{"card": "4111111111111111", "pin": "1234"}'
+        # 一个黑板的弱正则**认不出来**的标记 —— 这才是"请求体只进审计文件"的诚实检验。
+        # 用可放行的 GraphQL 读请求,因为现在探测档只放行能正面证明是读的 POST。
+        secret = '{"query": "{ viewer { id } }", "variables": {"cursor": "XSECRETMARKERX"}}'
 
         with tempfile.TemporaryDirectory() as tmp:
             bb_path = Path(tmp) / "bb.json"
@@ -1164,8 +1166,9 @@ class TestHttpActionAudit(unittest.TestCase):
                 if rounds["n"] == 1:
                     return json.dumps({
                         "analysis": "x", "findings": [], "conclusion": "inconclusive",
-                        "http_actions": [{"method": "POST", "url": "https://example.com/api/v1/items",
-                                          "body": secret, "reason": "probe"}],
+                        "http_actions": [{"method": "POST", "url": "https://example.com/api/graphql",
+                                          "body": secret, "reason": "probe",
+                                          "content_type": "application/json"}],
                     })
                 return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end",
                                    "dead_end_reason": "n"})
@@ -1180,14 +1183,19 @@ class TestHttpActionAudit(unittest.TestCase):
             audit = Path(tmp) / HTTP_ACTION_LOG
             self.assertTrue(audit.is_file(), "非读动作没有落审计")
             rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
-            self.assertEqual(1, len(rows))
-            self.assertEqual("POST", rows[0]["method"])
-            self.assertEqual(secret, rows[0]["request_body"])          # 全文只在这一个文件里
-            self.assertEqual(12, len(rows[0]["request"]["sha256_12"]))
+            actions = [row for row in rows if row["kind"] == "action"]
+            self.assertEqual(1, len(actions))
+            self.assertEqual("POST", actions[0]["method"])
+            self.assertEqual("allowed", actions[0]["decision"])
+            self.assertEqual(secret, actions[0]["request_body"])       # 全文只在这一个文件里
+            self.assertEqual(12, len(actions[0]["request"]["sha256_12"]))
+            # 每一次出站都要有记录:探索前的第一跳以前只进时间线、不进这份日志。
+            self.assertTrue(any(row["kind"] == "intent_fetch" for row in rows),
+                            "intent 首取也是真实出站,必须留痕")
 
             board_text = bb_path.read_text(encoding="utf-8")
             self.assertNotIn(secret, board_text)
-            self.assertNotIn("4111111111111111", board_text)
+            self.assertNotIn("XSECRETMARKERX", board_text)
             self.assertIn("sha256=", board_text)                       # 指纹进了时间线
 
     def test_a_refused_action_is_still_audited(self):
@@ -1222,9 +1230,12 @@ class TestHttpActionAudit(unittest.TestCase):
 
             rows = [json.loads(line) for line in
                     (Path(tmp) / HTTP_ACTION_LOG).read_text(encoding="utf-8").splitlines() if line.strip()]
-            self.assertEqual(1, len(rows))
-            self.assertEqual("DELETE", rows[0]["method"])
-            self.assertEqual(0, rows[0]["status"])
+            actions = [row for row in rows if row["kind"] == "action"]
+            self.assertEqual(1, len(actions))
+            self.assertEqual("DELETE", actions[0]["method"])
+            self.assertEqual(0, actions[0]["status"])
+            # 拒绝理由进记录,而且说清是"破坏性方法"而不是"你没声明它"。
+            self.assertEqual("refused:destructive_method_forbidden", actions[0]["decision"])
 
 
 class TestCapabilityInPrompt(unittest.TestCase):

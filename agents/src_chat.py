@@ -31,6 +31,7 @@ from agents.src_agent import (
     _parse_json_response,
     _sanitize_headers,
     BODY_LIMIT,
+    record_http_action,
     run_src_agent,
 )
 from agents.surface_discovery import SurfaceScope, discover_surface, surface_to_dict
@@ -448,6 +449,11 @@ def _exec_fetch_url(session: SrcChatSession, args: Dict[str, Any]) -> str:
         return json.dumps({"error": "No scope set. Run scan_target first."})
 
     result = _fetch_for_analysis(url, session.scope)
+    # 对话里的 fetch_url 也是一次真实出站,以前什么都不记 —— "测试全程留痕"要求它进
+    # 同一份审计。被拒的也要记。
+    if session.blackboard_path:
+        record_http_action(session.blackboard_path, url=url, result=result,
+                           reason="chat fetch_url", kind="chat_fetch")
     if result["error"]:
         return json.dumps({"status": 0, "error": result["error"]})
 

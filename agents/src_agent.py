@@ -665,6 +665,56 @@ KNOWLEDGE_CARD_CHARS = 2_500
 KNOWLEDGE_TOTAL_CHARS = 6_000
 
 
+def record_http_action(blackboard_path: str | Path, *, url: str, body: str = "",
+                       content_type: str = "", result: Mapping[str, Any],
+                       reason: str = "", kind: str = "action") -> None:
+    """Append one request to the run's ``http-actions.jsonl``. Never raises.
+
+    Red line 10 (测试全程留痕) makes this the record of what actually left the process,
+    so **every** egress has to come through here. It used to be a method on
+    :class:`SrcAgentLoop` called from exactly one place — the LLM's ``http_actions``
+    loop — which left two holes: the intent's own first fetch was written only to the
+    timeline, and the Console chat's ``fetch_url`` tool was not written anywhere at all.
+
+    Module-level rather than a method because the chat path has no loop to hang it off.
+
+    ``decision`` is derived, not passed: a row carrying an ``error`` was refused, one
+    without it went out. ``kind`` says which door it came through
+    (``intent_fetch`` | ``action`` | ``chat_fetch``).
+
+    The request body is written in full **only here** — it is our own probe, and this is
+    what makes the log auditable. The response is a fingerprint: that is third-party
+    data, and 红线 6 forbids keeping it.
+    """
+    method = str(result.get("method") or "GET")
+    error = str(result.get("error") or "")
+    headers = result.get("headers") or {}
+    response_body = str(result.get("body") or "")
+    record = {
+        "at": time.time(),
+        "kind": kind,
+        "decision": f"refused:{error}" if error else "allowed",
+        "method": method,
+        "url": url,
+        "reason": reason,
+        "error": error,
+        "status": result.get("status"),
+        "request": {"content_type": content_type, "length": len(body or ""),
+                    "sha256_12": _sha12(body or "")},
+        "response": {"content_type": str(headers.get("content-type") or ""),
+                     "length": len(response_body), "sha256_12": _sha12(response_body)},
+        # 只在这一个文件里留全文;黑板/事件流里只有指纹。
+        "request_body": body or "",
+    }
+    try:
+        path = Path(blackboard_path).parent / HTTP_ACTION_LOG
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 class SrcAgentLoop:
     """LLM-driven SRC agent: Reason → Explore → Blackboard."""
 
@@ -907,8 +957,9 @@ class SrcAgentLoop:
             pass
 
     def _record_http_action(self, url: str, body: str, content_type: str,
-                            result: Mapping[str, Any], reason: str) -> None:
-        """Audit one sandboxed action.
+                            result: Mapping[str, Any], reason: str, *,
+                            kind: str = "action") -> None:
+        """Audit one request, and keep the blackboard's copy a fingerprint.
 
         Split in two on purpose. The full request and response go to
         ``http-actions.jsonl`` in the run directory — that is the record a reviewer
@@ -918,35 +969,15 @@ class SrcAgentLoop:
         body is exactly the sort of thing that walks past a regex.
         """
         method = str(result.get("method") or "GET")
-        headers = result.get("headers") or {}
-        response_body = str(result.get("body") or "")
         if method not in {"GET", "HEAD"}:
             self._timeline(
                 "http_action", "",
                 f"{method} {url} → {result.get('status')} body={_fingerprint(body, content_type)} "
                 f"reason={reason[:80]}",
             )
-        record = {
-            "at": time.time(),
-            "method": method,
-            "url": url,
-            "reason": reason,
-            "error": str(result.get("error") or ""),
-            "status": result.get("status"),
-            "request": {"content_type": content_type, "length": len(body or ""),
-                        "sha256_12": _sha12(body or "")},
-            "response": {"content_type": str(headers.get("content-type") or ""),
-                         "length": len(response_body), "sha256_12": _sha12(response_body)},
-            # 只在这一个文件里留全文;黑板/事件流里只有指纹。
-            "request_body": body or "",
-        }
-        try:
-            path = Path(self.config.blackboard_path).parent / HTTP_ACTION_LOG
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+        record_http_action(self.config.blackboard_path, url=url, body=body,
+                           content_type=content_type, result=result, reason=reason,
+                           kind=kind)
 
     def _maybe_compress_timeline(self, snapshot: Optional[Mapping[str, Any]] = None) -> None:
         """Fold old timeline entries into the compressed head once it grows long.
@@ -1247,6 +1278,10 @@ class SrcAgentLoop:
             fetcher=self.config.fetcher,
             budget=self.config.request_budget,
         )
+        # 这个请求以前只进时间线、不进 http-actions.jsonl,于是"到底发过什么"缺了第一跳。
+        # 被拒的同样记 —— 记录里要能看出"它想过但没发出去"。
+        self._record_http_action(target_url, "", "", fetch_result, "intent fetch",
+                                 kind="intent_fetch")
 
         if fetch_result["error"]:
             error = fetch_result["error"]
