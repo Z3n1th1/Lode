@@ -40,10 +40,9 @@ class AdvisoryFileLock:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             handle = self.path.open("a+b" if self.create else "r+b")
             self._handle = handle
-            if self.create and handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-            elif not self.create:
+            if self.create:
+                self._ensure_sidecar_byte(handle)
+            else:
                 handle.seek(0, os.SEEK_END)
                 if handle.tell() == 0:
                     raise OSError(f"state lock sidecar is empty: {self.path}")
@@ -65,6 +64,32 @@ class AdvisoryFileLock:
                 self._handle = None
             self._thread_lock.release()
             raise
+
+    def _ensure_sidecar_byte(self, handle: BinaryIO, *, attempts: int = 25,
+                             delay: float = 0.01) -> None:
+        """写进 sidecar 的那一个字节,并容忍"别人刚替我写好"。
+
+        和 :func:`replace_with_retry` 是同一个 Windows 窗口:另一个 handle 正开着这个
+        文件时,write/flush 会被拒成 ``PermissionError`` (WinError 5/32)。这个字节不能
+        不写 —— ``create=False`` 的读者会把空 sidecar 判成坏文件 —— 所以只能重试;
+        重试前重新看一次文件长度,别人已经写好就直接用,不重复写。
+
+        不重试的后果不是"这一次拿不到锁":异常会逃出 ``EventLog.append``,把正在发事件
+        的那个线程带走,而它那一批事件**已经丢了**。2026-09-21 实测:
+        ``test_concurrent_appends_have_unique_seq`` 4 线程 x 10 条只活下来 30 条。
+        """
+        for remaining in range(attempts, 0, -1):
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() != 0:
+                return
+            try:
+                handle.write(b"\0")
+                handle.flush()
+                return
+            except PermissionError:
+                if remaining == 1:
+                    raise
+                time.sleep(delay)
 
     @staticmethod
     def _try_lock(handle: BinaryIO) -> None:
