@@ -52,7 +52,10 @@ cd console; npm install; npm run build; cd ..
 2. 对话框里直接说，例如：`在授权范围内对 https://example.com 做只读侦察`。
 3. 回合会自己升级成 `src_loop` 子任务，进度以卡片形式流在对话里；
    黑板/DAG/候选队列在左侧「控制面板 → SRC 黑板」。
-4. **只读铁律**：agent 只发 GET/HEAD；任何写操作会停下来要人工确认。
+4. **只读铁律**：默认 GET/HEAD。授权文档声明了 `allowed_methods` 之后，能**正面证明是读**的
+   `OPTIONS`/`POST` 也会发（`?action=query`、GraphQL `query`）。任何改数据/配置的请求 —— 含
+   `PUT`/`PATCH`/`DELETE` —— 由 `core.action_admission` **当场硬拒**，**没有"停下来等人工确认"
+   这条路**（`human_gate` 恒为 `hard_blocked`）。每轮请求总数另有硬上限（默认 60）。
 
 ### 另一个入口：新建项目（先确认，再开跑）
 
@@ -131,7 +134,14 @@ HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯
    `agents/surface_discovery.py` 和 `agents/src_agent.py` 两处，`intel/network.py` 是第二条
    无治理的出站。想接 codex/cc/pi 之前先把这条收成单一收口。
 
-明确**不做**：header/cookie 通道、逐主机速率覆盖、真正把 Pi/CC/Codex 接上。
+明确**不做**：header/cookie 通道、逐主机速率覆盖、真正把 Pi/CC/Codex 接上、跨 run 的全局
+请求计数（现在每轮一份，`max_fanout × 60` 仍是扇出后的总量；要按 engagement 全局计数得在
+`FileTokenBucket` 旁边加一个文件计数器）。
+
+**写操作的边界已经落在代码里**（不是文档里的约定）：`core.action_admission` 是唯一的准入判定，
+`DELETE` 不是合法取值，`PUT`/`PATCH` 恒拒，`POST` 需要正面读证明，改状态形状的 URL 对任何方法
+无条件拒。平台红线（ByteSRC 红线 5 / 倡议 3）要的"禁止增删改""高风险须人工判断"就是这两条 ——
+后者在这里落成"拒绝并记录需要操作员决定"，因为本地没有可达的人工门。
 
 ## 授权文档入口（一份 scope 文件 → 一次确认 → 每台主机一个 job）
 
@@ -198,7 +208,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-21 实测）：
 
-- Python **688 passed, 7 skipped**（`py310`，约 34s）
+- Python **729 passed, 7 skipped**（`py310`，约 35s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -301,6 +311,22 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 近期历史（新在前）
 
+- `34abeff`…`48a0287`（2026-09-21）**探测档:写操作从"警告"变成"硬拒"**。起因是平台红线
+  （ByteSRC《测试红线10条》5:禁止任何增删改数据/配置的写操作;倡议 3:高风险操作必须经人工
+  判断）。原实现是反的 —— 文档声明了写方法之后,改状态形状的 URL 就从硬拦降级成警告,
+  于是 `GET /logout`、`GET /api/deleteUser` 可以发出去。现在:
+
+  - `core.action_admission` 是第五道闸门(唯一一处),**默认拒绝**,只有能正面证明是读的
+    请求才放行。分类器复用 `guardrails` 的 `action_kind` + `value_scanners`(此前是死代码),
+    策略更严:create/modify/delete 一律拒。需人工判断的一律拒 —— `human_gate` 恒
+    `hard_blocked`,本地没有可达的放行路径。
+  - `DELETE` 不是合法取值;`OPTIONS` 随时可用;`POST` 只在读选择器(`?action=query`)或
+    GraphQL `query` 时放行(**空 body 不是证明**);`PUT/PATCH` 可声明但恒拒。
+  - `RequestBudget`:每轮 60(硬顶 120),爬虫与 agent 共用,接上零调用者的
+    `JobContext.spend_request`。速率盖"多快",它盖"多少"。
+  - 每次出站都进 `http-actions.jsonl`(三个出口: intent 首取 / http_actions 循环 /
+    控制台 fetch_url),带 `kind` 与 `decision`。
+  - 提示词/doctrine 不再硬写 GET-only;`lode.py doctor` 会报分类器可用性与当前额度。
 - `9f9fa11` / `2fa7c4e`（2026-09-21）**hunt 第一次真的跑起来了**。两处修复：`agents/src_agent.py`
   的 `max_tokens` 截断（上面「已知限制 7」——这是 hunt 从来没跑过第 1 圈的唯一原因），以及
   `total_findings` 漏掉 `needs_human` 分支（**置信度最高的那几条发现反而不计数**，摘要报 0）。

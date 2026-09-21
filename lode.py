@@ -326,15 +326,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # Check key modules
     mod_status = {}
     for mod in ("agents.src_agent", "agents.src_chat", "agents.surface_discovery",
-                "agents.src_autopilot", "core.src_blackboard", "core.test_log"):
+                "agents.src_autopilot", "core.src_blackboard", "core.test_log",
+                "core.action_admission"):
         try:
             __import__(mod)
             mod_status[mod] = "ok"
         except Exception as exc:
             mod_status[mod] = f"FAIL: {type(exc).__name__}"
     checks["modules"] = mod_status
+    # 探测档靠 guardrails 的分类器;它不在时猎手仍能跑,但只能读 —— 所以这条要报出来,
+    # 而不是让它悄悄退化。
+    try:
+        from core.action_admission import classifier_available, classifier_error
+        from core.rate_limit import configured_max_requests
+
+        checks["admission_classifier"] = "ok" if classifier_available() else (
+            f"unavailable: {classifier_error() or 'unknown'}")
+        checks["max_requests_per_run"] = configured_max_requests()
+    except Exception as exc:  # noqa: BLE001
+        checks["admission_classifier"] = f"FAIL: {type(exc).__name__}"
     print(json.dumps(checks, ensure_ascii=False, indent=2))
-    ok = checks["llm_api_key_set"] and all(v == "ok" for v in mod_status.values())
+    ok = (checks["llm_api_key_set"] and all(v == "ok" for v in mod_status.values())
+          and checks.get("admission_classifier") == "ok")
     return 0 if ok else 1
 
 
