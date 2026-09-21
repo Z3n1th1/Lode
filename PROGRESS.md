@@ -122,8 +122,10 @@ HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯
    于是重启把未完成的 job 一律标成 `interrupted`。也没有 job 内的检查点，所以"接着跑"目前
    指的是"从头再跑一遍"。先用 `grep -rn "auto_resume=True"` 确认这条是否仍然成立。
 4. **候选质量**（前三件做完再做）。候选来自 robots/HTML，而 Explorer 只发 GET，所以
-   "有候选"从来不等于"验证得下去"——跑出 0 findings 的主因在这里，不在引擎。
-   模板折叠已落在 `src_autopilot._candidate_id` 一带（改它**不要**动 `candidate_id` 的算法，
+   "有候选"从来不等于"验证得下去"。**但别再把它当成 0 findings 的主因**——2026-09-21 实测
+   证明主因是 reasoner 被 `max_tokens` 截死（见「已知限制 7」），那时 hunt 根本没跑过第 1 圈。
+   修完后同样的候选跑出 21 次探索，且漏出来的都是 design-by-default 的信息面。
+   模板折叠已落在 `src_autopilot._template_id`（改它**不要**动 `candidate_id` 的算法，
    那会破坏重启安全）。`authz_boundary` 这类假设今天无法验证：没有 header/凭据通道。
 5. **engine seam。** `core/governed_request.py` **还不存在**。治理现在重复在
    `agents/surface_discovery.py` 和 `agents/src_agent.py` 两处，`intel/network.py` 是第二条
@@ -196,7 +198,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-21 实测）：
 
-- Python **680 passed, 7 skipped**（`py310`，约 35s）
+- Python **681 passed, 7 skipped**（`py310`，约 34s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -219,6 +221,29 @@ cd console; npm run typecheck; npm run test; npm run build
    仍然未知的是**跑得出东西**：findings 一个都没有，候选面极薄（hot 那轮 `api_urls` 是 0）。
    上面「候选来自 robots/HTML、Explorer 只发 GET」是**解释**，不是已验证的结论。
 
+   **2026-09-21 补上了答案，而且推翻了"0 findings 是目标问题"这个解释。** 真跑了一轮
+   完整 hunt（`lode.py auto` / `lode.py agent`，目标 `login-dev.nba.com`，22 个候选）：
+
+   - **hunt 过去根本没跑起来。** 第一次 `auto` 的输出是 `cycles_run: 1` /
+     `total_explored: 0` / `stop_reason: reasoner_failed` / `errors: ["reasoner_returned_none"]`
+     —— 22 个候选一个都没被看过。原因是 `_default_llm_complete` 硬编码
+     `max_tokens=2048`，而 `deepseek-flash` 默认开思考：实测 2048 时
+     `reasoning_content` 7653 字符把预算吃光、`content` 返回 **0 字符**。见下面「已知限制 7」。
+     修掉之后同一份黑板跑出 `cycles_run: 8` / `total_explored: 21`。
+   - **漏斗本身是好的**（离线注入 fetcher/LLM 验过）：一个带 `evidence` 的 medium 置信
+     finding 正常落成 `total_findings: 1` + 黑板 hint。`src_agent.py` 只在缺 confidence
+     或缺 evidence 时才丢。
+   - **真正挖出来的东西**（未带任何凭据、只读 GET，已逐条独立复核）：`/openidm/info/version`
+     200（`9.0.0-20260827231835-a3d41327…`）、`/openidm/config/ui/themerealm` 200（426 KB）、
+     `/openidm/info/uiconfig` 200（泄露 `managed/teammembergroup/{super-admins,tenant-admins,
+     tenant-auditor,brand-admin}` 与 `adminOauthClient: idmAdminClient`）。
+     **判断是 Informational**：`uiconfig`/`ui/*` 是登录页认证前必须读到的 UI 配置，
+     ForgeRock 本就如此设计；漏的是命名与地图，不是入口。另外 12 个真值钱的 config 对象
+     （`repo.jdbc`、`authentication`、`provisioner.*`、`script`、`secrets`…）**全是 403**，
+     敏感面是关着的。所以别再拿这几条当战果。
+   - `login-qa.nba.com` 是另一台有真实 surface 的主机（也是 22 paths），还没跑。
+     45 台里只有这两台出 surface，其余 33 台 paths+scripts 全为 0。
+
    另外：**授权文档入口链已经在真实程序上跑过了**（2026-09-21，`run-console.ps1` + 真 HTTP，
    目标是 IANA 保留域名 example.com/.org/.net，只读 GET）。三条入口各验了一遍：
 
@@ -240,24 +265,41 @@ cd console; npm run typecheck; npm run test; npm run build
    同时三个 `running`）。零 findings 是意料之中——example.com 的候选面本来就空
    （`autopilot-state.json` 里 `new_candidates: 0`、黑板空），和下面第 4 条同源。
 
-   仍未在真实程序上走过的是**手打 URL 那条路**（`POST /api/v1/project/intake` → `TargetCard`
-   → `ai-pentest-evidence/projects/<target_id>/target.yaml`）。`ai-pentest-evidence/projects/`
-   现在还是空的（只有一个 lock 文件），这次不再能拿它当"文档入口没用过"的证据——两条路落盘
-   的位置本来就不一样（文档入口落 `lode-state/authorizations/`，手打 URL 才落 TargetCard）。
-   也没有在浏览器里点过，驱动的都是 UI 调的那几个 HTTP 端点。
+   手打 URL 那条路**也真跑通了**（2026-09-21）：故意回显错的 `options_digest` 得到
+   **409 `intake_confirmation_binding_mismatch`**（绑定真的在拦），正确回显后 `TargetCard` 落
+   `ai-pentest-evidence/projects/example-com-a379a6f6eeaf/target.yaml`，`target_run`
+   （`J-1790003185098-33c8dc`）起跑并 `completed`。所以控制台两条入口都不是纸面绿了。
+   唯一还没验的是**浏览器里点**——驱动的都是 UI 调的那几个 HTTP 端点。
 2. 主动渗透仍**依赖外部 Strix runner** 和未随仓库提供的私有 skill/契约；缺失时阻断。
 3. 飞书没有真实租户验收：没有 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，没向真实群发过消息。
 4. `notify/task_router.py` 里 `from runner_contract import RunnerBlockedError` 指向一个**仓库里
    不存在的模块**（历史遗留）。飞书任务路由一旦走到那条分支就会 ImportError，走不到就没事。
 5. X/Twitter 采集默认关闭，需要官方 API token。
 6. `npm audit` 未复核（国内镜像 404、官方源 `ECONNRESET`）。
-7. `deepseek-flash` **默认开启思考模式**：小 `max_tokens` 会被思考吃光而返回**空 content**
-   （实测 8 token 全进 `reasoning_content`）。请求里加 `"thinking": {"type": "disabled"}`
-   可关闭（实测有效、`reasoning_tokens` 归零）。扫描循环里大量调用受影响，值得评估。
+7. ~~`deepseek-flash` 默认开启思考模式……~~ **已修（`9f9fa11`）。** 这条曾经是整个 hunt 的
+   唯一死因，不是"值得评估"：`agents/src_agent.py` 的 `_default_llm_complete` 硬编码
+   `max_tokens=2048`，实测同一份真实 Reasoner 提示词（system 4479 / user 10506 字符）
+
+   | 配置 | content | reasoning_content | JSON |
+   |---|---|---|---|
+   | `max_tokens=2048`（旧） | **0 字符** | 7653 字符 | 截断 → `Unterminated string` |
+   | `max_tokens=8192`（新缺省） | 1901 字符 | 9442 字符 | 合法 |
+
+   空 content 让函数返回 `None` → `reasoner_returned_none` → hunt 在第 1 圈终止。现在 `max_tokens`
+   可配（`LODE_LLM_MAX_TOKENS`），默认 8192 —— 回补 `config/model_policy.example.yaml` 里
+   早写好的 `max_tokens: null`。同时那次失败不再是一句无声的 `None`：会带上
+   `reasoning_content` 长度，且 reasoner 的"没给内容"和"给的不是 JSON"分开报。
 8. `README_TEST.md` / `USAGE.md` / `docs/*.md` 部分章节仍描述已删功能，未逐篇清理。
    `docs/security-boundary.md` 是唯一跟得上代码的（写权限、能力维度那几段）。
 
 ## 近期历史（新在前）
+
+- `9f9fa11` / `2fa7c4e`（2026-09-21）**hunt 第一次真的跑起来了**。两处修复：`agents/src_agent.py`
+  的 `max_tokens` 截断（上面「已知限制 7」——这是 hunt 从来没跑过第 1 圈的唯一原因），以及
+  `total_findings` 漏掉 `needs_human` 分支（**置信度最高的那几条发现反而不计数**，摘要报 0）。
+  另外 `core/file_lock.AdvisoryFileLock.__enter__` 写 sidecar 首字节那步没重试，在 Windows
+  并发下抛 `PermissionError` 逃出 `EventLog.append`、把发事件的线程带走并**静默丢掉那批事件**
+  （实测 4 线程 × 10 条只剩 30 条；控制台 8 个 worker 同时 emit 走的就是这条路）。
 
 - `fd2ee8b`…`90a1c85`（2026-09-21）**授权文档入口链 + 多并发收尾**：一份 scope 文档只有一处
   解析（`agents/scope_document`），三条入口共用，确认后落 `EngagementAuthorization/v1`，
