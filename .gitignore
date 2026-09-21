@@ -16,6 +16,10 @@ out-*/
 # --out-dir 的默认值就是 ./out(lode.py 的 scan/auto 两个子命令),里面是真实目标的
 # surface 数据(paths/scripts/fingerprints)。上面那行只挡了 out-*,漏了默认目录。
 out/
+# 本机跑真实目标用的 scope 文档与目标清单(仓库里已有的 scope-anduril/eternal/k8s
+# 是历史遗留,别按它们的样子继续往里加)。
+scope-nba.json
+targets-nba-hot.txt
 
 # ---- Python ----
 __pycache__/

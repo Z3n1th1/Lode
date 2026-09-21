@@ -1,6 +1,7 @@
 # Lode 当前进度
 
-更新时间：2026-09-21（最近一次改动：授权文档入口链 + 多并发收尾。旧版停留在 2026-09-13，
+更新时间：2026-09-21（最近一次改动：授权文档入口链 + 多并发收尾，并在真实程序上把授权文档
+入口链跑通一遍——见「已知限制 1」。旧版停留在 2026-09-13，
 旧版提到的 `/dsh`、`/arl`、intel 路由、17 面板抽屉、`pentest-agent/` 目录都已不存在。）
 
 这份文件是下一次接手的起点。**以代码和测试为准**，本文件的数字若与代码冲突，以代码为准。
@@ -101,9 +102,19 @@ HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯
 每条都附了"怎么证明它还没做"，别只信本文。
 
 1. **队列可见性 + 背压。** 池子宽度是 `LODE_JOB_WORKERS`（`core/job_runner.py:25`，缺省 8），
-   `ThreadPoolExecutor` 的队列无上限、也不可见——`console/` 里 grep 不到 `queued` /
-   `backpressure`。一次确认 30 台主机就是 30 行，其中 22 行在排队，界面上分不出"在等"和
-   "卡死"。
+   `ThreadPoolExecutor` 的队列无上限、也不可见——`console/src/` 里 grep 不到 `queued` /
+   `backpressure`。数据其实是有的（`job_registry` 有 `QUEUED`，`submit` 先落
+   `status=queued` 再进池，`GET /api/v1/jobs` 原样返回），缺的是**它进不了对话**：
+
+   - `subtask_started` 是**工人取到 job 的那一刻**才发的（`core/job_runner.py:155`，只在
+     `_run` 里），不是提交时。所以一次确认 30 台主机，界面上只有 **8 张卡**，另外 22 台
+     **一张卡都没有**——操作员分不出"在等"和"根本没建起来"。
+   - 前端 `SubtaskStatus`（`console/src/chatEvents.ts:22`）只有 `running` / `completed` /
+     `failed` 三种，连一个能渲染"排队中"的值都没有。
+   - 总数只在 `POST …/engagement/confirm` 的响应 `run.launched` 里出现过一次，刷新就没了。
+
+   所以这件要补的不只是"给池子加个队列视图"，而是**提交时就要有一条事件**（或让
+   `/jobs` 的排队数进对话），否则那张卡永远出不来。
 2. **命令行批并发。** `lode.py:116` 的 `cmd_scan` 还是 `for target in targets` 串行。控制台
    已经会按主机 fan-out 了，命令行不会——同一份授权文档，两个入口的吞吐不一样。
 3. **长跑可恢复。** `JobRegistry.recover` 在 `auto_resume=True` 时会重新入队
@@ -195,7 +206,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 1. **真实目标跑过,但只到 surface 这一层,而且只走 CLI。** 2026-09-19/20 对 nba.com 跑了两次
    `lode.py scan`（输入是仓库根的 `scope-nba.json` + `targets-nba-hot.txt`，产物在 `out/`，
-   两者都没进 git；`out/` 也未 ignore，注意别误提交）：
+   三个文件现在都在 `.gitignore` 里）：
 
    | 轮次 | 目标 | 可达 | paths | api_urls | scripts | 失败 |
    |---|---|---|---|---|---|---|
@@ -208,9 +219,32 @@ cd console; npm run typecheck; npm run test; npm run build
    仍然未知的是**跑得出东西**：findings 一个都没有，候选面极薄（hot 那轮 `api_urls` 是 0）。
    上面「候选来自 robots/HTML、Explorer 只发 GET」是**解释**，不是已验证的结论。
 
-   另外：**控制台那条授权文档入口到现在只有测试 + 截图验证，没在真实程序上走过一次。**
-   `ai-pentest-evidence/projects/` 是空的（只有一个 lock 文件）——「新建项目 → 预览 → 确认」
-   这条路还没被真实使用过。
+   另外：**授权文档入口链已经在真实程序上跑过了**（2026-09-21，`run-console.ps1` + 真 HTTP，
+   目标是 IANA 保留域名 example.com/.org/.net，只读 GET）。三条入口各验了一遍：
+
+   - **预览 → 确认 → 每台主机一个 job**：一份 3 台主机的文档铸出 `I-8c8adf56d01e`，
+     回显 `intake_id` + `options_digest` 后落 `lode-state/authorizations/
+     lode-chain-verification-9f02e52591ae.json`（`EngagementAuthorization/v1`，装着文档原文、
+     `hosts`、`requests_per_second`），同时起 3 个 `engagement_host_run`（共用一个
+     `session_id` + `turn_id`），18 条事件全部落在同一条对话里，三个 job 都 `completed`。
+   - **集中速率是真的**：3 个 job 只产生 `lode-state/rate-limit/` 下**一个**桶
+     （`key: "lode-chain-verification"`，`rate_per_second: 3.0`）——3 req/s 是聚合值，不是 3×3。
+   - **主机轴之外不重新推导**：每个 run 的 `scope.json` 只有自己那一台主机，
+     `allowed_methods` / `allow_request_body` 全部继承文档。
+   - **粘贴进对话**：只发 `scope_preview` 事件（**确认过里面没有 `document` 键**）+ 一句
+     assistant 说明，**没起任何 job**。
+   - **监听目录**：槽被占时文件留在原地（`waiting`，不是 rejected）；丢掉待确认卡后下一轮
+     才被收走（进 `accepted/`），**同样没自动开跑**。
+
+   新增的实测数字：`LODE_JOB_WORKERS` 缺省 8，3 个 job 真的同时在跑（`GET /api/v1/jobs`
+   同时三个 `running`）。零 findings 是意料之中——example.com 的候选面本来就空
+   （`autopilot-state.json` 里 `new_candidates: 0`、黑板空），和下面第 4 条同源。
+
+   仍未在真实程序上走过的是**手打 URL 那条路**（`POST /api/v1/project/intake` → `TargetCard`
+   → `ai-pentest-evidence/projects/<target_id>/target.yaml`）。`ai-pentest-evidence/projects/`
+   现在还是空的（只有一个 lock 文件），这次不再能拿它当"文档入口没用过"的证据——两条路落盘
+   的位置本来就不一样（文档入口落 `lode-state/authorizations/`，手打 URL 才落 TargetCard）。
+   也没有在浏览器里点过，驱动的都是 UI 调的那几个 HTTP 端点。
 2. 主动渗透仍**依赖外部 Strix runner** 和未随仓库提供的私有 skill/契约；缺失时阻断。
 3. 飞书没有真实租户验收：没有 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，没向真实群发过消息。
 4. `notify/task_router.py` 里 `from runner_contract import RunnerBlockedError` 指向一个**仓库里
