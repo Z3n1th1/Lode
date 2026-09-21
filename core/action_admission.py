@@ -194,9 +194,9 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
     if verb not in PROBE_METHODS:
         return _refuse(NOT_IN_PROBE_TIER, tier, method=verb)
 
-    # Guards first, and they are unconditional: no declaration can buy past them.
-    # ``state_changing_reason`` runs before the word list, so ``?_method=DELETE`` lands
-    # in the selector branch rather than being read as "the URL mentions delete".
+    # Guards first. ``state_changing_reason`` runs before the word list, so
+    # ``?_method=DELETE`` lands in the selector branch rather than being read as
+    # "the URL mentions delete". No declaration buys past either of these.
     read_reason = state_changing_reason(url)
     if read_reason == "unknown_operation_selector":
         return _refuse("unknown_operation_selector", tier, method=verb)
@@ -221,34 +221,55 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
         return _refuse("mutating_request_refused:delete", tier, method=verb, kind=kind)
     if kind == "modify":
         return _refuse("mutating_request_refused:update_semantics", tier, method=verb, kind=kind)
+    # The one signal that stays a hard gate even for a proven read: a URL-valued
+    # parameter makes the *target* fetch a third party, and no scope gate can see where
+    # that lands (红线 8: 禁止对第三方服务、外部 API 连带测试).
     if scan.get("url_or_callback"):
         return _refuse("mutating_request_refused:server_side_egress", tier, method=verb, kind=kind)
-    if scan.get("privilege_or_credential"):
-        return _refuse("mutating_request_refused:privilege_or_credential", tier, method=verb, kind=kind)
-    if scan.get("cleanup_keyword"):
-        return _refuse("mutating_request_refused:irreversible_surface", tier, method=verb, kind=kind)
-    if scan.get("shared_state"):
-        return _refuse("mutating_request_refused:shared_state", tier, method=verb, kind=kind)
 
-    # Past the guards. Now the request has to *prove* it is a read.
+    # Now the request has to *prove* it is a read. Note what is deliberately NOT checked
+    # above: ``privilege_or_credential`` / ``cleanup_keyword`` / ``shared_state``.
+    #
+    # Those three answer "would *changing* this be dangerous?" — they trip on the URL's
+    # shape, not on our request's effect. ``_PRIV_ENDPOINT_RE`` matches ``/users?``, so
+    # any user-admin endpoint trips it; ``_SHARED_HINTS`` contains ``config`` / ``group`` /
+    # ``role``; ``_CLEANUP_HINTS`` contains ``order`` / ``notify``. Applying them to reads
+    # refuses ``OPTIONS /openidm/config/managed`` (RFC-safe, zero side effects) and
+    # ``POST /openidm/managed/user?_action=validateGoto`` — measured on a real target
+    # 2026-09-21, which is how this ordering was found. Reading a sensitive surface is the
+    # hunt's whole job; ``guardrails.action_policy.refine`` only consults these scanners
+    # for create/modify/other for exactly this reason.
+    proof = _read_proof(verb, url, body)
+    if proof:
+        return _allow(tier, method=verb, proof=proof)
+
+    # Not proven. The remaining signals now only choose which reason to show the model,
+    # so the refusal is actionable instead of a shrug.
+    for signal, label in (("privilege_or_credential", "privilege_or_credential"),
+                          ("cleanup_keyword", "irreversible_surface"),
+                          ("shared_state", "shared_state")):
+        if scan.get(signal):
+            return _refuse(f"{NOT_PROVEN}:{label}", tier, method=verb, kind=kind)
+    return _refuse(NOT_PROVEN, tier, method=verb, kind=kind)
+
+
+def _read_proof(verb: str, url: str, body: str) -> str:
+    """``"options"`` / ``"read_selector"`` / ``"graphql_query"``, or ``""`` for no proof.
+
+    Three shapes and nothing else, each of which says on its face what it does:
+    ``OPTIONS`` cannot mutate by spec; a read operation selector is the endpoint
+    declaring its own operation; a GraphQL ``query`` needs the literal keyword
+    ``mutation`` to be anything else. An empty body is **not** on this list — ``POST
+    /logout`` and ``POST /api/items`` both mutate without one.
+    """
     if verb == "OPTIONS":
-        if body:
-            return _refuse(NOT_PROVEN, tier, method=verb, reason_detail="options_with_body")
-        return _allow(tier, method=verb, proof="options")
-
+        return "" if body else "options"
     if verb == "POST":
         if read_operation_selector(url):
-            # The endpoint declares its own operation and it is a read word. This is the
-            # strongest proof available: the target told us what it does.
-            return _allow(tier, method=verb, proof="read_selector")
+            return "read_selector"
         if _graphql_read(url, body):
-            return _allow(tier, method=verb, proof="graphql_query")
-        # Note: an empty body is NOT a proof. POST /logout and POST /api/items both
-        # mutate with no body; body size is a transport fact, not a semantic one.
-        return _refuse(NOT_PROVEN, tier, method=verb)
-
-    # PUT/PATCH: ``kind`` is already "modify" for these, so they were refused above.
-    return _refuse(NOT_PROVEN, tier, method=verb)
+            return "graphql_query"
+    return ""
 
 
 def _admit_read(verb: str, url: str) -> Verdict:

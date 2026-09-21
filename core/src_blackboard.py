@@ -185,7 +185,8 @@ _STATE_CHANGING_WORDS = frozenset({
 })
 _STATE_CHANGING_CJK = ("删除", "修改", "更新", "注销", "退出", "支付", "退款", "发送")
 _OPERATION_SELECTOR_KEYS = frozenset({
-    "action", "op", "operation", "do", "cmd", "method", "_method", "function", "func",
+    "action", "_action", "op", "operation", "_operation", "do", "cmd",
+    "method", "_method", "function", "func",
 })
 _READ_SELECTOR_VALUES = frozenset({
     "get", "head", "options", "read", "list", "view", "search", "query",

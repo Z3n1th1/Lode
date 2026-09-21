@@ -121,6 +121,72 @@ class ProbeTierTests(unittest.TestCase):
         self.assertEqual(A.NOT_IN_PROBE_TIER, verdict.reason)
 
 
+class SensitiveSurfaceTests(unittest.TestCase):
+    """读一个敏感面**不是**它被拒的理由。
+
+    真机实测（2026-09-21, login-dev.nba.com）暴露过一次：把 ``value_scanners`` 的信号
+    当成硬闸门，于是 ``OPTIONS /openidm/config/managed``（RFC 安全、零副作用）因为 URL 里
+    有 ``config`` 被拒、``POST /openidm/managed/user?_action=validateGoto``（读选择器）因为
+    URL 里有 ``user`` 被拒 —— 探测档在真目标上等于没有。
+
+    那三个信号（``privilege_or_credential`` / ``cleanup_keyword`` / ``shared_state``）回答的
+    是"**改**这个面危不危险"，不是"这个请求会不会改东西"。``guardrails.action_policy.refine``
+    也只对 create/modify/other 查它们。
+    """
+
+    def test_options_on_a_config_surface_is_allowed(self):
+        verdict = _admit("OPTIONS", "https://h.example/openidm/config/managed")
+        self.assertTrue(verdict.allowed, verdict.reason)
+
+    def test_options_on_a_user_admin_surface_is_allowed(self):
+        for url in ("https://h.example/api/users", "https://h.example/openidm/managed/user",
+                    "https://h.example/admin/roles", "https://h.example/api/orders",
+                    "https://h.example/api/settings"):
+            with self.subTest(url=url):
+                self.assertTrue(_admit("OPTIONS", url).allowed, url)
+
+    def test_a_proven_read_on_a_sensitive_surface_is_allowed(self):
+        for url in ("https://h.example/api/users?action=query",
+                    "https://h.example/api/orders?action=list",
+                    "https://h.example/api/v2/group?op=search",
+                    "https://h.example/api/users?_action=query"):
+            with self.subTest(url=url):
+                verdict = _admit("POST", url, body='{"q":1}', content_type="application/json")
+                self.assertTrue(verdict.allowed, f"{url} -> {verdict.reason}")
+
+    def test_an_unrecognised_selector_value_is_refused_not_guessed(self):
+        """deny-by-default 的另一面:认不出的选择器值不当成读。
+
+        ``?_action=validateGoto`` 是 ForgeRock 常见的读操作,但 "validateGoto" 不是
+        我们词汇表里的读词 —— 光看名字证明不了它是读,所以拒。这条如实记下来,免得
+        以后有人把它当 bug "修"成放行。
+        """
+        verdict = _admit("POST", "https://h.example/openidm/managed/user?_action=validateGoto",
+                         body='{"goto":"/x"}', content_type="application/json")
+        self.assertFalse(verdict.allowed)
+
+    def test_an_underscore_selector_cannot_smuggle_a_write_through_get(self):
+        """``_action`` 曾经不在选择器键名里 —— ``GET ?_action=patch`` 因此漏得过。"""
+        verdict = _admit("GET", "https://h.example/api/x?_action=patch")
+        self.assertFalse(verdict.allowed)
+        self.assertEqual("unknown_operation_selector", verdict.reason)
+
+    def test_an_unproven_request_on_a_sensitive_surface_says_which_signal(self):
+        """拒绝理由要能指路 —— "它碰了一个敏感面"和"形状不是读"是两回事。"""
+        verdict = _admit("POST", "https://h.example/api/users", body='{"role":"x"}',
+                         content_type="application/json")
+        self.assertFalse(verdict.allowed)
+        self.assertTrue(verdict.reason.startswith(A.NOT_PROVEN), verdict.reason)
+
+    def test_server_side_egress_stays_a_hard_gate_even_for_a_proven_read(self):
+        """这条不同:外联落在**第三方**身上,而 scope 闸门看不见它(红线 8)。"""
+        verdict = _admit("POST", "https://h.example/api/fetch?action=query",
+                         body='{"target": "https://internal.example/"}',
+                         content_type="application/json")
+        self.assertFalse(verdict.allowed)
+        self.assertEqual("mutating_request_refused:server_side_egress", verdict.reason)
+
+
 class ClassifierSeesTheBodyTests(unittest.TestCase):
     """不给分类器解析后的容器,body 覆盖就是假的 —— ``action_kind`` 读不出 ``str``。"""
 
