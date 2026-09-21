@@ -445,17 +445,92 @@ def _fingerprints(text: str, content_type: str) -> set[str]:
     return found
 
 
-def _extract_text(text: str, result: SurfaceResult, source: str, scope: SurfaceScope) -> None:
+def _extract_text(text: str, result: SurfaceResult, source: str, scope: SurfaceScope,
+                  *, bases: tuple[str, ...] = ()) -> None:
     for regex in (URL_RE, QUOTED_PATH_RE, FIELD_RE, ROUTER_RE):
         for match in regex.finditer(text):
-            result.add_path(match.group(1) if match.lastindex else match.group(0), source, scope)
+            value = match.group(1) if match.lastindex else match.group(0)
+            result.add_path(value, source, scope)
+            _add_under_bases(result, value, bases, scope)
 
 
-def _extract_json(text: str, result: SurfaceResult, source: str, scope: SurfaceScope, base: str) -> None:
+#: How many declared bases one bundle may contribute. A file that declares ten of them is
+#: not telling us anything more useful than a file that declares two.
+MAX_API_BASES = 4
+
+
+# A bundle that declares its own API base makes its relative paths resolvable, and the
+# paths it contains are usually *fragments* of that base rather than URLs. ForgeRock's End
+# User UI is the worked example:
+#
+#     VUE_APP_IDM_URL:"/openidm"          ← the base, declared
+#     var h="/config/ui/themerealm"        ← a fragment
+#     return"/openidm/config/managed"      ← the join, once, as a literal
+#
+# so the bundle yields `/config/ui/themerealm`, which is not a URL and 404s, while the real
+# endpoint is `/openidm/config/ui/themerealm`. Measured 2026-09-21 on login-dev.nba.com: the
+# hunt spent its three OPTIONS probes on unprefixed paths and got three 404s.
+_API_BASE_RE = re.compile(
+    r"""(?ix)
+    ["']?[A-Za-z_][\w.\-]*(?:url|base|prefix|root|endpoint)["']?   # a base-ish key …
+    \s*[:=]\s*
+    ["'](/(?!/)[A-Za-z][\w.\-]{0,40})["']                          # … holding one path segment
+    """
+)
+
+
+def _declared_api_bases(text: str) -> tuple[str, ...]:
+    """Path roots this bundle both declares **and uses**.
+
+    The "and uses" half is the whole point: a base only counts if some literal in the same
+    text already starts with it, so the bundle proves the join itself. Without that check a
+    ``avatar_url:"/img"`` would manufacture a whole family of paths that never existed and
+    every one of them would be a wasted request.
+
+    Known imprecision, measured: the ForgeRock bundle also contains
+    ``VUE_APP_AM_ADMIN_URL:"/am/ui-admin/"``, which confirms ``/am`` — a *declared value*
+    rather than a genuine join. That one is harmless because ``/am`` really is a base (the
+    Access Management REST API lives at ``/am/json/…``), but the rule is "some literal
+    starts with it", not "some literal is a join of it".
+    """
+    declared = {match.group(1) for match in _API_BASE_RE.finditer(text)}
+    confirmed = sorted(
+        base for base in declared
+        if f'"{base}/' in text or f"'{base}/" in text or f"`{base}/" in text
+    )
+    return tuple(confirmed[:MAX_API_BASES])
+
+
+def _add_under_bases(result: SurfaceResult, value: str, bases: tuple[str, ...],
+                     scope: SurfaceScope) -> None:
+    """Also record ``base + fragment`` for every declared base.
+
+    The fragment is kept as well — sometimes it really is a path. The joined form is just
+    the one with evidence behind it, so it is scored higher (``base-join`` in
+    ``agents.src_autopilot._SOURCE_WEIGHT``) and wins the ranking.
+    """
+    if not bases:
+        return
+    raw = str(value or "").strip()
+    if not raw.startswith("/") or raw.startswith("//"):
+        return
+    if "#" in raw or STATIC_RE.search(raw):
+        return  # a fragment or a static asset is not an API path
+    path = raw.split("?", 1)[0]
+    if len(path) < 2:
+        return
+    if any(path == base or path.startswith(base + "/") for base in bases):
+        return  # already carries a base — nothing to resolve
+    for base in bases:
+        result.add_path(f"{base}{raw}", "base-join", scope)
+
+
+def _extract_json(text: str, result: SurfaceResult, source: str, scope: SurfaceScope, base: str,
+                  *, bases: tuple[str, ...] = ()) -> None:
     try:
         value = json.loads(text)
     except (TypeError, ValueError):
-        _extract_text(text, result, source, scope)
+        _extract_text(text, result, source, scope, bases=bases)
         return
 
     def walk(item: Any) -> None:
@@ -467,7 +542,7 @@ def _extract_json(text: str, result: SurfaceResult, source: str, scope: SurfaceS
                 if key == "sourcesContent" and isinstance(child, list):
                     for source_text in child[:60]:
                         if isinstance(source_text, str):
-                            _extract_text(source_text, result, "sourcemap", scope)
+                            _extract_text(source_text, result, "sourcemap", scope, bases=bases)
                 walk(child)
         elif isinstance(item, list):
             for child in item:
@@ -652,10 +727,12 @@ def discover_surface(
         if script_status == 0 or not text:
             continue
         result.fingerprints.update(_fingerprints(text, script_headers.get("content-type", "")))
+        # 这个 bundle 自己声明了 API base 的话,它里面的相对片段就是拼上 base 才成立的。
+        bases = _declared_api_bases(text)
         if urlsplit(script_url).path.lower().endswith(".map"):
-            _extract_json(text, result, "sourcemap", scope, script_url)
+            _extract_json(text, result, "sourcemap", scope, script_url, bases=bases)
             continue
-        _extract_text(text, result, "js", scope)
+        _extract_text(text, result, "js", scope, bases=bases)
         before = set(result.scripts)
         for match in SOURCE_MAP_RE.findall(text):
             result.add_script(match, "js", scope, script_url)

@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents.surface_discovery import SurfaceScope, discover_surface, write_surface_outputs
+from agents.surface_discovery import (
+    SurfaceScope, _declared_api_bases, discover_surface, write_surface_outputs,
+)
 
 
 ROOT = Path(__file__).resolve().parent / "fixtures" / "intel"
@@ -403,6 +405,82 @@ class RequestMethodTests(unittest.TestCase):
 
         _request_text("POST", self._url("/form"), timeout=5.0, body=b"a=1")
         self.assertEqual("application/x-www-form-urlencoded", self.seen[-1][3])
+
+
+class ApiBaseJoinTests(unittest.TestCase):
+    """A bundle that declares its API base makes its fragments resolvable.
+
+    The fixture is copied verbatim from the real ForgeRock End User UI bundle fetched from
+    login-dev.nba.com on 2026-09-21. Without this, the hunt sent three OPTIONS probes to
+    `/config/ui/themerealm` and friends and got three 404s — the real endpoints are one path
+    segment deeper.
+    """
+
+    #: Verbatim from the fetched bundle.
+    BUNDLE = (
+        'var o=r(45250),i=r(81294),s=(0,i.A)("/openidm"),l=(0,i.A)("/am");'
+        'return"/openidm/config/managed"!==c&&"#/journeys"!==window.location.hash;'
+        'var h="/config/ui/themerealm",y="/ui/theme/";'
+        'function n(){return(0,o.ud)().get("/info/uiconfig")}'
+        'VUE_APP_AM_URL:"/am",VUE_APP_AM_ADMIN_URL:"/am/ui-admin/",'
+        'VUE_APP_IDM_URL:"/openidm",VUE_APP_ADMIN_URL:"/login/#/service/FRLogin",'
+        'VUE_APP_ENDUSER_URL:"/enduser",'
+        'VUE_APP_FRAAS_PROMOTION_CONFIG_EGRESS_URL:"https://am.example.id.forgerock.io"'
+        'var z="/assets/logo.svg";'
+    )
+
+    def _scope(self) -> SurfaceScope:
+        return SurfaceScope("fixture", "written authorization", allowed_hosts=["example.com"])
+
+    def _extract(self, text: str):
+        from agents.surface_discovery import SurfaceResult, _extract_text
+
+        result = SurfaceResult(target="https://example.com/", base_url="https://example.com")
+        _extract_text(text, result, "js", self._scope(),
+                      bases=_declared_api_bases(text))
+        return result
+
+    def test_the_declared_base_is_found(self) -> None:
+        self.assertIn("/openidm", _declared_api_bases(self.BUNDLE))
+
+    def test_a_declared_base_without_a_join_is_not_trusted(self) -> None:
+        """``VUE_APP_ENDUSER_URL:"/enduser"`` 没有任何 ``/enduser/…`` 字面量背书,所以不算。"""
+        self.assertNotIn("/enduser", _declared_api_bases(self.BUNDLE))
+
+    def test_a_single_segment_path_value_is_not_a_base(self) -> None:
+        """``"/login/#/service/FRLogin"`` 不是单段根,不该被当成 base。"""
+        self.assertNotIn("/login", _declared_api_bases(self.BUNDLE))
+
+    def test_the_real_endpoints_are_generated(self) -> None:
+        result = self._extract(self.BUNDLE)
+        for path in ("/openidm/config/ui/themerealm", "/openidm/info/uiconfig"):
+            with self.subTest(path=path):
+                self.assertIn(path, result.paths)
+                self.assertIn("base-join", result.sources[path])
+
+    def test_the_bare_fragment_is_still_kept(self) -> None:
+        """片段本身也可能是真路径,不能因为拼出了带 base 的就把它丢掉。"""
+        result = self._extract(self.BUNDLE)
+        self.assertIn("/config/ui/themerealm", result.paths)
+
+    def test_a_path_that_already_carries_the_base_is_not_prefixed_twice(self) -> None:
+        result = self._extract(self.BUNDLE)
+        self.assertIn("/openidm/config/managed", result.paths)
+        self.assertNotIn("/openidm/openidm/config/managed", result.paths)
+
+    def test_static_assets_and_hash_fragments_are_skipped(self) -> None:
+        result = self._extract(self.BUNDLE + 'var a="/img/logo.svg",b="/x#/y";')
+        base_joined = [p for p, s in result.sources.items() if "base-join" in s]
+        self.assertFalse([p for p in base_joined if p.endswith(".svg")], base_joined)
+        self.assertFalse([p for p in base_joined if "#" in p], base_joined)
+
+    def test_the_joined_form_outranks_the_bare_fragment(self) -> None:
+        """不然排序还是让 404 的那个先被探索。"""
+        from agents import src_autopilot
+
+        joined = src_autopilot._score_candidate("/openidm/config/ui/themerealm", ["base-join"])
+        bare = src_autopilot._score_candidate("/config/ui/themerealm", ["js"])
+        self.assertGreater(joined, bare)
 
 
 if __name__ == "__main__":

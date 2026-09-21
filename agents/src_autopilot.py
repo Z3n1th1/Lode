@@ -55,6 +55,10 @@ _SOURCE_WEIGHT = {
     "openapi": 30,
     "sourcemap": 25,
     "seed": 20,
+    # 拼上 bundle 自己声明的 API base 之后的路径。权重压过 js/sourcemap,因为它比
+    # "这串字看着像路径"多了半条证据:bundle 亲口说了 base 是 /openidm。真机实测里
+    # 没有它的时候,三个 OPTIONS 探针全打在缺前缀的 404 上。
+    "base-join": 18,
     "js": 15,
     "html": 10,
     "robots": 8,
