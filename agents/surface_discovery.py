@@ -22,6 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from core.action_admission import ADMISSIBLE_METHODS as _ADMISSIBLE_METHODS
 from core.rate_limit import limiter_for
 from core.src_blackboard import state_changing_reason
 
@@ -85,10 +86,18 @@ def _as_tuple(value: Any) -> tuple:
 
 # 方法词表与顺序都是固定的:两份声明了同一个集合的 scope 必须写出同一个 tuple,
 # 否则它们的桶/缓存/比较都会因为书写顺序不同而不同。
-_METHOD_ORDER = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
+#
+# DELETE 不在这里。它不是"没授权所以拿不到",而是**不是合法取值** —— 一份写着 DELETE
+# 的文档读进来的结果和不写它一样(见 `_method_tuple` 的过滤),而任何实发的 DELETE 都由
+# `core.action_admission` 以 destructive_method_forbidden 拒掉。平台红线写的是"禁止任何
+# 增删改数据/配置的写操作",删除是里面最不可逆的那一个,不该留在一个"声明一下就能用"的词表里。
+_METHOD_ORDER = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH")
 _METHOD_VOCABULARY = frozenset(_METHOD_ORDER)
 # 只读是底线,不是默认值:声明什么都拿不掉这两个。
 _SAFE_METHODS = ("GET", "HEAD")
+# 闸门**实际会发**的方法,从闸门自己那里取(`core.action_admission.ADMISSIBLE_METHODS`),
+# 不在这儿另写一份 —— 提示词里那句"允许的方法"必须和沙箱会执行的动作是同一件事,
+# 否则模型要么从不尝试它其实能做的,要么写出一份到闸门就死的计划。
 
 
 def _method_tuple(value: Any) -> tuple[str, ...]:
@@ -256,18 +265,6 @@ class SurfaceScope:
         return str(method or "").strip().upper() in self.allowed_methods
 
     @property
-    def declares_write(self) -> bool:
-        """True once the document names a method beyond GET/HEAD.
-
-        This is the switch the write gate turns on: until the operator has signed for
-        *some* write verb, a URL that reads like a mutation stays a hard block. After
-        it, the same signal is a warning attached to the request instead of a wall —
-        the control point moved from "is there a word in the URL" to "what did the
-        operator authorise".
-        """
-        return bool(set(self.allowed_methods) - set(_SAFE_METHODS))
-
-    @property
     def requests_per_second(self) -> float:
         """The same promise as ``delay_seconds``, in the unit the program writes it in."""
         return 1.0 / self.delay_seconds if self.delay_seconds > 0 else 0.0
@@ -279,13 +276,24 @@ class SurfaceScope:
         a lie the moment a scope declares more. A model told it cannot POST while the
         sandbox would allow one simply never tries; a model told it can, when it
         cannot, writes plans that die at the gate.
+
+        So this reports only methods the gate can actually send, and names the ones
+        that were declared but are refused by semantics. PUT/PATCH are the case that
+        forced the split: they are legal to declare (so a refusal can say
+        ``update_semantics`` rather than ``method_not_allowed``) and impossible to send.
         """
-        methods = ", ".join(self.allowed_methods)
-        writable = bool(set(self.allowed_methods) - set(_SAFE_METHODS))
-        if writable:
+        usable = [m for m in self.allowed_methods if m in _ADMISSIBLE_METHODS]
+        refused = [m for m in self.allowed_methods if m not in _ADMISSIBLE_METHODS]
+        methods = ", ".join(usable)
+        if not any(m not in _SAFE_METHODS for m in usable):
+            line = f"允许的方法: {methods}（这份授权只有只读方法）"
+        else:
             tail = "可以带请求体" if self.allow_request_body else "不允许带请求体"
-            return f"允许的方法: {methods}（{tail}）"
-        return f"允许的方法: {methods}（这份授权只有只读方法）"
+            line = f"允许的方法: {methods}（{tail}）"
+        if refused:
+            line += (f"。已声明但一律会被拒: {', '.join(refused)} —— 它们语义上就是"
+                     "改数据,POC 不要写这类请求")
+        return line
 
     def require_authorization(self) -> None:
         if not self.authorization:

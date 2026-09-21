@@ -896,6 +896,7 @@ class TestFetchGate(unittest.TestCase):
         self.assertEqual("POST", result["method"])
 
     def test_a_declared_post_goes_through_the_second_seam(self):
+        """探测档里唯一能走的 POST:端点自己用读选择器声明了它是读。"""
         seen: List[Tuple] = []
 
         def requester(method, url, **kwargs):
@@ -903,14 +904,34 @@ class TestFetchGate(unittest.TestCase):
             return 200, '{"ok": true}', {"content-type": "application/json"}
 
         scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
-        result = _fetch_for_analysis("https://example.com/api/v1/items", scope, method="POST",
+        result = _fetch_for_analysis("https://example.com/api/v1/items?action=query", scope,
+                                     method="POST",
                                      body='{"q": 1}', content_type="application/json",
                                      requester=requester)
         self.assertEqual("", result["error"])
         self.assertEqual("POST", result["method"])
         self.assertEqual(200, result["status"])
-        self.assertEqual([("POST", "https://example.com/api/v1/items", b'{"q": 1}',
-                           "application/json")], seen)
+        self.assertEqual([("POST", "https://example.com/api/v1/items?action=query",
+                           b'{"q": 1}', "application/json")], seen)
+
+    def test_an_unproven_post_never_reaches_the_seam(self):
+        """没有读证明的 POST 一律拒 —— 空 body 也不是证明(POST /logout 就没有 body)。"""
+        seen: List[str] = []
+
+        def requester(method, url, **kwargs):
+            seen.append(method)
+            return 200, "{}", {}
+
+        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+        for body in ('{"q": 1}', ""):
+            with self.subTest(body=body):
+                result = _fetch_for_analysis("https://example.com/api/v1/items", scope,
+                                             method="POST", body=body,
+                                             content_type="application/json",
+                                             requester=requester)
+                self.assertEqual("probe_not_proven_non_mutating", result["error"])
+                self.assertEqual(0, result["status"])
+        self.assertEqual([], seen, "被拒的请求绝不能碰到传输层")
 
     def test_a_head_never_becomes_a_get(self):
         """以前 HEAD 是"校验通过之后按 GET 执行" —— 审计行写 GET,实际不是。"""
@@ -951,11 +972,13 @@ class TestFetchGate(unittest.TestCase):
 
 
 class TestWriteGate(unittest.TestCase):
-    """治理语义变更:控制点从"URL 里有没有某个词"换成"操作员签了什么"。
+    """治理语义:写操作是**硬拒**,不是"降级成警告"。
 
-    一条 URL 里出现 "update" 是启发式,不是证据 —— DropDownOptions 会被切成
-    drop+down、UpdateStatus 会被切成 update。以前这种误判一律硬拦;现在它只在文档
-    **没有声明任何写方法**时才是墙,声明之后降级成跟着请求走的警告。
+    这里改过一次方向,记下来免得又转回去。原来的规则是"文档声明了写方法之后,
+    URL 里那点改状态的味道就从墙降级成警告"——控制点从"URL 有没有某个词"换成
+    "操作员签了什么"。听着对,但它放过了 ``GET /logout`` 和 ``GET /api/deleteUser``:
+    "禁止任何增删改数据/配置的写操作"说的是这个操作**做什么**,不是哪个动词载着它。
+    所以现在:声明写方法什么都放开不了,改状态形状一律拒。
     """
 
     def test_the_word_list_still_blocks_while_nothing_is_declared(self):
@@ -967,19 +990,26 @@ class TestWriteGate(unittest.TestCase):
                 self.assertEqual("state_changing_endpoint",
                                  _fetch_for_analysis(url, scope)["error"])
 
-    def test_declaring_a_write_method_turns_the_wall_into_a_warning(self):
-        scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
-        seen: List[str] = []
+    def test_declaring_a_write_method_does_not_open_a_state_changing_url(self):
+        """声明 POST 不会让 ``GET /api/deleteUser`` 变成可以发的东西。"""
+        cases = [
+            ("GET", _make_scope(allowed_methods=("POST",)), ""),
+            ("POST", _make_scope(allowed_methods=("POST",), allow_request_body=True), "id=1"),
+        ]
+        for method, scope, body in cases:
+            with self.subTest(method=method):
+                seen: List[str] = []
 
-        def requester(method, url, **kwargs):
-            seen.append(method)
-            return 200, "{}", {}
+                def requester(verb, url, **kwargs):
+                    seen.append(verb)
+                    return 200, "{}", {}
 
-        result = _fetch_for_analysis("https://example.com/api/deleteUser", scope,
-                                     method="POST", body="id=1", requester=requester)
-        self.assertEqual("", result["error"])
-        self.assertEqual(["POST"], seen)
-        self.assertEqual(200, result["status"])
+                result = _fetch_for_analysis("https://example.com/api/deleteUser", scope,
+                                             method=method, body=body,
+                                             requester=requester)
+                self.assertEqual("state_changing_endpoint", result["error"])
+                self.assertEqual(0, result["status"])
+                self.assertEqual([], seen, "被拒的请求绝不能碰到传输层")
 
     def test_an_operation_selector_stays_blocked_even_with_write_methods(self):
         """``?action=sendEmail`` 说的是"这个 URL 自己会挑一个操作" —— 方法授权覆盖不了它。"""
@@ -989,8 +1019,29 @@ class TestWriteGate(unittest.TestCase):
                                      requester=lambda *a, **k: (200, "{}", {}))
         self.assertEqual("unknown_operation_selector", result["error"])
 
-    def test_a_selector_that_names_a_declared_method_is_covered(self):
-        """唯一放行的情况:选择器自己点名了方法(?_method=POST),而那份方法被声明过。"""
+    def test_a_selector_that_names_a_method_is_not_a_read_proof(self):
+        """``?_method=POST`` 是**写声明**,不是读证明 —— 旧的豁免没了。
+
+        以前它被当成"这个 URL 自己点名了一个方法,而那份方法被声明过",于是可以发。
+        但一个要把自己变成 POST 的 URL 说的是"我要写",把它当通行证是把方向读反了。
+        """
+        seen: List[str] = []
+
+        def requester(method, url, **kwargs):
+            seen.append(method)
+            return 200, "{}", {}
+
+        for selector in ("POST", "DELETE"):
+            with self.subTest(selector=selector):
+                scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
+                result = _fetch_for_analysis(f"https://example.com/api/x?_method={selector}",
+                                             scope, method="POST", body="a=1",
+                                             requester=requester)
+                self.assertEqual("unknown_operation_selector", result["error"])
+        self.assertEqual([], seen, "被拒的请求绝不能碰到传输层")
+
+    def test_a_read_selector_is_what_opens_the_probe_tier(self):
+        """正面形式:``?action=query`` 声明的是一个读操作,这才是可以放行的证明。"""
         seen: List[Tuple] = []
 
         def requester(method, url, **kwargs):
@@ -998,10 +1049,40 @@ class TestWriteGate(unittest.TestCase):
             return 200, "{}", {}
 
         scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
-        result = _fetch_for_analysis("https://example.com/api/x?_method=POST", scope,
+        result = _fetch_for_analysis("https://example.com/api/x?action=query", scope,
                                      method="POST", body="a=1", requester=requester)
         self.assertEqual("", result["error"])
         self.assertEqual([("POST", b"a=1")], seen)
+
+    def test_every_refusal_keeps_the_transport_untouched(self):
+        """红线:被治理拒掉的请求一个都不许发出去 —— 每一种拒绝都过一遍。"""
+        seen: List[str] = []
+
+        def fetcher(url, **kwargs):
+            seen.append(url)
+            return 200, "{}", {}
+
+        def requester(method, url, **kwargs):
+            seen.append(url)
+            return 200, "{}", {}
+
+        cases = [
+            ("https://example.com/api/deleteUser", _make_scope(), "GET", ""),
+            ("https://example.com/api/x?action=ping", _make_scope(), "GET", ""),
+            ("https://example.com/api/users", _make_scope(), "POST", "a=1"),
+            ("https://example.com/api/users", _make_scope(allowed_methods=("PUT",),
+                                                          allow_request_body=True), "PUT", "a=1"),
+            ("https://example.com/api/users", _make_scope(allowed_methods=("PATCH",),
+                                                          allow_request_body=True), "PATCH", "a=1"),
+            ("https://example.com/api/users", _make_scope(allowed_methods=("DELETE",)), "DELETE", ""),
+        ]
+        for url, scope, method, body in cases:
+            with self.subTest(url=url, method=method):
+                result = _fetch_for_analysis(url, scope, method=method, body=body,
+                                             fetcher=fetcher, requester=requester)
+                self.assertNotEqual("", result["error"], f"{method} {url} 应该被拒")
+                self.assertEqual(0, result["status"])
+        self.assertEqual([], seen, "任何一种拒绝都不许碰到传输层")
 
     def test_a_selector_naming_an_undeclared_method_is_still_blocked(self):
         scope = _make_scope(allowed_methods=("POST",), allow_request_body=True)
@@ -1023,11 +1104,16 @@ class TestWriteGate(unittest.TestCase):
         self.assertIs(True, marks["https://example.com/api/deleteUser"])
         self.assertIs(False, marks["https://example.com/api/users"])
 
-    def test_the_explorer_is_told_it_is_a_change_not_a_read(self):
-        section = _shape_signals_section([], "https://example.com/api/deleteUser")
-        self.assertIn("state_changing_endpoint", section)
-        self.assertIn("改动", section)
+    def test_a_change_shaped_url_never_reaches_the_explorer(self):
+        """"这次是改动不是读取"那句提示删掉了 —— 它现在不可达。
+
+        改状态形状的 URL 在闸门就被拒,Explorer 根本不会为它运行,所以再给模型一句
+        "发之前确认这就是你要的改动"只会教它去做一件做不到的事。
+        """
+        self.assertEqual("", _shape_signals_section([], "https://example.com/api/deleteUser"))
         self.assertEqual("", _shape_signals_section([], "https://example.com/api/users"))
+        # 形状先验本身还在,只是不再有"这是改动"那一类。
+        self.assertIn("idor", _shape_signals_section(["idor"], "https://example.com/api/users"))
 
     def test_no_decision_is_named_write_blocked_any_more(self):
         """四个原因各说各的:方法 / body / 改状态端点 / 操作选择器。"""
@@ -1161,11 +1247,13 @@ class TestCapabilityInPrompt(unittest.TestCase):
         self.assertNotIn("{capabilities}", prompt)
 
     def test_a_writable_scope_says_what_is_allowed(self):
+        """提示词只能广告闸门真会发的方法。PUT 被声明了但恒拒,必须说出来。"""
         with tempfile.TemporaryDirectory() as tmp:
             loop = self._loop(tmp, allowed_methods=("POST", "PUT"), allow_request_body=True)
             prompt = loop._system(EXPLORER_SYSTEM)
-        self.assertIn("允许的方法: GET, HEAD, POST, PUT", prompt)
+        self.assertIn("允许的方法: GET, HEAD, POST", prompt)
         self.assertIn("可以带请求体", prompt)
+        self.assertIn("一律会被拒: PUT", prompt)
         self.assertNotIn("{capabilities}", prompt)
 
     def test_a_writable_scope_without_a_body_channel_says_that_too(self):

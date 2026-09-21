@@ -190,7 +190,6 @@ _OPERATION_SELECTOR_KEYS = frozenset({
 _READ_SELECTOR_VALUES = frozenset({
     "get", "head", "options", "read", "list", "view", "search", "query",
 })
-_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
@@ -235,18 +234,22 @@ def state_changing_reason(value: str) -> str:
     return ""
 
 
-def operation_selector_method(value: str) -> str:
-    """The HTTP method a ``?_method=POST``-style selector names, or ``""``.
+def read_operation_selector(value: str) -> str:
+    """The selector value when the URL declares a **read** operation, else ``""``.
 
-    This is the one case where a selector can be *covered* rather than merely
-    suspicious: if it names a method and the authorisation declared that method, the
-    operator has already said what this endpoint is for.
+    This is the positive form of the selector test in :func:`state_changing_reason`:
+    that one answers "is this URL picking its own operation and it is not a read",
+    this one answers "does it pick a read". The probe tier needs the positive form —
+    an endpoint that says ``?action=query`` has declared what it does, and that is
+    the only kind of self-declaration a non-GET probe may rest on.
+
+    Percent-decoded the same way, so ``%61ction=query`` cannot hide.
     """
     decoded = _decoded_target(value or "")
     for key, item in parse_qsl(decoded.partition("?")[2], keep_blank_values=True):
         if str(key).lower() in _OPERATION_SELECTOR_KEYS:
-            candidate = str(item).strip().upper()
-            if candidate in _HTTP_METHODS:
+            candidate = str(item).strip().lower()
+            if candidate in _READ_SELECTOR_VALUES:
                 return candidate
     return ""
 

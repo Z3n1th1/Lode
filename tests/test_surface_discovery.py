@@ -162,7 +162,20 @@ class CapabilityDeclarationTests(unittest.TestCase):
                             allowed_methods=["DELETE"])
         self.assertIn("GET", scope.allowed_methods)
         self.assertIn("HEAD", scope.allowed_methods)
-        self.assertIn("DELETE", scope.allowed_methods)
+
+    def test_delete_is_not_a_declarable_method(self) -> None:
+        """声明 DELETE 和不声明它读进来是一样的 —— 它不该是一个"写上就能用"的取值。
+
+        平台红线写的是"禁止任何增删改数据/配置的写操作",删除是其中最不可逆的一个。
+        它既不在词表里,`core.action_admission` 又会对任何实发的 DELETE 再拒一次。
+        """
+        from agents.surface_discovery import _METHOD_VOCABULARY
+
+        self.assertNotIn("DELETE", _METHOD_VOCABULARY)
+        scope = self._scope(program="p", authorization="a", allowed_hosts=["x.com"],
+                            allowed_methods=["GET", "HEAD", "DELETE"])
+        self.assertNotIn("DELETE", scope.allowed_methods)
+        self.assertFalse(scope.allows_method("DELETE"))
 
     def test_a_declared_method_is_normalised_and_ordered(self) -> None:
         """顺序固定、大小写归一:两份声明同一个集合的文档必须比较相等。"""

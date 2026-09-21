@@ -38,9 +38,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 
-from agents.surface_discovery import SurfaceScope, _fetch_text, _readonly_url_reason, _request_text
+from agents.surface_discovery import SurfaceScope, _fetch_text, _request_text
+from core import action_admission
 from core.rate_limit import limiter_for
-from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED, operation_selector_method
+from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
 from core import skills as _skills
 
 # Auto-load .env config (API keys, etc.)
@@ -292,17 +293,17 @@ def _shape_signals_section(names: Any, url: str = "") -> str:
     Empty is a real answer: a static asset with no parameters gives the Explorer no
     prior, and inventing one would be worse than letting the model read the response.
 
-    ``state_changing_endpoint`` is not a hypothesis — it is a warning that this request
-    itself does something. It only ever reaches here when the authorisation document
-    declared a write method (otherwise the gate refused the fetch), so the wording says
-    "confirm this is the change you meant", not "you may not do this".
+    The old ``state_changing_endpoint`` note is gone with the branch that produced it:
+    a state-changing-looking URL is now refused by the gate before the Explorer runs,
+    so there is no reachable case in which a "this one is a change, not a read" warning
+    has to be shown. See ``core.action_admission``.
+
+    ``url`` is kept in the signature — callers pass it, and the next shape prior that
+    needs it should not have to re-thread it.
     """
+    del url
     wanted = [str(name) for name in (names or []) if str(name) in _HYPOTHESIS_BRIEF]
-    notes: List[str] = []
-    if _readonly_url_reason(url) == "state_changing_url":
-        notes.append("  - state_changing_endpoint: 这条 URL 自己带改状态的动作词。这次请求"
-                     "是**改动**而不是读取 —— 发之前确认这就是你要的改动,并把结果当改动记录。")
-    notes.extend(f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted)
+    notes: List[str] = [f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted]
     if not notes:
         return ""
     return "Shape signals (from the URL, not a claim):\n" + "\n".join(notes) + "\n\n"
@@ -483,13 +484,15 @@ def _fetch_for_analysis(
     """Scope-checked request for LLM analysis. Returns structured result.
 
     The order of the gates is the whole point, and so is the fact that there is only
-    one copy of them: URL in scope → *method* declared by the authorisation document
-    → body declared → the write gate → budget → send. A caller that skips this
-    function skips all five.
+    one copy of them: URL in scope → *destructive verbs refused outright* → method
+    declared by the authorisation document → body declared → :mod:`core.action_admission`
+    → request budget → send. A caller that skips this function skips all of them.
 
-    The write gate is the one that reads the document rather than the URL: a
-    state-changing-looking path is refused only while no write method has been
-    declared, and an operation selector is refused unless it names a declared method.
+    The admission gate is the one that reads the document *and* the request shape. It
+    refuses any state-changing-looking URL unconditionally, and lets a non-read method
+    through only when the request positively proves it is a read. There is no
+    "wait for a human" branch, because ``guardrails.tools.human_gate`` is hard-blocked
+    and no local path can approve anything — see ``core.action_admission``.
 
     ``method`` is echoed back in the result: the timeline and the prompt both report
     what ran, and an audit line that says "GET" for a request that was not a GET is
@@ -499,6 +502,10 @@ def _fetch_for_analysis(
     ok, reason = scope.check_url(url)
     if not ok:
         return _refused(f"scope_rejected:{reason}", verb)
+    if verb in action_admission.DESTRUCTIVE_METHODS:
+        # Ahead of the declaration check on purpose: DELETE is never legal, and the
+        # audit should say "destructive method" rather than "you didn't declare it".
+        return _refused(action_admission.DESTRUCTIVE_METHOD, verb)
     if not scope.allows_method(verb):
         # 方法准入:授权文档没写这个动词,就是没授权。以前"只读"写在源码里,
         # 文档从来没说过能做什么。
@@ -506,25 +513,14 @@ def _fetch_for_analysis(
     payload = body.encode("utf-8") if isinstance(body, str) and body else None
     if payload and not scope.allow_request_body:
         return _refused("body_not_allowed", verb)
-    # 写权限闸门。两件事分开了:
-    #
-    # * ``unknown_operation_selector``(``?action=sendEmail``)保留硬拦 —— 它说的是
-    #   "这个 URL 自己会挑一个操作",光有方法授权覆盖不了它。唯一放行的情况是选择器
-    #   本身点名了一个方法(``?_method=POST``)而且那份方法被声明过。
-    # * ``state_changing_url`` 只在**文档还没声明任何写方法**时是硬拦。声明之后它降级
-    #   成标记(见 core.src_blackboard 的 state_changing_endpoint,以及提示词里那节):
-    #   控制点从"URL 里有没有某个词"换成"操作员签的那份文档说了什么"。
-    #
-    # 错误串也拆开了。以前不管什么原因都叫 write_blocked:,于是 URL 里带 "update" 的
-    # 一个 POST 被说成"写操作被拦",而真正的原因是方法没被声明 —— 那是误归因,
-    # 操作员照着一个错的理由去改 scope 只会更困惑。
-    read_reason = _readonly_url_reason(url)
-    if read_reason == "unknown_operation_selector":
-        named = operation_selector_method(url)
-        if not (named and scope.allows_method(named)):
-            return _refused("unknown_operation_selector", verb)
-    elif read_reason and not scope.declares_write:
-        return _refused("state_changing_endpoint", verb)
+    # 第五道闸门:这次的请求形状是不是只读。读了 URL、读了 body 容器、读了方法,然后
+    # 要么放行要么给出一个操作员能照着改的理由。**没有"待人工确认"这一档** ——
+    # guardrails 的人工门恒为 hard_blocked,本地没有任何可达的放行路径,所以"需要人
+    # 判断"在这里就等于"拒绝",审计里会写明这一点。
+    verdict = action_admission.admit(method=verb, url=url, body=body or "",
+                                     content_type=content_type)
+    if not verdict.allowed:
+        return _refused(verdict.reason, verb)
     # 限速交给全局桶(见 core/rate_limit)。以前是调用方传 last_request_at 进来、
     # 自己 sleep —— 那份"间隔"是每个 agent 运行各一份,并发起来就是 N 倍速率。
     limiter = limiter_for(scope)
