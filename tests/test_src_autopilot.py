@@ -98,7 +98,7 @@ class SrcAutopilotTests(unittest.TestCase):
     def test_duplicate_round_converges_and_restart_does_not_repeat_network_work(self) -> None:
         calls = []
 
-        def discover(scope, target, *, max_scripts):
+        def discover(scope, target, *, max_scripts, budget=None):
             calls.append((target, max_scripts))
             return self._result()
 

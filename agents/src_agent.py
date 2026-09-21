@@ -40,7 +40,7 @@ if str(_CORE_DIR) not in sys.path:
 
 from agents.surface_discovery import SurfaceScope, _fetch_text, _request_text
 from core import action_admission
-from core.rate_limit import limiter_for
+from core.rate_limit import RequestBudget, limiter_for
 from core.src_blackboard import SrcBlackboard, _DEP_SATISFIED
 from core import skills as _skills
 
@@ -459,6 +459,32 @@ def _refused(error: str, method: str) -> Dict[str, Any]:
     return {"status": 0, "body": "", "headers": {}, "error": error, "method": method}
 
 
+#: 这些拒绝是**终态**:再试一次是同一个结果。URL 不在范围里、方法没被声明、请求形状
+#: 过不了治理、分类器不可用、额度用完 —— 它们都不随时间改变。
+#:
+#: 和网络抖动分开很重要。以前任何 error 都走同一条 ``fail(backoff_seconds=...)``,于是
+#: 一个注定过不了闸门的候选会被重排队到 ``DEFAULT_MAX_ATTEMPTS``(3)次,每次都重新规划
+#: 一遍、烧掉一次 LLM 调用,还占着圈数。治理结论不该被当成"可能只是这次运气不好"。
+TERMINAL_REFUSAL_PREFIXES = (
+    "scope_rejected:",
+    "method_not_allowed:",
+    "body_not_allowed",
+    "request_budget_exhausted",
+    "unknown_operation_selector",
+    "state_changing_endpoint",
+    action_admission.DESTRUCTIVE_METHOD,
+    action_admission.NOT_IN_PROBE_TIER,
+    action_admission.NOT_PROVEN,
+    action_admission.CLASSIFIER_UNAVAILABLE,
+    "mutating_request_refused:",
+)
+
+
+def _is_terminal_refusal(error: str) -> bool:
+    text = str(error or "")
+    return any(text.startswith(prefix) for prefix in TERMINAL_REFUSAL_PREFIXES)
+
+
 def _sha12(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8", errors="replace")).hexdigest()[:12]
 
@@ -480,6 +506,7 @@ def _fetch_for_analysis(
     content_type: str = "",
     fetcher: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None,
     requester: Optional[Callable[..., Tuple[int, str, Dict[str, str]]]] = None,
+    budget: Optional[RequestBudget] = None,
 ) -> Dict[str, Any]:
     """Scope-checked request for LLM analysis. Returns structured result.
 
@@ -521,6 +548,10 @@ def _fetch_for_analysis(
                                      content_type=content_type)
     if not verdict.allowed:
         return _refused(verdict.reason, verb)
+    # 计数点在这里:治理拒掉的请求不消耗额度,而额度用完的运行立刻返回 —— 不然它会先
+    # 睡在一个令牌上、睡醒了才发现没得发。速率盖住"多快",这个盖住"多少"。
+    if budget is not None and not budget.spend():
+        return _refused("request_budget_exhausted", verb)
     # 限速交给全局桶(见 core/rate_limit)。以前是调用方传 last_request_at 进来、
     # 自己 sleep —— 那份"间隔"是每个 agent 运行各一份,并发起来就是 N 倍速率。
     limiter = limiter_for(scope)
@@ -580,6 +611,10 @@ class AgentConfig:
     # 知识激活:用哪个技能包,以及开局先激活哪几篇(jobs.py 从操作员那句话推)。
     skill_pack: str = "pentest"
     knowledge_seed: Tuple[str, ...] = ()
+    # 这一轮还能发多少请求(见 core.rate_limit.RequestBudget)。None = 不计数,给
+    # 单测和库里调用用;生产路径一律带一份 —— 平台红线要求"最小化",而在这之前
+    # 根本没有任何计数器。
+    request_budget: Optional[RequestBudget] = None
 
 
 @dataclass
@@ -778,6 +813,13 @@ class SrcAgentLoop:
                 stop_reason = "no_queued_intents"
                 break
 
+            budget = self.config.request_budget
+            if budget is not None and budget.exhausted:
+                # 停下来,而不是让 reasoner 去规划一批发不出去的请求。它规划一次就要
+                # 一次 LLM 调用,而结果注定是 request_budget_exhausted。
+                stop_reason = "request_budget_exhausted"
+                break
+
             # Reason phase
             reason_result = self._reason(snapshot)
             if reason_result is None:
@@ -849,6 +891,10 @@ class SrcAgentLoop:
             "total_findings": total_findings,
             "stop_reason": stop_reason,
             "errors": errors[:20],
+            # 这一轮发了多少请求、上限是多少。红线要求"最小化",所以这个数要看得见 ——
+            # 只靠速率桶的话,"多快"有据可查,"多少"是空的。
+            "requests_used": int(self.config.request_budget.used) if self.config.request_budget else 0,
+            "request_budget": int(self.config.request_budget.limit) if self.config.request_budget else 0,
             # 这次运行激活了哪几本打法、谁触发的 —— 复盘时才说得清"为什么它这轮打得不一样"。
             "activated_knowledge": list(self._activation_log),
         }
@@ -1199,19 +1245,32 @@ class SrcAgentLoop:
         fetch_result = _fetch_for_analysis(
             target_url, self.config.scope,
             fetcher=self.config.fetcher,
+            budget=self.config.request_budget,
         )
 
         if fetch_result["error"]:
+            error = fetch_result["error"]
+            if _is_terminal_refusal(error):
+                # 治理拒绝重试多少次都是同一个结果 —— URL 不在范围里、方法没声明、
+                # 请求形状过不了闸门、额度用完。以前它和网络抖动走同一条路,一个注定
+                # 失败的候选被重新规划到 3 次,白烧 LLM 调用和圈数。
+                self.blackboard.fail(
+                    claimed_intent_id, self._worker_id, f"refused:{error[:120]}",
+                    max_attempts=1,
+                )
+                self._timeline("refused", claimed_intent_id, error[:120])
+                return ExploreResult(claimed_intent_id, "dead_end",
+                                     dead_end_reason=f"refused:{error}")
             # Transient network failure → requeue with retry, don't burn the intent.
-            self._timeline("retry", claimed_intent_id, f"fetch_error: {fetch_result['error'][:120]}")
+            self._timeline("retry", claimed_intent_id, f"fetch_error: {error[:120]}")
             self.blackboard.fail(
                 claimed_intent_id, self._worker_id,
-                f"fetch_error:{fetch_result['error'][:120]}",
+                f"fetch_error:{error[:120]}",
                 backoff_seconds=RETRY_BACKOFF_SECONDS,
             )
             return ExploreResult(
                 claimed_intent_id, "error",
-                dead_end_reason=fetch_result["error"],
+                dead_end_reason=error,
             )
 
         if fetch_result["status"] == 0:
@@ -1306,6 +1365,7 @@ class SrcAgentLoop:
                     action_url, self.config.scope,
                     method=method, body=action_body, content_type=content_type,
                     fetcher=self.config.fetcher, requester=self.config.requester,
+                    budget=self.config.request_budget,
                 )
                 # 被拦下来的尝试同样要审计:否则"模型试过什么"没有任何记录。
                 self._record_http_action(action_url, action_body, content_type, fr, reason)
@@ -1447,8 +1507,14 @@ def run_src_agent(
     enable_dependencies: bool = True,
     skill_pack: str = "pentest",
     knowledge_seed: Sequence[str] = (),
+    request_budget: Optional[RequestBudget] = None,
 ) -> Dict[str, Any]:
-    """Run the SRC agent loop and return a summary."""
+    """Run the SRC agent loop and return a summary.
+
+    ``request_budget`` defaults to a fresh :class:`RequestBudget` — every run is capped
+    unless a caller deliberately hands in its own (the Console hands in the one that
+    belongs to the job, so fan-out and the run share a single count).
+    """
     config = AgentConfig(
         blackboard_path=Path(blackboard_path),
         scope=scope,
@@ -1470,6 +1536,7 @@ def run_src_agent(
         enable_dependencies=enable_dependencies,
         skill_pack=skill_pack,
         knowledge_seed=tuple(knowledge_seed),
+        request_budget=request_budget or RequestBudget(),
     )
     agent = SrcAgentLoop(config)
     return agent.run()

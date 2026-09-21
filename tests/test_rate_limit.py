@@ -23,7 +23,9 @@ sys.path.insert(0, str(_ROOT / "core"))
 from agents.surface_discovery import SurfaceScope, discover_surface  # noqa: E402
 from console import jobs as console_jobs  # noqa: E402
 from core.rate_limit import (  # noqa: E402
-    TokenBucket, bucket_key, configure_persistence, limiter_for, reset_limiters,
+    HARD_MAX_REQUESTS_PER_RUN, MAX_REQUESTS_PER_RUN, REQUESTS_ENV, RequestBudget,
+    TokenBucket, bucket_key, configure_persistence, configured_max_requests, limiter_for,
+    reset_limiters,
 )
 
 DELAY = 0.05  # 20 req/s — small enough to keep the suite fast, big enough to time
@@ -331,6 +333,64 @@ class CrossProcessBudgetTests(unittest.TestCase):
         assert limiter is not None
         limiter.acquire("https://a.example.com/")
         self.assertEqual([], self._files())
+
+
+class RequestBudgetTests(unittest.TestCase):
+    """速率盖住"多快",这个盖住"多少" —— 平台红线要求"最小化"。
+
+    在这之前单目标只受速率约束:20 圈 × (3 次探索 + 3 个动作 × 2 轮) ≈ 420 个请求,
+    没有任何计数器。``JobContext.spend_request`` 存在但零调用者。
+    """
+
+    def test_a_fresh_budget_hands_out_exactly_its_limit(self):
+        budget = RequestBudget(3)
+        self.assertEqual([True, True, True, False, False],
+                         [budget.spend() for _ in range(5)])
+        self.assertEqual(3, budget.used)
+        self.assertEqual(0, budget.remaining)
+        self.assertTrue(budget.exhausted)
+
+    def test_the_default_is_the_documented_number(self):
+        budget = RequestBudget()
+        self.assertEqual(MAX_REQUESTS_PER_RUN, budget.limit)
+        self.assertEqual(MAX_REQUESTS_PER_RUN, configured_max_requests())
+
+    def test_the_env_override_is_clamped_to_the_hard_max(self):
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {REQUESTS_ENV: "99999"}):
+            self.assertEqual(HARD_MAX_REQUESTS_PER_RUN, configured_max_requests())
+        with patch.dict(os.environ, {REQUESTS_ENV: "7"}):
+            self.assertEqual(7, configured_max_requests())
+
+    def test_garbage_does_not_mean_unlimited(self):
+        import os
+        from unittest.mock import patch
+
+        for bad in ("", "  ", "lots", "-5", "0"):
+            with self.subTest(value=bad), patch.dict(os.environ, {REQUESTS_ENV: bad}):
+                self.assertEqual(MAX_REQUESTS_PER_RUN, configured_max_requests())
+
+    def test_two_threads_cannot_spend_the_same_token_twice(self):
+        budget = RequestBudget(50)
+        granted = []
+        lock = threading.Lock()
+
+        def worker():
+            local = []
+            for _ in range(20):
+                local.append(budget.spend())
+            with lock:
+                granted.extend(local)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(50, sum(1 for item in granted if item))
+        self.assertEqual(50, budget.used)
 
 
 if __name__ == "__main__":

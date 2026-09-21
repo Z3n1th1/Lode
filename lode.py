@@ -47,7 +47,8 @@ def _prefer(args: argparse.Namespace, attr: str, env_name: str, default: str = "
     return os.environ.get(env_name, "").strip() or default
 
 
-def _run_agent(blackboard: str, scope_path: str, args: argparse.Namespace) -> dict:
+def _run_agent(blackboard: str, scope_path: str, args: argparse.Namespace,
+               budget: object = None) -> dict:
     from agents.src_agent import run_src_agent
 
     scope = _load_scope(scope_path)
@@ -56,6 +57,7 @@ def _run_agent(blackboard: str, scope_path: str, args: argparse.Namespace) -> di
         max_cycles=args.max_cycles,
         reasoner_prefer=_prefer(args, "reasoner_prefer", "SRC_REASONER_PREFER", "deepseek"),
         explorer_prefer=_prefer(args, "explorer_prefer", "SRC_EXPLORER_PREFER"),
+        request_budget=budget,
     )
 
 
@@ -152,7 +154,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_agent(args: argparse.Namespace) -> int:
     """Run the LLM agent loop on an existing blackboard."""
-    summary = _run_agent(args.blackboard, args.scope, args)
+    from core.rate_limit import RequestBudget
+
+    summary = _run_agent(args.blackboard, args.scope, args,
+                         budget=RequestBudget(getattr(args, "max_requests", 0) or None))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
@@ -160,14 +165,17 @@ def cmd_agent(args: argparse.Namespace) -> int:
 def cmd_auto(args: argparse.Namespace) -> int:
     """Full pipeline: scan → autopilot → LLM agent."""
     from agents.src_autopilot import SrcAutopilot
+    from core.rate_limit import RequestBudget
 
     scope = _load_scope(args.scope)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 一份额度贯穿整条流水线:爬虫和 agent 花的是同一笔预算,否则只盖住一半。
+    budget = RequestBudget(getattr(args, "max_requests", 0) or None)
 
     autopilot = SrcAutopilot(
         scope, out_dir / "autopilot-state.json", out_dir,
-        max_rounds=3, max_candidates=200,
+        max_rounds=3, max_candidates=200, request_budget=budget,
     )
     # ``run_round`` has always taken a sequence — only the entry point was
     # single-target. Batch is now expressible instead of shell-looped outside.
@@ -177,7 +185,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     bb_path = out_dir / "src-blackboard.json"
     print(f"[2/2] LLM agent analysis (max {args.max_cycles} cycles) ...", file=sys.stderr)
-    summary = _run_agent(str(bb_path), args.scope, args)
+    summary = _run_agent(str(bb_path), args.scope, args, budget=budget)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
@@ -369,6 +377,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Provider substring for the Reasoner (default: SRC_REASONER_PREFER env)")
     a.add_argument("--explorer-prefer", default=None,
                    help="Provider substring for the Explorer (default: SRC_EXPLORER_PREFER env)")
+    a.add_argument("--max-requests", type=int, default=0,
+                   help="这一轮最多发几个请求(默认 60,硬顶 120;0 = 用默认)")
     a.set_defaults(func=cmd_agent)
 
     au = sub.add_parser("auto", help="Full pipeline: scan → agent")
@@ -376,6 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     au.add_argument("--scope", required=True)
     au.add_argument("--out-dir", default="./out")
     au.add_argument("--max-cycles", type=int, default=20)
+    au.add_argument("--max-requests", type=int, default=0,
+                    help="整条流水线最多发几个请求(默认 60,硬顶 120;0 = 用默认)")
     au.add_argument("--reasoner-prefer", default=None)
     au.add_argument("--explorer-prefer", default=None)
     au.add_argument("--targets-file", type=Path,

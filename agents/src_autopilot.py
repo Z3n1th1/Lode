@@ -236,6 +236,7 @@ class SrcAutopilot:
         blackboard_path: Optional[str | Path] = None,
         discover_fn: Optional[Callable[..., SurfaceResult]] = None,
         now_fn: Optional[Callable[[], float]] = None,
+        request_budget: Any = None,
     ) -> None:
         scope.require_authorization()
         if not 1 <= int(max_rounds) <= MAX_ROUNDS:
@@ -256,6 +257,8 @@ class SrcAutopilot:
         self.max_no_new_rounds = min(int(max_no_new_rounds), int(max_rounds))
         self.max_scripts = int(max_scripts)
         self.discover_fn = discover_fn
+        # 爬虫的请求同样记在这一轮的额度上(见 core.rate_limit.RequestBudget)。
+        self.request_budget = request_budget
         self._now = now_fn or time.time
         self._lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         blackboard_file = Path(blackboard_path or self.state_path.with_name("src-blackboard.json"))
@@ -415,7 +418,8 @@ class SrcAutopilot:
         discover = self.discover_fn or discover_surface
         payloads: List[Mapping[str, Any]] = []
         for target in targets:
-            result = discover(self.scope, target, max_scripts=self.max_scripts)
+            result = discover(self.scope, target, max_scripts=self.max_scripts,
+                              budget=self.request_budget)
             payload = surface_to_dict(result) if isinstance(result, SurfaceResult) else result
             if not isinstance(payload, Mapping):
                 raise RuntimeError("src_autopilot_discovery_result_invalid")

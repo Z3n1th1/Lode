@@ -544,6 +544,7 @@ def discover_surface(
     *,
     max_scripts: int = 40,
     fetcher: Callable[..., tuple[int, str, dict[str, str]]] | None = None,
+    budget: Any = None,
 ) -> SurfaceResult:
     scope.require_authorization()
     target = target.strip()
@@ -572,6 +573,11 @@ def discover_surface(
         read_reason = _readonly_url_reason(url)
         if read_reason:
             result.errors.append(f"blocked:{url}:{read_reason}")
+            return 0, "", {}
+        # 爬虫是 GET 流量的最大来源(SEED_PATHS 加上 max_scripts 个脚本各一跳),所以它
+        # 也要吃同一份额度 —— 只让 agent 侧计数等于把大头漏掉了。被拦掉的请求不计。
+        if budget is not None and not budget.spend():
+            result.errors.append(f"blocked:{url}:request_budget_exhausted")
             return 0, "", {}
         if limiter is not None:
             limiter.acquire(url)

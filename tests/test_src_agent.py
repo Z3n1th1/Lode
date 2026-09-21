@@ -1329,5 +1329,99 @@ class TestLlmBudget(unittest.TestCase):
         self.assertIn(mod.LLM_MAX_TOKENS_ENV, reason, "要给出可操作的那一步")
 
 
+class TestRequestBudget(unittest.TestCase):
+    """一轮能发多少请求。红线要求"最小化",而在这之前没有任何计数器。"""
+
+    def _reasoner(self, intent_id):
+        def complete(system, user, **kwargs):
+            if "Reasoner" in system:
+                return json.dumps({
+                    "reasoning": "t", "should_stop": False,
+                    "selected_intents": [{"intent_id": intent_id,
+                                          "hypothesis": "h", "check_description": "c"}],
+                })
+            return json.dumps({"analysis": "x", "findings": [],
+                               "conclusion": "dead_end", "dead_end_reason": "nothing"})
+        return complete
+
+    def test_the_budget_caps_the_requests_that_actually_go_out(self):
+        from core.rate_limit import RequestBudget
+
+        sent: List[str] = []
+
+        def fetcher(url, **kwargs):
+            sent.append(url)
+            return 200, "{}", {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 4)
+            ids = [row["intent_id"] for row in bb.snapshot()["intents"]]
+
+            def complete(system, user, **kwargs):
+                if "Reasoner" in system:
+                    return json.dumps({
+                        "reasoning": "t", "should_stop": False,
+                        "selected_intents": [{"intent_id": item, "hypothesis": "h",
+                                              "check_description": "c"} for item in ids],
+                    })
+                return json.dumps({"analysis": "x", "findings": [],
+                                   "conclusion": "dead_end", "dead_end_reason": "nothing"})
+
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=6,
+                                    request_budget=RequestBudget(2),
+                                    fetcher=fetcher, llm_complete_fn=complete,
+                                    worker_id="test-w")
+
+        self.assertEqual(2, len(sent), "额度是 2 就是只能出去 2 个请求")
+        self.assertEqual(2, summary["requests_used"])
+        self.assertEqual(2, summary["request_budget"])
+        self.assertEqual("request_budget_exhausted", summary["stop_reason"])
+
+    def test_a_run_without_a_budget_still_gets_one(self):
+        """缺省也要有上限 —— 红线不该只对"特意传了预算"的调用方生效。"""
+        from core.rate_limit import MAX_REQUESTS_PER_RUN
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            iid = bb.snapshot()["intents"][0]["intent_id"]
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=1,
+                                    fetcher=lambda url, **kw: (200, "{}", {}),
+                                    llm_complete_fn=self._reasoner(iid), worker_id="test-w")
+
+        self.assertEqual(MAX_REQUESTS_PER_RUN, summary["request_budget"])
+        self.assertGreater(summary["requests_used"], 0)
+
+    def test_a_governance_refusal_is_terminal_on_the_first_attempt(self):
+        """重试还是同一个结果,所以不该被重排队 —— 那等于白烧 LLM 调用和圈数。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            bb.sync_candidates([{
+                "candidate_id": "SC-1", "priority": 90,
+                "url": "https://example.com/api/deleteUser",
+            }], run_id="SA-1")
+            iid = bb.snapshot()["intents"][0]["intent_id"]
+            sent: List[str] = []
+
+            def fetcher(url, **kwargs):
+                sent.append(url)
+                return 200, "{}", {}
+
+            run_src_agent(bb_path, _make_scope(), max_cycles=4,
+                          fetcher=fetcher, llm_complete_fn=self._reasoner(iid),
+                          worker_id="test-w")
+            intent = next(row for row in bb.snapshot()["intents"] if row["intent_id"] == iid)
+            timeline = [row.get("kind") for row in bb.snapshot().get("timeline", [])]
+
+        self.assertEqual([], sent, "改状态形状的 URL 一个请求都不该发出去")
+        self.assertEqual("dead_end", intent["status"])
+        self.assertLessEqual(intent["attempts"], 1, "治理拒绝最多算一次尝试")
+        self.assertIn("refused", timeline)
+
+
 if __name__ == "__main__":
     unittest.main()

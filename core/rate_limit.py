@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -56,7 +57,8 @@ except ImportError:  # pragma: no cover - flat sys.path (tests insert core/ dire
     from file_lock import AdvisoryFileLock  # type: ignore
 
 __all__ = ["TokenBucket", "FileTokenBucket", "ScopeLimiter", "limiter_for",
-           "reset_limiters", "configure_persistence", "bucket_key"]
+           "reset_limiters", "configure_persistence", "bucket_key",
+           "RequestBudget", "configured_max_requests"]
 
 
 class TokenBucket:
@@ -266,3 +268,76 @@ def reset_limiters() -> None:
     """Drop every bucket.  Tests only — pacing state must not leak between runs."""
     with _LIMITERS_GUARD:
         _LIMITERS.clear()
+
+
+# ---------------------------------------------------------------------------
+# How many requests a run may make, in total
+# ---------------------------------------------------------------------------
+
+#: 一轮最多发多少个请求。这不是性能旋钮,是红线要求的边:平台规则写的是
+#: "禁止使用扫描器或自动化工具批量探测……禁止产生大量数据流量",而速率桶管的是**多快**,
+#: 管不了**多少** —— 在加这个之前,单目标只受速率约束,理论上是 20 圈 × (3 次探索 +
+#: 3 个动作 × 2 轮) ≈ 420 个请求。60 是那个数的约七分之一。
+MAX_REQUESTS_PER_RUN = 60
+HARD_MAX_REQUESTS_PER_RUN = 120
+REQUESTS_ENV = "LODE_MAX_REQUESTS_PER_RUN"
+
+
+def configured_max_requests() -> int:
+    """一轮的请求上限,可被 ``LODE_MAX_REQUESTS_PER_RUN`` 覆盖并夹在硬顶内。
+
+    非数字、``0`` 和负数一律回落到缺省:一个写坏的配置不该变成"没有上限",也不该变成
+    "上限 1"(那会让每一轮都一无所获却看不出原因)。``0 = 用默认`` 也是 CLI 的说法。
+    """
+    raw = os.environ.get(REQUESTS_ENV, "").strip()
+    if not raw:
+        return MAX_REQUESTS_PER_RUN
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_REQUESTS_PER_RUN
+    if value <= 0:
+        return MAX_REQUESTS_PER_RUN
+    return min(value, HARD_MAX_REQUESTS_PER_RUN)
+
+
+class RequestBudget:
+    """一轮的请求计数。线程安全。
+
+    和速率桶是两件互补的事,别合并:
+
+    * :func:`limiter_for` 的桶盖住**多快** —— 它是跨进程共享的,按 engagement 算,
+      所以 N 个 worker 合计不会超过文档写的那条 req/s。
+    * 这个类盖住**多少** —— 每次运行一份,不跨进程。
+
+    计数点放在**准入之后、限速之前**:治理拒掉的请求不该消耗操作员的额度,而额度用完
+    的运行应该立刻返回,不该先睡在一个令牌上再发现没得发了。
+    """
+
+    def __init__(self, limit: Optional[int] = None) -> None:
+        self.limit = int(limit) if limit else configured_max_requests()
+        self._used = 0
+        self._lock = threading.Lock()
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.limit - self._used)
+
+    @property
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._used >= self.limit
+
+    def spend(self) -> bool:
+        """Take one request's worth.  ``False`` once the run is out."""
+        with self._lock:
+            if self._used >= self.limit:
+                return False
+            self._used += 1
+            return True

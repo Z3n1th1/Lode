@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 from core import job_registry as jr
+from core.rate_limit import RequestBudget
 
 # kind -> handler(job, ctx) -> result dict (may include "summary_ref", "progress")
 Handler = Callable[[jr.JobRecord, "JobContext"], Optional[Dict[str, Any]]]
@@ -25,6 +26,27 @@ Handler = Callable[[jr.JobRecord, "JobContext"], Optional[Dict[str, Any]]]
 JOB_WORKERS_ENV = "LODE_JOB_WORKERS"
 DEFAULT_JOB_WORKERS = 8
 MAX_JOB_WORKERS = 64
+#: Job payload key that overrides the per-run request cap for one job.
+MAX_REQUESTS_KEY = "max_requests"
+
+
+def _job_request_limit(job: jr.JobRecord) -> Optional[int]:
+    """The payload's ``max_requests`` if it is a usable number, else ``None``.
+
+    ``None`` lets :class:`RequestBudget` fall back to the configured default, which is
+    also what a garbage value gets — a mistyped cap must not mean "no cap".
+    """
+    payload = getattr(job, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get(MAX_REQUESTS_KEY)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def configured_job_workers() -> int:
@@ -56,7 +78,10 @@ class JobContext:
         self._runner = runner
         self._job = job
         self._stop = threading.Event()
-        self.requests = 0
+        # 这一轮还能发多少请求。以前只有一个 ``self.requests += 1`` 自增,零调用者 ——
+        # 等于没有上限,单目标的请求数只受速率约束。平台红线要求"最小化",所以计数要
+        # 真的挡住东西(见 core.rate_limit.RequestBudget)。
+        self.budget = RequestBudget(_job_request_limit(job))
 
     @property
     def job(self) -> jr.JobRecord:
@@ -83,8 +108,9 @@ class JobContext:
     def cancel(self) -> None:
         self._stop.set()
 
-    def spend_request(self) -> None:
-        self.requests += 1
+    def spend_request(self) -> bool:
+        """One request against this job's budget.  ``False`` once it is spent."""
+        return self.budget.spend()
 
 
 class JobRunner:
@@ -197,4 +223,4 @@ class JobRunner:
                     pass
 
 
-__all__ = ["JobRunner", "JobContext", "Handler"]
+__all__ = ["JobRunner", "JobContext", "Handler", "MAX_REQUESTS_KEY"]

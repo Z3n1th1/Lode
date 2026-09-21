@@ -109,7 +109,8 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
 
     ctx.emit("subtask_progress", phase="autopilot")
     autopilot = SrcAutopilot(scope, out_dir / "autopilot-state.json", out_dir,
-                             max_rounds=3, max_candidates=100, blackboard_path=bb_path)
+                             max_rounds=3, max_candidates=100, blackboard_path=bb_path,
+                             request_budget=ctx.budget)
     autopilot.run_round([target_url])
     if ctx.stopped():
         return {"progress": {"phase": "stopped"}}
@@ -126,11 +127,14 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
         max_explore_per_cycle=int(job.payload.get("max_explore") or 3),
         reasoner_prefer=reasoner, explorer_prefer=explorer,
         worker_id=f"console-{run_id}",
+        request_budget=ctx.budget,
     )
     findings = 0
     if isinstance(summary, dict):
         findings = int(summary.get("findings") or summary.get("total_findings") or 0)
-    ctx.emit("subtask_progress", phase="done", findings=findings)
+    ctx.emit("subtask_progress", phase="done", findings=findings,
+             requests_used=(summary or {}).get("requests_used", 0),
+             request_budget=(summary or {}).get("request_budget", 0))
     return {"summary_ref": str(bb_path), "progress": {"phase": "done", "findings": findings}}
 
 
