@@ -241,8 +241,15 @@ cd console; npm run typecheck; npm run test; npm run build
      ForgeRock 本就如此设计；漏的是命名与地图，不是入口。另外 12 个真值钱的 config 对象
      （`repo.jdbc`、`authentication`、`provisioner.*`、`script`、`secrets`…）**全是 403**，
      敏感面是关着的。所以别再拿这几条当战果。
-   - `login-qa.nba.com` 是另一台有真实 surface 的主机（也是 22 paths），还没跑。
-     45 台里只有这两台出 surface，其余 33 台 paths+scripts 全为 0。
+   - `login-qa.nba.com` 是另一台有真实 surface 的主机（也是 22 paths），**2026-09-21 已不可打**：
+     DNS 正常解析到 Akamai 边缘（`2.19.193.153`、`login-qa.nba.com.edgekey.net`），但 TLS 握手
+     被中断（`UNEXPECTED_EOF_WHILE_READING`）。`lode.py scan` 报 `status: 0` /
+     `base_unreachable`——判定正确，不是工具 bug。所以 9/19 那张表里的"可达/不可达"是快照，
+     会漂：再跑之前先确认目标还在。
+   - 45 台里只有 login-dev / login-qa 出 surface，其余 33 台 paths+scripts 全为 0，
+     另外 10 台是 200-但跳 SSO 登录墙。**未认证的 GET 猎手在这个程序上基本是盲的**：
+     要么没有面，要么面在后面。想让这台继续出东西，缺的能力正好是文档「明确不做」的
+     header/凭据通道——这是个要你拍板的取舍，不是再调调参就能绕过去的。
 
    另外：**授权文档入口链已经在真实程序上跑过了**（2026-09-21，`run-console.ps1` + 真 HTTP，
    目标是 IANA 保留域名 example.com/.org/.net，只读 GET）。三条入口各验了一遍：
