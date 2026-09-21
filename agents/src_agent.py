@@ -243,8 +243,15 @@ EXPLORER_SYSTEM = """\
   "read_knowledge": [],
   "conclusion": "confirmed|dead_end|needs_human|inconclusive",
   "dead_end_reason": "为什么是 dead end",
-  "suggested_next": "基于发现建议下一步"
+  "suggested_next": "基于发现建议下一步",
+  "discovered_routes": ["/openidm/config/managed", "https://host/api/v2/orders"]
 }\
+
+`discovered_routes` 是**这次响应里露出了、但候选清单里没有**的路由:Location 头、错误体里的
+路径、`Allow:` 头、配置/JS 内容里出现的接口、以及 403/401 明确说明"这个端点存在"的路径。
+写相对路径或完整 URL 都行,会按这台主机的 base 解析;scope 外的会被丢掉。
+不要往里写你打算构造的路径(那是假设,不是看到的),也不要写静态资源。
+每条都会变成一条**待验候选**,所以只写你真在响应里看见的。
 """
 
 EXPLORER_USER_TEMPLATE = """\
@@ -490,6 +497,29 @@ def _is_terminal_refusal(error: str) -> bool:
     return any(text.startswith(prefix) for prefix in TERMINAL_REFUSAL_PREFIXES)
 
 
+def _routes_from(parsed: Optional[Mapping[str, Any]], base_url: str) -> List[Tuple[str, str]]:
+    """``(route, base_url)`` pairs from one Explorer reply, capped.
+
+    A cap rather than trust: the model may list anything, and every accepted route becomes
+    a request in a later cycle. ``base_url`` rides along because a relative route only means
+    something against the host whose response produced it.
+    """
+    if not isinstance(parsed, Mapping):
+        return []
+    raw: Any = parsed.get("discovered_routes")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    routes: List[Tuple[str, str]] = []
+    for item in raw[:MAX_ROUTE_PROPOSALS_PER_CYCLE]:
+        value = str(item or "").strip()
+        if not value or len(value) > 300:
+            continue
+        routes.append((value, base_url))
+    return routes
+
+
 def _sha12(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8", errors="replace")).hexdigest()[:12]
 
@@ -630,6 +660,11 @@ class ExploreResult:
     findings: List[Dict[str, Any]] = field(default_factory=list)
     dead_end_reason: str = ""
     raw_llm_response: str = ""
+    #: ``(route, base_url)`` pairs the Explorer reported seeing in a response. Became a
+    #: field only after the loop could *do* something with it — before that the model's
+    #: "I can see another endpoint" went into ``suggested_next``, was read for knowledge
+    #: keywords and dropped.
+    discovered_routes: List[Tuple[str, str]] = field(default_factory=list)
 
 
 SUMMARY_SCHEMA = "SrcAgentRunSummary/v1"
@@ -638,6 +673,9 @@ MAX_EXPLORE_PER_CYCLE = 5
 MAX_PARALLEL_EXPLORE = 5
 MAX_HTTP_ACTIONS = 3
 BODY_LIMIT = 15_000
+#: 一圈最多把多少条 Explorer 报的路由变成新候选。模型一次可以列很多,而每一条被探索
+#: 都是一次真实请求 —— 顶部剪掉,不靠模型自觉。
+MAX_ROUTE_PROPOSALS_PER_CYCLE = 12
 # 非读动作的完整审计留在 run 目录里,黑板/时间线只留指纹 —— 时间线的去敏只有
 # core/src_blackboard.py 那个弱正则,不该拿它当"body 不会外泄"的保证。
 HTTP_ACTION_LOG = "http-actions.jsonl"
@@ -839,6 +877,7 @@ class SrcAgentLoop:
         stop_reason = ""
         errors: List[str] = []
         stop_blocks = 0
+        total_reflowed = 0
 
         for cycle in range(self.config.max_cycles):
             cycles_run = cycle + 1
@@ -916,6 +955,9 @@ class SrcAgentLoop:
             # 出网仍然只有一个桶 —— 并发的是"思考",不是"请求速率"。
             planned = list(self._plan_exploration(selected, snapshot))
             results = self._explore_batch(planned, snapshot)
+            # Explorer 在响应里看见的路由,攒到这一轮末尾一起回灌 —— 一轮一次写,而不是
+            # 每个 intent 写一次黑板。
+            reported_routes: List[Tuple[str, str]] = []
             for (intent_id, _hypothesis, _check), result in zip(planned, results):
                 if result.status == "deferred":
                     # 依赖未就绪或已被别的 worker 领走 —— 不是错误,下轮再看。
@@ -929,10 +971,13 @@ class SrcAgentLoop:
                 # 2026-09-21 实测:黑板上有 3 条 high 置信 hint(版本泄露 / 未授权配置
                 # 读取 / uiconfig 泄露内部角色),摘要却是 total_findings: 0。
                 total_findings += len(result.findings)
+                reported_routes.extend(result.discovered_routes)
                 if result.status == "dead_end":
                     total_dead_ends += 1
                 elif result.status == "error":
                     errors.append(f"{intent_id}:{result.dead_end_reason[:100]}")
+            # 清单不再在第 1 圈冻结:这一轮看到的路由下一轮就有得选。
+            total_reflowed += self._reflow_routes(reported_routes)
 
         if not stop_reason:
             stop_reason = "max_cycles"
@@ -950,9 +995,63 @@ class SrcAgentLoop:
             # 只靠速率桶的话,"多快"有据可查,"多少"是空的。
             "requests_used": int(self.config.request_budget.used) if self.config.request_budget else 0,
             "request_budget": int(self.config.request_budget.limit) if self.config.request_budget else 0,
+            # 有多少 intent 是 Explorer 在响应里看见、再回灌进来的 —— 这就是"清单有没有
+            # 在第 1 圈之后长过"的直接读数。
+            "intents_from_routes": total_reflowed,
             # 这次运行激活了哪几本打法、谁触发的 —— 复盘时才说得清"为什么它这轮打得不一样"。
             "activated_knowledge": list(self._activation_log),
         }
+
+    def _reflow_routes(self, routes: Sequence[Tuple[str, str]]) -> int:
+        """Turn routes the Explorer *saw* into candidates for a later cycle.
+
+        The inventory used to be frozen at cycle 1: ``sync_candidates`` was fed once from
+        surface discovery and never again, so a response that revealed an endpoint could
+        only become a hint. The loop had the hunch and no way to act on it — measured on
+        login-dev.nba.com, where the Explorer worked out that ``/admin`` and
+        ``/openidm/console`` reach the origin while ``/console`` is swallowed by the edge,
+        wrote it down, and then stopped.
+
+        One entry stays one entry. The conversion lives in
+        :func:`agents.src_autopilot.candidate_from_route` — the same id, redaction and
+        scoring path an extracted candidate takes — and intent creation stays in
+        ``sync_candidates``, which is idempotent and additive. So a route discovery already
+        found de-duplicates into the same intent (and bumps its priority if the model
+        argued for it) instead of racing, and nothing terminal is resurrected.
+        """
+        if not routes:
+            return 0
+        from agents.src_autopilot import candidate_from_route
+
+        candidates: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        dropped = 0
+        for value, base_url in routes[:MAX_ROUTE_PROPOSALS_PER_CYCLE]:
+            candidate = candidate_from_route(value, self.config.scope, base_url=base_url)
+            if candidate is None:
+                dropped += 1
+                continue
+            if candidate["candidate_id"] in seen:
+                continue
+            seen.add(candidate["candidate_id"])
+            candidates.append(candidate)
+        if dropped:
+            self._timeline("route_dropped", "",
+                           f"{dropped} 条报的路由不在 scope 内或不可用")
+        if not candidates:
+            return 0
+        try:
+            summary = self.blackboard.sync_candidates(
+                candidates, run_id=f"reflow-{self._worker_id}")
+        except Exception as exc:  # noqa: BLE001 - 回流失败不该打断这一轮
+            self._timeline("route_reflow_failed", "", f"{type(exc).__name__}: {str(exc)[:120]}")
+            return 0
+        added = int(summary.get("intents_added") or 0)
+        if added:
+            self._timeline("route_reflow", "",
+                           f"Explorer 报的路由新增 {added} 个 intent:" +
+                           ",".join(item["url"] for item in candidates[:3]))
+        return added
 
     def _timeline(self, kind: str, intent_id: str, summary: str) -> None:
         """Append one observation to the blackboard timeline; never fatal."""
@@ -1439,7 +1538,11 @@ class SrcAgentLoop:
 
         # 这一轮看到的东西决定后面几轮带哪本打法上路 —— 激活的是**下一轮**的 prompt。
         self._activate_from_explorer(parsed, body_text, hypothesis or "")
-        return self._process_explorer_result(claimed_intent_id, parsed, raw)
+        result = self._process_explorer_result(claimed_intent_id, parsed, raw)
+        # 报告"响应里还露出了别的端点"的单独一条路径。以前这种信息只进 suggested_next,
+        # 被读成知识关键词之后就没了 —— 模型有直觉,没有手。
+        result.discovered_routes = _routes_from(parsed, target_url)
+        return result
 
     def _process_explorer_result(
         self,

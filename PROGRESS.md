@@ -208,7 +208,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-21 实测）：
 
-- Python **729 passed, 7 skipped**（`py310`，约 35s）
+- Python **751 passed, 7 skipped**（`py310`，约 35s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -293,7 +293,7 @@ cd console; npm run typecheck; npm run test; npm run build
    不存在的模块**（历史遗留）。飞书任务路由一旦走到那条分支就会 ImportError，走不到就没事。
 5. X/Twitter 采集默认关闭，需要官方 API token。
 6. `npm audit` 未复核（国内镜像 404、官方源 `ECONNRESET`）。
-7. ~~`deepseek-flash` 默认开启思考模式……~~ **已修（`9f9fa11`）。** 这条曾经是整个 hunt 的
+7. ~~`deepseek-flash` 默认开启思考模式……~~ **已修（`4ecd92f`）。** 这条曾经是整个 hunt 的
    唯一死因，不是"值得评估"：`agents/src_agent.py` 的 `_default_llm_complete` 硬编码
    `max_tokens=2048`，实测同一份真实 Reasoner 提示词（system 4479 / user 10506 字符）
 
@@ -311,7 +311,25 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 近期历史（新在前）
 
-- `34abeff`…`48a0287`（2026-09-21）**探测档:写操作从"警告"变成"硬拒"**。起因是平台红线
+- 本次（2026-09-21）**候选质量:静态提取 + 动态回流**。两件配对的修复:
+
+  - **base-join**:bundle 通常装的是它自己声明的 API base 的**碎片**,不是 URL。JS 里
+    `VUE_APP_IDM_URL:"/openidm"`,`var h="/config/ui/themerealm"`,而拼接只以字面量出现过
+    一次。提取器只拿到碎片,于是三个 OPTIONS 探针全打在 `/config/ui/themerealm` 的 404 上
+    (真机实测)。现在带 base 的形态也会生成,来源记 `base-join`、评分压过 `js`。
+    判据自带验证:声明的 base 只有在同一份文本里真出现过 `base + "/"` 才算数,所以
+    `avatar_url:"/img"` 不会凭空造出一族路径。
+  - **响应驱动的路由回流**:Explorer 在响应里看见、清单里没有的路由,可以写进
+    `discovered_routes`,循环每轮末尾回灌成新的待验 intent。**在这之前清单在第 1 圈就冻结**:
+    `sync_candidates` 只被喂过一次,响应能关闭 intent、永远不能打开一个。真机实证:模型
+    自己推出「`/admin` 与 `/openidm/console` 到了源站、`/console` 被边缘吞掉」,写进 hint
+    然后就停了 —— **有直觉,没有手**。造 intent 仍然只有 `sync_candidates` 一个入口,
+    转换共用同一个 id/脱敏/评分路径,所以两种来源去重而不是打架;scope 外的丢掉并记
+    `route_dropped`,主机轴不变。摘要带 `intents_from_routes`。
+
+  **两件缺一件都会成为瓶颈**:base-join 管「第 1 圈要看得对」,回流管「第 2 圈开始要能自己
+  长出新目标」。只做前者,响应里露出的新路由照样进不来。
+- `62f9b02`…`27bea7d`（2026-09-21）**探测档:写操作从"警告"变成"硬拒"**。起因是平台红线
   （ByteSRC《测试红线10条》5:禁止任何增删改数据/配置的写操作;倡议 3:高风险操作必须经人工
   判断）。原实现是反的 —— 文档声明了写方法之后,改状态形状的 URL 就从硬拦降级成警告,
   于是 `GET /logout`、`GET /api/deleteUser` 可以发出去。现在:
@@ -337,7 +355,7 @@ cd console; npm run typecheck; npm run test; npm run build
     `GET /users?_action=validateGoto` → `unknown_operation_selector`（`_action` 补进选择器键名
     后当场抓到；补之前它会发出去）。
   - 提示词/doctrine 不再硬写 GET-only;`lode.py doctor` 会报分类器可用性与当前额度。
-- `9f9fa11` / `2fa7c4e`（2026-09-21）**hunt 第一次真的跑起来了**。两处修复：`agents/src_agent.py`
+- `4ecd92f` / `948b8e8`（2026-09-21）**hunt 第一次真的跑起来了**。两处修复：`agents/src_agent.py`
   的 `max_tokens` 截断（上面「已知限制 7」——这是 hunt 从来没跑过第 1 圈的唯一原因），以及
   `total_findings` 漏掉 `needs_human` 分支（**置信度最高的那几条发现反而不计数**，摘要报 0）。
   另外 `core/file_lock.AdvisoryFileLock.__enter__` 写 sidecar 首字节那步没重试，在 Windows

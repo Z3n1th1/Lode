@@ -60,6 +60,9 @@ _SOURCE_WEIGHT = {
     # 没有它的时候,三个 OPTIONS 探针全打在缺前缀的 404 上。
     "base-join": 18,
     "js": 15,
+    # Explorer 在响应里看见的路由。低于 js:那是模型对响应的阅读,比从 bundle 里抠出来的
+    # 字符串弱。但它能看到提取器根本不看的 Location 头/错误体,所以还是值一条候选。
+    "explorer-route": 12,
     "html": 10,
     "robots": 8,
     "sitemap": 8,
@@ -169,6 +172,37 @@ def _template_id(url: str) -> str:
         segments.append(segment)
     template = "/".join(segments) + (f"?{parsed.query}" if parsed.query else "")
     return "ST-" + hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
+
+
+def candidate_from_route(value: Any, scope: SurfaceScope, *, base_url: str) -> Optional[Dict[str, Any]]:
+    """One candidate built from a route an Explorer reported *seeing*.
+
+    Deliberately the same id, redaction and scoring path an extracted candidate takes
+    (:func:`_canonical_url` → :func:`_candidate_id` → :func:`_score_candidate`), so the two
+    sources de-duplicate against each other instead of racing: the same URL found by the
+    crawler and mentioned by the model is one candidate, not two.
+
+    The source is ``explorer-route`` and it scores below ``js``: this is a model's reading
+    of a response, which is weaker evidence than a string lifted out of a bundle. It is
+    still worth acting on — the model can see a ``Location`` header or an error body that
+    the extractor never looks at — but it should not outrank what was extracted.
+
+    Returns ``None`` for anything out of scope or unusable; the caller counts that as
+    nothing, which is exactly what an out-of-scope extracted path gets too.
+    """
+    canonical = _canonical_url(value, scope, base_url=base_url)
+    if canonical is None:
+        return None
+    display, _reason, probe = canonical
+    priority = _score_candidate(display, ("explorer-route",))
+    return {
+        "candidate_id": _candidate_id(display),
+        "url": display,
+        "probe_url": probe,
+        "priority": priority,
+        "sources": ["explorer-route"],
+        "next_phase": _next_phase(priority),
+    }
 
 
 def _host_of(url: str) -> str:

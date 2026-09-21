@@ -16,6 +16,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "core"))
 
 from agents.src_agent import (
     SUMMARY_SCHEMA,
+    MAX_ROUTE_PROPOSALS_PER_CYCLE,
     ExploreResult,
     SrcAgentLoop,
     AgentConfig,
@@ -1432,6 +1433,130 @@ class TestRequestBudget(unittest.TestCase):
         self.assertEqual("dead_end", intent["status"])
         self.assertLessEqual(intent["attempts"], 1, "治理拒绝最多算一次尝试")
         self.assertIn("refused", timeline)
+
+
+class TestRouteReflow(unittest.TestCase):
+    """Explorer 在响应里看见的路由,要能变成下一轮的可选候选。
+
+    在这之前清单在第 1 圈就冻结了:``sync_candidates`` 只在 surface discovery 之后被喂过
+    一次,响应能**关闭**一个 intent,永远不能**打开**一个。真机实证:模型自己推出了
+    「``/admin`` 和 ``/openidm/console`` 到了源站,``/console`` 被边缘吞掉」,写进 hint,
+    然后就停在那里 —— 有直觉,没有手。
+    """
+
+    TARGET = "https://example.com/api/endpoint0"
+    ROUTE = "/openidm/config/managed"
+
+    def _reasoner_selecting_all(self, bb, routes):
+        """Reasoner 每轮选中所有 queued intent;Explorer 只在第一轮报路由。
+
+        ``routes`` 必须传进来 —— 闭包是词法的,测试方法里的局部变量在这里不可见。
+        """
+        def complete(system, user, **kwargs):
+            if "Reasoner" in system:
+                ids = [row["intent_id"] for row in bb.snapshot()["intents"]
+                       if row.get("status") == "queued"]
+                return json.dumps({
+                    "reasoning": "t", "should_stop": False,
+                    "selected_intents": [{"intent_id": item, "hypothesis": "h",
+                                          "check_description": "c"} for item in ids],
+                })
+            parsed = {"analysis": "x", "findings": [], "conclusion": "dead_end",
+                      "dead_end_reason": "nothing"}
+            if routes["round"] == 0:
+                parsed["discovered_routes"] = routes["value"]
+            routes["round"] += 1
+            return json.dumps(parsed)
+        return complete
+
+    def test_a_reported_route_becomes_an_intent_and_gets_explored(self):
+        routes = {"round": 0, "value": [self.ROUTE]}
+        sent: List[str] = []
+
+        def fetcher(url, **kwargs):
+            sent.append(url)
+            return 200, "{}", {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=3,
+                                    fetcher=fetcher,
+                                    llm_complete_fn=self._reasoner_selecting_all(bb, routes),
+                                    worker_id="test-w")
+            urls = {row["target"] for row in bb.snapshot()["intents"]}
+
+        self.assertEqual(1, summary["intents_from_routes"])
+        self.assertIn("https://example.com/openidm/config/managed", urls,
+                      "报的路由没有变成 intent —— 清单还是冻结的")
+        self.assertIn("https://example.com/openidm/config/managed", sent,
+                      "新 intent 没有被真的探索")
+
+    def test_the_same_route_twice_is_one_intent(self):
+        """同一个 URL 从不同轮/不同意图报出来,不能变成两条。"""
+        routes = {"round": 0, "value": [self.ROUTE, self.ROUTE, " " + self.ROUTE + " "]}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 2)
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                    fetcher=lambda url, **kw: (200, "{}", {}),
+                                    llm_complete_fn=self._reasoner_selecting_all(bb, routes),
+                                    worker_id="test-w")
+            intents = bb.snapshot()["intents"]
+        urls = [row["target"] for row in intents]
+        self.assertEqual(1, urls.count("https://example.com/openidm/config/managed"), urls)
+        self.assertLessEqual(summary["intents_from_routes"], 1)
+
+    def test_a_route_outside_the_scope_is_dropped_and_counted(self):
+        """模型报什么都不增加授权 —— 主机轴还是操作员签的那份。"""
+        routes = {"round": 0, "value": ["https://evil.example/config/x"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                    fetcher=lambda url, **kw: (200, "{}", {}),
+                                    llm_complete_fn=self._reasoner_selecting_all(bb, routes),
+                                    worker_id="test-w")
+            urls = {row["target"] for row in bb.snapshot()["intents"]}
+            timeline = [str(row.get("kind")) for row in bb.snapshot().get("timeline", [])]
+
+        self.assertEqual(0, summary["intents_from_routes"])
+        self.assertNotIn("https://evil.example/config/x", urls)
+        self.assertIn("route_dropped", timeline)
+
+    def test_the_per_cycle_cap_holds(self):
+        many = [f"/openidm/config/thing{i}" for i in range(40)]
+        routes = {"round": 0, "value": many}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            run_src_agent(bb_path, _make_scope(), max_cycles=1,
+                          fetcher=lambda url, **kw: (200, "{}", {}),
+                          llm_complete_fn=self._reasoner_selecting_all(bb, routes),
+                          worker_id="test-w")
+            intent_count = len(bb.snapshot()["intents"])
+        self.assertLessEqual(intent_count, 1 + MAX_ROUTE_PROPOSALS_PER_CYCLE)
+
+    def test_the_converter_is_the_same_one_candidates_use(self):
+        """同一个 URL,提取来的和报来的必须是同一条 —— 否则两套会打架。"""
+        from agents.src_autopilot import _candidate_id, candidate_from_route
+
+        scope = _make_scope()
+        bound = candidate_from_route(self.ROUTE, scope, base_url=self.TARGET)
+        self.assertIsNotNone(bound)
+        self.assertEqual("https://example.com/openidm/config/managed", bound["url"])
+        self.assertEqual(_candidate_id(bound["url"]), bound["candidate_id"])
+        self.assertEqual(["explorer-route"], bound["sources"])
+
+    def test_the_converter_refuses_an_out_of_scope_route(self):
+        from agents.src_autopilot import candidate_from_route
+
+        self.assertIsNone(candidate_from_route("https://evil.example/x", _make_scope(),
+                                               base_url=self.TARGET))
 
 
 if __name__ == "__main__":

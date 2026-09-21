@@ -11,6 +11,11 @@
 ## 当前已实现
 
 - Surface 每次抓取前重新检查 scope，并拒绝删除、更新、退出、支付、发送等明显有副作用的 URL，以及未知 operation selector。候选 API 路径不会因为被提取到就自动被访问。
+- **候选可以从响应里长出来,但主机轴不会。** Explorer 能在响应里看见新路由(见
+  `docs/src-autopilot.md`),循环会把它们回灌成新的待验 intent。这条回流不扩大授权范围:
+  每个新候选都要过 `scope.check_url`,scope 外的一律丢掉并记 `route_dropped`;主机轴仍然
+  只来自操作员签的那份文档。造 intent 仍然只有 `sync_candidates` 一个入口(幂等、只增不减),
+  所以提取来的候选和模型报的候选会去重成同一条,而不是各造一个。
 - **默认只读，能力由授权文档显式声明**。`SurfaceScope.allowed_methods`（默认 `GET`/`HEAD`，恒并集：声明什么都拿不掉这两个）与 `allow_request_body` 是唯一的能力来源；模型提示词里的能力行由同一份 scope 生成，**而且只广告闸门真会发的方法**，不是硬编码。空/缺失/非法的声明等于只读，所以这个字段出现之前写的 scope 文件行为不变。
 - **探测档：默认拒绝，只有能正面证明是读的请求才放行**。方法本身区分不了读写 —— `POST /search` 能揭示路由，`POST /logout` 和 `POST /api/items` 连 body 都不需要就能改状态。所以：
   - `DELETE` **不是合法取值**（不在 `_METHOD_VOCABULARY` 里），实发即 `destructive_method_forbidden`。

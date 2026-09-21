@@ -80,6 +80,20 @@ python src_agent.py --scope scope.json --blackboard .\out\src-blackboard.json --
 2. **Explore** —— `claim` 一个 intent，对目标做 scope 校验后的请求（默认 GET/HEAD；探测档见下），把响应消毒(剥离 cookie/auth,body 截断)后交给 LLM 分析,产出 `fact` / `dead_end` / `hint` 写回黑板。
 3. 黑板更新后进入下一轮,直到没有可挖 intent 或触达 `--max-cycles` 硬上限。
 
+**清单不是在第 1 圈冻结的。** Explorer 在响应里看见、而候选清单里没有的路由
+(`Location` 头、错误体里的路径、`Allow:` 头、403/401 说明"端点存在")可以写进
+`discovered_routes`,循环在每轮末尾把它们回灌成**新的待验 intent**,下一轮就有得选。
+在这条回流之前,这种信息只能进 `suggested_next`,被读成知识关键词之后就丢了 ——
+模型有直觉,没有办法把它变成一个请求。
+
+它是**一条入口**而不是第二条:转换走 `agents.src_autopilot.candidate_from_route`
+(和提取来的候选共用同一个 id / 脱敏 / 评分路径,所以同一个 URL 会去重成一条),
+造 intent 仍然只有 `core.src_blackboard.sync_candidates`,而它是幂等且只增不减的。
+所以主机轴仍然是操作员签的那份 —— 模型报 scope 外的路由会被丢掉并在时间线里记一条
+`route_dropped`。每圈上限 `MAX_ROUTE_PROPOSALS_PER_CYCLE` 条,不靠模型自觉。
+来源记为 `explorer-route`,评分低于 `js`:那是模型对响应的阅读,比从 bundle 里抠出来的
+字符串弱。
+
 `SrcAgentLoop` 在每一步都 fail-closed:
 
 - 初始化即调用 `scope.require_authorization()`，授权缺失直接失败；
