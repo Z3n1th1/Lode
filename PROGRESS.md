@@ -198,7 +198,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-21 实测）：
 
-- Python **681 passed, 7 skipped**（`py310`，约 34s）
+- Python **688 passed, 7 skipped**（`py310`，约 34s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，

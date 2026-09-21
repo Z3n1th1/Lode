@@ -1192,5 +1192,54 @@ class TestCapabilityInPrompt(unittest.TestCase):
         self.assertIn("{capabilities}", raw)
 
 
+class TestLlmBudget(unittest.TestCase):
+    """一次 token 上限就是整个 hunt 死掉的原因,所以这个数必须被钉住。
+
+    2026-09-21:``max_tokens=2048`` + deepseek-flash 默认开思考 → 真实 Reasoner 提示词下
+    ``content`` 返回 0 字符,``reasoner_returned_none``,``cycles_run: 1``、0 个候选被看过。
+    """
+
+    def setUp(self):
+        import agents.src_agent as mod
+
+        self.mod = mod
+        self._saved = os.environ.get(mod.LLM_MAX_TOKENS_ENV)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop(self.mod.LLM_MAX_TOKENS_ENV, None)
+        else:
+            os.environ[self.mod.LLM_MAX_TOKENS_ENV] = self._saved
+
+    def test_the_default_budget_leaves_room_for_thinking_plus_json(self):
+        os.environ.pop(self.mod.LLM_MAX_TOKENS_ENV, None)
+        self.assertEqual(self.mod.DEFAULT_LLM_MAX_TOKENS, self.mod.configured_max_tokens())
+        self.assertGreater(self.mod.configured_max_tokens(), 2048,
+                           "回到 2048 就是回到 thinking 吃光预算、content 为空")
+
+    def test_the_budget_can_be_overridden_for_another_model(self):
+        os.environ[self.mod.LLM_MAX_TOKENS_ENV] = "4096"
+        self.assertEqual(4096, self.mod.configured_max_tokens())
+
+    def test_garbage_falls_back_instead_of_disabling_the_cap(self):
+        for bad in ("", "  ", "lots", "0", "-1"):
+            os.environ[self.mod.LLM_MAX_TOKENS_ENV] = bad
+            self.assertGreaterEqual(self.mod.configured_max_tokens(), 256, f"输入 {bad!r}")
+
+    def test_an_empty_content_reply_says_why_instead_of_just_none(self):
+        """空 content 不能再是一个无声的 None —— 那正是这个 bug 藏了两天的原因。"""
+        import agents.src_agent as mod
+
+        fake = {"role": "assistant", "content": "",
+                "reasoning_content": "x" * 5000}
+        with patch("core.llm_client.complete_messages", return_value=fake):
+            self.assertIsNone(mod._default_llm_complete("s", "u"))
+
+        reason = mod.last_llm_error()
+        self.assertIn("empty content", reason)
+        self.assertIn("5000", reason, "要带上 reasoning_content 长度,否则没法判断是不是思考吃光了")
+        self.assertIn(mod.LLM_MAX_TOKENS_ENV, reason, "要给出可操作的那一步")
+
+
 if __name__ == "__main__":
     unittest.main()
