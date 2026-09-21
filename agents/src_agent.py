@@ -50,6 +50,46 @@ except Exception:
     pass
 
 
+LLM_MAX_TOKENS_ENV = "LODE_LLM_MAX_TOKENS"
+# 决策层和 Explorer 的回包都是**一整条** JSON,思考一多就会被 token 上限从中间截断。
+# 2026-09-21 用真实 Reasoner 提示词(system 4479 / user 10506 字符)对 deepseek-flash 实测:
+#
+#   max_tokens=2048  content=0 字符 / reasoning_content=7653 字符  → json.loads 报
+#                    "Unterminated string" 之前的空 content 让本函数返回 None,
+#                    于是 reasoner_returned_none,hunt 在第 1 圈就终止、0 个 intent 被看过。
+#   max_tokens=8192  content=1901 字符 / reasoning_content=9442 字符 → 合法 JSON。
+#
+# 这不是新开关,是代码回补 `config/model_policy.example.yaml` 里用户已经拍过的
+# `max_tokens: null`(不限制返回长度)。
+DEFAULT_LLM_MAX_TOKENS = 8192
+
+
+def configured_max_tokens() -> int:
+    """要多少 token 才装得下"思考 + 一整条 JSON"。"""
+    raw = os.environ.get(LLM_MAX_TOKENS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_LLM_MAX_TOKENS
+    try:
+        return max(256, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_MAX_TOKENS
+
+
+# 为什么上一轮 LLM 返回了 None。``complete_messages`` 把"池子空/每家失败/超时/空
+# content"折叠成同一个 None,不记下来,运行摘要里就只有一句 reasoner_returned_none,
+# 只能靠一遍遍加日志去猜(2026-09-21 就是这么翻出来的)。
+_LAST_LLM_ERROR = {"error": ""}
+
+
+def _note_llm_failure(reason: str) -> None:
+    _LAST_LLM_ERROR["error"] = str(reason)[:300]
+
+
+def last_llm_error() -> str:
+    """给运行摘要用:上一次 LLM 调用为什么没给出内容。"""
+    return _LAST_LLM_ERROR["error"]
+
+
 def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
     """LLM completion through the single shared client.
 
@@ -68,14 +108,34 @@ def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
     try:
         message = complete_messages(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            timeout=timeout, prefer=prefer, only=only, max_tokens=2048, temperature=0.2,
+            timeout=timeout, prefer=prefer, only=only,
+            max_tokens=configured_max_tokens(), temperature=0.2,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _note_llm_failure(f"{type(exc).__name__}: {str(exc)[:200]}")
         return None
     if not message:
+        # ``complete_messages`` 把"池子空""每家都失败""超时"都折叠成一个 None。
+        # 不把 last_error 带出来,调用方只知道"没返回",只能靠一遍遍加日志去猜。
+        try:
+            from core.llm_client import last_error
+
+            _note_llm_failure(last_error() or "complete_messages returned None")
+        except Exception:  # noqa: BLE001
+            _note_llm_failure("complete_messages returned None")
         return None
     text = str(message.get("content") or "").strip()
-    return text or None
+    if not text:
+        # 有 message 但 content 是空的:最典型的就是思考把 token 预算吃光了。
+        # 这是"被截断"而不是"没答",说清楚比直接给个 None 有用得多。
+        reasoning = str(message.get("reasoning_content") or "")
+        if reasoning:
+            _note_llm_failure(f"empty content, reasoning_content={len(reasoning)} chars "
+                              f"(raise {LLM_MAX_TOKENS_ENV})")
+        else:
+            _note_llm_failure("empty content")
+        return None
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +639,9 @@ class SrcAgentLoop:
 
     def __init__(self, config: AgentConfig) -> None:
         config.scope.require_authorization()
+        # Reasoner 返回 None 有两种完全不同的原因(LLM 没给出内容 / 给的内容不是
+        # JSON),以前两种都报成同一句 reasoner_returned_none。分开记,摘要里才看得懂。
+        self._last_reason_error = ""
         if not 1 <= config.max_cycles <= MAX_CYCLES:
             raise ValueError(f"max_cycles must be 1..{MAX_CYCLES}")
         if not 1 <= config.max_explore_per_cycle <= MAX_EXPLORE_PER_CYCLE:
@@ -723,7 +786,7 @@ class SrcAgentLoop:
             reason_result = self._reason(snapshot)
             if reason_result is None:
                 stop_reason = "reasoner_failed"
-                errors.append("reasoner_returned_none")
+                errors.append(self._last_reason_error or "reasoner_returned_none")
                 break
             if reason_result.get("should_stop"):
                 # 收尾门:工作记忆里还有未完成 todo 就不许收尾,最多挡 MAX_STOP_BLOCKS 次。
@@ -766,10 +829,15 @@ class SrcAgentLoop:
                     self._timeline("deferred", intent_id, result.dead_end_reason[:120] or "not_claimable")
                     continue
                 total_explored += 1
+                # 只要这条结果带了 finding 就计数,而不是只在 fact_added 时计数。
+                # 高置信 finding 走的是 needs_human(标 blocked、等人工复核),它既不是
+                # fact_added 也不是 dead_end —— 旧写法直接漏掉它,于是**最好的那几条
+                # 发现反而不进 total_findings**,运行摘要报 0,操作员以为什么都没挖到。
+                # 2026-09-21 实测:黑板上有 3 条 high 置信 hint(版本泄露 / 未授权配置
+                # 读取 / uiconfig 泄露内部角色),摘要却是 total_findings: 0。
+                total_findings += len(result.findings)
                 if result.status == "dead_end":
                     total_dead_ends += 1
-                elif result.status == "fact_added":
-                    total_findings += len(result.findings)
                 elif result.status == "error":
                     errors.append(f"{intent_id}:{result.dead_end_reason[:100]}")
 
@@ -1024,10 +1092,13 @@ class SrcAgentLoop:
             only=self.config.reasoner_only,
         )
         if raw is None:
+            self._last_reason_error = f"llm_failed: {last_llm_error() or 'no content'}"
             return None
         parsed = _parse_json_response(raw)
         if parsed is None:
+            self._last_reason_error = (f"unparseable({len(raw)} chars, tail={raw[-60:]!r})")
             return None
+        self._last_reason_error = ""
         self._activate_from_reasoner(parsed)
         return parsed
 

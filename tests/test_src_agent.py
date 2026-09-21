@@ -277,6 +277,45 @@ class TestSrcAgentLoop(unittest.TestCase):
             snap = bb.snapshot()
             self.assertTrue(any(h.get("source") == "src_agent_explorer" for h in snap.get("hints", [])))
 
+    def test_high_confidence_findings_reach_the_summary(self):
+        """``needs_human`` 那种发现必须进 total_findings。
+
+        高置信 finding 走的是 needs_human(标 blocked、等人工复核),既不是
+        ``fact_added`` 也不是 ``dead_end``。旧写法只累加 ``fact_added``,于是**置信度
+        最高的那几条发现反而不计数** —— 黑板上有 hint,摘要报 0,操作员以为什么都没挖到。
+        2026-09-21 在 login-dev.nba.com 上实测踩到:3 条 high 置信 hint / total_findings 0。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            intent_id = bb.snapshot()["intents"][0]["intent_id"]
+
+            def complete(system, user, **kwargs):
+                if "Reasoner" in system:
+                    return json.dumps({
+                        "reasoning": "t", "should_stop": False,
+                        "selected_intents": [{"intent_id": intent_id,
+                                              "hypothesis": "版本泄露",
+                                              "check_description": "读 version"}],
+                    })
+                return json.dumps({
+                    "analysis": "未认证可读", "conclusion": "confirmed",
+                    "findings": [{"type": "info_disclosure", "confidence": "high",
+                                  "evidence": "GET /openidm/info/version -> 200 {\"productVersion\":\"9.0.0\"}",
+                                  "description": "未认证泄露精确版本"}],
+                })
+
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                    fetcher=lambda url, **kw: (200, "{}", {}),
+                                    llm_complete_fn=complete, worker_id="test-w")
+            hints = bb.snapshot().get("hints", [])
+
+        self.assertEqual(0, summary["total_dead_ends"])
+        self.assertEqual(1, summary["total_findings"],
+                         "high 置信发现被 needs_human 分支吞掉了,摘要会报 0")
+        self.assertTrue(any(h.get("source") == "src_agent_explorer" for h in hints))
+
     def test_no_queued_intents_stops(self):
         calls, mock_complete, mock_fetcher = self._make_mocks()
         with tempfile.TemporaryDirectory() as tmp:
