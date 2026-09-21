@@ -154,8 +154,10 @@ REASONER_SYSTEM = """\
 1. status="queued" 的 intent 是未验证的表面观察，不是漏洞。
 2. dead_ends 已经试过了，不要重新建议。
 3. hints 是之前探索的线索。
-4. 能力面以下面这行为准 —— 不要假设更多，也不要假设更少。没被声明的方法，
-   沙箱会直接拒掉，写进计划的请求只会浪费一轮:
+4. 能力面以下面这行为准 —— 不要假设更多，也不要假设更少。那不是"声明了什么就能发什么":
+   OPTIONS 随时可用；POST 只有在能**正面证明是读**的时候才放行（URL 里有读选择器，
+   或是一个 GraphQL `query`）；PUT/PATCH 与任何改数据/配置的请求**当场硬拒**。
+   **没有"发出去等人工确认"这条路** —— 需要人判断的一律被拒，所以别把这类请求写进计划。
    {capabilities}
 5. 优先级：高 priority + 带参数的 API > 静态路径 > 纯资源文件。
 6. 每个选中的 intent 必须给出具体假设（如"res_id 参数可能存在 SQLi"）。
@@ -218,7 +220,10 @@ EXPLORER_SYSTEM = """\
   {capabilities}
   "http_actions": [{"method": "GET", "url": "https://...", "reason": "为什么需要",
                     "body": "需要请求体时才写", "content_type": "application/x-www-form-urlencoded"}]
-没被授权的方法会被拒,拒绝原因会原样回到你面前 —— 想换动词之前先看上面那行。
+`OPTIONS` 是找路由的好办法(响应里的 `Allow:` 头直接给出这个端点接受哪些方法)。
+只读的 POST 只在能正面证明时放行 —— 例如 `?action=query` 这类读选择器,或 GraphQL 的
+`query`。改数据/配置的请求(含 `PUT`/`PATCH`/`DELETE`)当场被拒,**没有人工放行这一步**。
+被拒的原因会原样回到你面前 —— 换动词之前先看上面那行,别把同一个请求重发一遍。
 结果会在 follow-up 给你。不需要就省略。
 
 ## 需要打法细节就点名要

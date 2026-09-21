@@ -11,11 +11,18 @@
 ## 当前已实现
 
 - Surface 每次抓取前重新检查 scope，并拒绝删除、更新、退出、支付、发送等明显有副作用的 URL，以及未知 operation selector。候选 API 路径不会因为被提取到就自动被访问。
-- **默认只读，写权限由授权文档显式声明**。`SurfaceScope.allowed_methods`（默认 `GET`/`HEAD`，恒并集：声明什么都拿不掉这两个）与 `allow_request_body` 是唯一的能力来源；模型提示词里的能力行由同一份 scope 生成，不是硬编码。空/缺失/非法的声明等于只读，所以这个字段出现之前写的 scope 文件行为不变。
-- **写权限闸门**。「URL 里出现某个改状态词」是启发式而不是证据（`DropDownOptions` 会因驼峰切词命中 update），所以它只在文档**没有声明任何写方法**时硬拦（`state_changing_endpoint`）；声明之后降级为跟随请求的警告。控制点因此从"URL 里有没有某个词"换成"操作员签了什么"。`unknown_operation_selector`（`?action=sendEmail`）不受此降级影响，仍硬拦 —— 只有它自己点名了已被声明的方法（`?_method=POST` 且 POST 已声明）才放行。拒绝原因分开表述（`method_not_allowed` / `body_not_allowed` / `state_changing_endpoint` / `unknown_operation_selector`），不再一律叫 write_blocked。
-- 每条非读动作写 `http-actions.jsonl`（run 目录内，请求体全文 + 响应指纹），黑板与事件流只留指纹（`sha256[:12]` + 长度 + content-type）。被拦下来的尝试也记录。
-- 动作策略重新检查语义操作。上层把 GET 判为 allow，也不能覆盖下层识别出的写动作。默认无 operator allowlist/ownership proof 时，创建、修改和未知方法都进入人工门；删除始终进入人工门。
-- `human_gate` 在没有独立审批权威时是 hard-blocked。`gateway_request` 在执行内核缺失或物理出站未确认时不进行 live execution。
+- **默认只读，能力由授权文档显式声明**。`SurfaceScope.allowed_methods`（默认 `GET`/`HEAD`，恒并集：声明什么都拿不掉这两个）与 `allow_request_body` 是唯一的能力来源；模型提示词里的能力行由同一份 scope 生成，**而且只广告闸门真会发的方法**，不是硬编码。空/缺失/非法的声明等于只读，所以这个字段出现之前写的 scope 文件行为不变。
+- **探测档：默认拒绝，只有能正面证明是读的请求才放行**。方法本身区分不了读写 —— `POST /search` 能揭示路由，`POST /logout` 和 `POST /api/items` 连 body 都不需要就能改状态。所以：
+  - `DELETE` **不是合法取值**（不在 `_METHOD_VOCABULARY` 里），实发即 `destructive_method_forbidden`。
+  - `OPTIONS` 随时可用（RFC 安全、无 body），也是找路由的最好手段（响应带 `Allow:`）。
+  - `POST` 只在两种情况放行：URL 里的操作选择器声明了一个**读**操作（`?action=query` 等，见 `_READ_SELECTOR_VALUES`），或 body 是一个 GraphQL `query`（键集 ⊆ `{query, operationName, variables}`，且不含 `mutation`/`subscription`）。**空 body 不是证明** —— `POST /logout` 就没有 body。其余一律 `probe_not_proven_non_mutating`。
+  - `PUT`/`PATCH` 可以声明（好让拒绝理由叫 `mutating_request_refused:update_semantics` 而不是 `method_not_allowed`），但语义上就是"改"，**恒被拒**。
+- **写操作是硬拒，不是警告**。「URL 里出现某个改状态词」是启发式而不是证据（`DropDownOptions` 会因驼峰切词命中 update），所以它以前只在文档没有声明写方法时硬拦、声明之后降级成警告 —— 那条降级路径**已删除**：`GET /logout`、`GET /api/deleteUser` 说的是这个操作**做什么**，不是哪个动词载着它。现在 `state_changing_endpoint` 对**任何**方法都无条件拒绝，`unknown_operation_selector` 同样（`?_method=POST` 的旧豁免也没了：它是写声明，不是读证明）。
+- **没有可达的人工门**。`guardrails.guardrails.human_gate` 在没有独立审批权威时恒返回 `hard_blocked:approval_authority_unconfigured`，所以本地没有任何路径能把"需要人判断"变成"放行"。在猎手这条路里，**需要人判断 = 拒绝**，审计里写明这一点。真正的分类由 `core.action_admission` 做，它复用 `guardrails` 的 `action_kind` + `value_scanners`（此前是死代码，`agents/` 从未 import），策略比 `refine` 更严：create/modify/delete 一律拒。分类器不可用时 **fail-closed**：探测档关闭，GET/HEAD 照常。
+- **每轮请求数有硬上限**。速率桶只管"多快"，管不了"多少" —— 在此之前单目标只受速率约束（20 圈 × 3 次探索 + 3 个动作 × 2 轮 ≈ 420 个请求，`JobContext.spend_request` 存在但零调用者）。现在 `core.rate_limit.RequestBudget` 默认 60、硬顶 120，**爬虫和 agent 共用同一笔**，计数点在准入之后、限速之前（治理拒绝不消耗额度，额度用完立刻返回）。
+- 每次出站都写 `http-actions.jsonl`（run 目录内，请求体全文 + 响应指纹，带 `kind` 与 `decision`）。三个出口都覆盖：intent 首取、`http_actions` 循环、控制台的 `fetch_url`。黑板与事件流只留指纹（`sha256[:12]` + 长度 + content-type）。**被拦下来的尝试也记录** —— "它想过但没发出去"同样是审计事实。
+- 动作策略重新检查语义操作。上层把 GET 判为 allow，也不能覆盖下层识别出的写动作。创建、修改、删除与危险信号（服务端外联、凭据、不可逆cleanup、共享状态）一律被拒。
+- `gateway_request` 在执行内核缺失或物理出站未确认时不进行 live execution。
 - Blackboard 提供跨进程 claim、heartbeat、过期回收和状态原子写；它协调任务，不负责约束外部 runner 的实际网络权限。
 - SignalHarbor 限制来源数、响应大小、XML DTD、缓存条数、摘要数和消息数。逐源、逐条隔离失败。飞书为可选单向通知，不启动 SRC 测试。
 
