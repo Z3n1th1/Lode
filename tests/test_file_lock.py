@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from core.file_lock import AdvisoryFileLock
+from core.file_lock import AdvisoryFileLock, read_text_with_retry
 
 
 class _StubHandle:
@@ -73,6 +75,52 @@ class SidecarByteTests(unittest.TestCase):
         _lock()._ensure_sidecar_byte(handle, delay=0.0)
         self.assertEqual(0, handle.writes)
         self.assertEqual(b"\0", handle.buf)
+
+
+class ReadRetryTests(unittest.TestCase):
+    """被拒一次就当成"这个文件不存在",是这扇窗里最贵的错法。
+
+    ``_write`` 用 staged + ``os.replace`` 换文件,而读侧是故意不加锁的 —— 读者会落进那
+    个窗口,Windows 上表现为 ``PermissionError`` (WinError 5/32)。实测(2026-09-22,
+    一条被持续改写的 job 记录):``GET /api/v1/jobs/{id}`` 对一个请求前刚刚被列出来的
+    job 返回 404,``active_jobs`` 在一条还在跑的会话上报空 —— 而后者正是"一个会话只跑
+    一轮"的闸门。
+
+    这和 ``SidecarByteTests`` 是同一条规则的两面:写侧的重试已经在了,读侧的没有。
+    """
+
+    def test_a_refused_open_is_retried_until_it_lands(self):
+        attempts: list = []
+        real = Path.read_text
+
+        def flaky(self, **kwargs):
+            attempts.append(self)
+            if len(attempts) <= 2:
+                raise PermissionError(13, "Permission denied")
+            return real(self, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "record.json"
+            target.write_text('{"status": "running"}', encoding="utf-8")
+            with patch.object(Path, "read_text", flaky):
+                text = read_text_with_retry(target, delay=0.0)
+
+        self.assertEqual('{"status": "running"}', text)
+        self.assertEqual(3, len(attempts), "被拒两次之后第三次应当成功,而不是报不存在")
+
+    def test_the_error_is_not_swallowed_when_every_attempt_is_refused(self):
+        """重试到底还是不行就要抛出来 —— 返回空内容等于把"读不到"说成"没有"。"""
+        with patch.object(Path, "read_text", side_effect=PermissionError(13, "denied")) as stub:
+            with self.assertRaises(PermissionError):
+                read_text_with_retry("unused.json", attempts=3, delay=0.0)
+        self.assertEqual(3, stub.call_count)
+
+    def test_a_missing_file_is_not_retried(self):
+        """真的不存在是普通的 404 路径,不该为它在重试预算里等满 250ms。"""
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError(2, "no such file")) as stub:
+            with self.assertRaises(FileNotFoundError):
+                read_text_with_retry("unused.json", delay=0.0)
+        self.assertEqual(1, stub.call_count, "文件不存在不该被重试 —— 那是普通的「没这条记录」")
 
 
 if __name__ == "__main__":

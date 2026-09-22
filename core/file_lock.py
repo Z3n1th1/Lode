@@ -147,3 +147,31 @@ def replace_with_retry(staged: Path | str, path: Path | str, *, attempts: int = 
                 raise
             time.sleep(delay)
 
+
+def read_text_with_retry(path: Path | str, *, attempts: int = 25, delay: float = 0.01,
+                         encoding: str = "utf-8") -> str:
+    """``Path.read_text``, retried while a concurrent replace denies the open.
+
+    The mirror image of :func:`replace_with_retry`, and needed for the same Windows
+    window: the writer swaps the file in with ``os.replace`` while readers are
+    deliberately lock-free, so a read that lands inside that window gets
+    ``PermissionError`` (WinError 5/32) even though the file is sitting right there.
+    Measured on a durable job record under churn — one GET returned 404 for a job
+    that another endpoint had listed one request earlier, and ``active_jobs``
+    reported none while a turn was still running.
+
+    ``FileNotFoundError`` is deliberately *not* retried: a real absence is the
+    ordinary "no such record" answer and must stay immediate. Only a denied open
+    is a race.
+    """
+    target = Path(path)
+    for remaining in range(attempts, 0, -1):
+        try:
+            return target.read_text(encoding=encoding)
+        except FileNotFoundError:
+            raise
+        except PermissionError:
+            if remaining == 1:
+                raise
+            time.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover - loop always returns or raises

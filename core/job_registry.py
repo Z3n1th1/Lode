@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
-    from core.file_lock import AdvisoryFileLock, replace_with_retry
+    from core.file_lock import AdvisoryFileLock, read_text_with_retry, replace_with_retry
 except ImportError:  # pragma: no cover
-    from file_lock import AdvisoryFileLock, replace_with_retry  # type: ignore
+    from file_lock import AdvisoryFileLock, read_text_with_retry, replace_with_retry  # type: ignore
 
 SCHEMA = "LodeJob/v1"
 JOB_ID_RE = r"^J-[A-Za-z0-9_.-]{1,80}$"
@@ -126,6 +126,26 @@ class JobRegistry:
         staged.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         replace_with_retry(staged, path)
 
+    def _read_doc(self, path: Path) -> Optional[Dict[str, Any]]:
+        """One record's JSON, or ``None`` when it is unreadable or not a document.
+
+        The read is retried rather than trusted once: ``_write`` swaps the record in
+        with ``os.replace``, and a reader that lands inside that window gets a denied
+        open on Windows (see ``core.file_lock.read_text_with_retry``). Answering
+        "absent" there is a lie with teeth — it made a job that a listing had just
+        returned come back 404 one request later, and ``active_jobs`` report nothing
+        while a turn was running, which is the guard that keeps two turns off one
+        session.
+
+        A genuinely missing file still resolves on the first open, so the ordinary
+        "no such job" path pays nothing for this.
+        """
+        try:
+            doc = json.loads(read_text_with_retry(path))
+        except (OSError, ValueError):
+            return None
+        return doc if isinstance(doc, dict) else None
+
     # -- API -----------------------------------------------------------------
     def create(self, *, session_id: str = "", turn_id: str = "", kind: str = "",
                target: str = "", payload: Optional[Dict[str, Any]] = None) -> JobRecord:
@@ -139,22 +159,16 @@ class JobRegistry:
         return record
 
     def get(self, job_id: str) -> Optional[JobRecord]:
-        try:
-            doc = json.loads(self._path(job_id).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return JobRecord.from_dict(doc) if isinstance(doc, dict) else None
+        doc = self._read_doc(self._path(job_id))
+        return JobRecord.from_dict(doc) if doc is not None else None
 
     def list(self, *, session_id: str = "", limit: int = 50, active_only: bool = False) -> List[JobRecord]:
         if not self.root.is_dir():
             return []
         records: List[JobRecord] = []
         for path in self.root.glob("*.json"):
-            try:
-                doc = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(doc, dict):
+            doc = self._read_doc(path)
+            if doc is None:
                 continue
             record = JobRecord.from_dict(doc)
             if session_id and record.session_id != session_id:

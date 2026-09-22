@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -92,6 +94,70 @@ class JobRegistryTests(unittest.TestCase):
         self.assertFalse(jr.pid_alive(0))
         # a very unlikely pid must not raise
         self.assertIn(jr.pid_alive(999_999_999), (True, False))
+
+
+class RecordReadUnderChurnTests(unittest.TestCase):
+    """记录正在被改写的时候,读侧不能把"被拒"说成"不存在"。
+
+    ``_write`` 是 staged + ``os.replace``,读者是故意不加锁的,所以两者之间有一扇
+    Windows 才有的窗:``os.replace`` 在飞的时候,读侧 ``open`` 会被拒成
+    ``PermissionError`` (WinError 5/32)。以前这个异常被 ``except OSError: return None``
+    吞掉,于是"读不到"和"没有这条记录"变成了同一个答案。
+
+    两个后果都在真机上出现过,而且都不需要什么极端条件:
+
+    - ``GET /api/v1/jobs/{id}`` 对一个**一个请求之前刚刚被列出来**的 job 返回 404
+      (``tests/test_jobs_api.py::test_turn_creates_a_durable_job_and_completes`` 因此
+      偶发 ``KeyError: 'status'``,约 1/5 次全量跑)。
+    - ``active_jobs`` 在一条还在跑的会话上报空 —— 那是"一个会话只跑一轮"的闸门
+      (``tests/test_chat_api.py::test_second_turn_conflicts_while_running`` 因此偶发
+      看到 202 而不是 409)。
+    """
+
+    READS = 200
+
+    def test_a_rewritten_record_is_never_reported_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = jr.JobRegistry(Path(tmp) / "jobs")
+            record = registry.create(session_id="s1", turn_id="T-1", kind="src_loop")
+            stop = threading.Event()
+            writes = [0]
+            refused = [0]
+
+            def churn() -> None:
+                """一直改写这条记录 —— 就是 handler 里 ``ctx.progress()`` 干的事。"""
+                n = 0
+                while not stop.is_set():
+                    n += 1
+                    try:
+                        registry.update(record.job_id, status=jr.RUNNING,
+                                        progress={"phase": "x" * 200, "n": n})
+                    except PermissionError:
+                        # 写侧的重试预算被读者耗光。不是这条要测的东西,但要如实记下来,
+                        # 不然"没有竞争"会被误当成"没有竞态"。
+                        refused[0] += 1
+                        time.sleep(0.001)
+                        continue
+                    writes[0] = n
+
+            writer = threading.Thread(target=churn, daemon=True)
+            writer.start()
+            absent = missed = 0
+            try:
+                for _ in range(self.READS):
+                    if registry.get(record.job_id) is None:
+                        absent += 1
+                    if not any(r.job_id == record.job_id
+                               for r in registry.list(active_only=True)):
+                        missed += 1
+            finally:
+                stop.set()
+                writer.join()
+
+            detail = f"writes={writes[0]} refused={refused[0]} reads={self.READS}"
+            self.assertEqual((0, 0), (absent, missed),
+                             f"absent=get() 报了「没有这条记录」,missed=它从 active 列表里"
+                             f"消失了 ({detail})")
 
 
 if __name__ == "__main__":

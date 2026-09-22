@@ -206,9 +206,9 @@ D:\Environment\Python\miniforge\envs\py310\python.exe -m pytest -q
 cd console; npm run typecheck; npm run test; npm run build
 ```
 
-当前基线（2026-09-21 实测）：
+当前基线（2026-09-23 实测）：
 
-- Python **751 passed, 7 skipped**（`py310`，约 35s）
+- Python **757 passed, 7 skipped**（`py310`，约 35s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -311,7 +311,18 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 近期历史（新在前）
 
-- 本次（2026-09-21）**候选质量:静态提取 + 动态回流**。两件配对的修复:
+- 本次（2026-09-23）**「读不到」不等于「没有这条记录」**。`JobRegistry.get()/list()` 是故意
+  不加锁的读者,而 `_write` 用 staged + `os.replace` 换文件 —— 落在那扇 Windows 窗里的 `open`
+  会被拒成 `PermissionError`,而它以前被 `except OSError: return None` 吞成"没有这条记录"。
+  两个后果都在全量跑里现过形:`GET /api/v1/jobs/{id}` 对一个请求之前**刚刚被列出来**的 job 返回
+  404(`test_jobs_api` 约 1/5 次挂在 `KeyError: 'status'`),`active_jobs` 在一条还在跑的会话上
+  报空 —— 后者正是"一个会话只跑一轮"的闸门,于是 `test_chat_api` 偶发看到 202 而不是 409。
+  现在读侧和写侧共用同一条规矩:`core.file_lock.read_text_with_retry`(同一扇窗、同一份重试
+  预算,真缺失仍然立即返回)。另外 `console/jobs._on_terminal` 遍历 `_ENTRIES` 改成快照 ——
+  别的线程正在建新会话时边插边遍历会抛 `RuntimeError`,把这次的回写总结和飞书通知静默吃掉。
+  黑板和令牌桶不在这个窗口里:那两处的读写都在同一把 advisory 锁下(`snapshot()` 也持锁)。
+
+- （2026-09-21）**候选质量:静态提取 + 动态回流**。两件配对的修复:
 
   - **base-join**:bundle 通常装的是它自己声明的 API base 的**碎片**,不是 URL。JS 里
     `VUE_APP_IDM_URL:"/openidm"`,`var h="/config/ui/themerealm"`,而拼接只以字面量出现过

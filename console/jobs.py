@@ -901,7 +901,10 @@ def _on_terminal(job_id: str, status: str) -> None:
     """
     state_dir = ""
     job: Optional[JobRecord] = None
-    for key, entry in _ENTRIES.items():
+    # 快照再遍历:另一个线程正在建新会话时会给 ``_ENTRIES`` 插新键,而边插边遍历会抛
+    # ``RuntimeError`` —— 那会连带丢掉这次的回写总结和飞书通知(调用方是 try/except,
+    # 所以连日志都不会有)。
+    for key, entry in list(_ENTRIES.items()):
         found = entry["registry"].get(job_id)
         if found is not None:
             state_dir, job = key, found

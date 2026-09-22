@@ -1551,6 +1551,61 @@ class TestRouteReflow(unittest.TestCase):
         self.assertEqual("https://example.com/openidm/config/managed", bound["url"])
         self.assertEqual(_candidate_id(bound["url"]), bound["candidate_id"])
         self.assertEqual(["explorer-route"], bound["sources"])
+        self.assertEqual(bound["url"], bound["probe_url"])
+
+    def test_a_reported_route_carries_a_fetchable_url(self):
+        """会被请求的是 ``probe_url``:展示那一份每个参数值都打码,拿它去请求必然 404。
+
+        报来的路由和抠出来的候选走同一个 ``_canonical_url``,所以这条也要成立 —— 模型看
+        见 ``?id=7`` 记下来的就是要打的那一条,不是 ``?id=[value]``。
+        """
+        from agents.src_autopilot import candidate_from_route
+
+        bound = candidate_from_route("/openidm/config/managed?token=abc&id=7", _make_scope(),
+                                     base_url=self.TARGET)
+        self.assertIsNotNone(bound)
+        self.assertEqual("https://example.com/openidm/config/managed?token=[redacted]&id=[value]",
+                         bound["url"])
+        self.assertEqual("https://example.com/openidm/config/managed?id=7", bound["probe_url"])
+
+    def test_a_route_the_extractor_already_found_stays_one_intent(self):
+        """两种来源去重,不是各造一个 —— 而且先抠出来的那条优先级不能被压低。
+
+        ``js``(15)比 ``explorer-route``(12)高,所以模型随口报一次不该把一条已经抠出来的
+        候选挤到队列后面。id 相同 → 同一个 intent,``sync_candidates`` 只取 max。
+        """
+        from agents.src_autopilot import _candidate_id, _score_candidate
+
+        url = "https://example.com/openidm/config/managed"
+        other = "/openidm/info/version"
+        # 一起报两条:一条提取器已经抠到过,一条没有。前者不新增,后者要新增 —— 这样
+        # "没有新增"才证明是去重了,而不是这一轮压根没回流。
+        routes = {"round": 0, "value": [self.ROUTE, other]}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            # 提取器先看到的那一份(surface discovery 走的是同一个入口)。
+            bb.sync_candidates([{
+                "candidate_id": _candidate_id(url), "url": url,
+                "priority": _score_candidate(url, ("js",)), "sources": ["js"],
+            }], run_id="extract")
+            self.assertEqual(1, len([row for row in bb.snapshot()["intents"]
+                                     if row["target"] == url]))
+
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                    fetcher=lambda u, **kw: (200, "{}", {}),
+                                    llm_complete_fn=self._reasoner_selecting_all(bb, routes),
+                                    worker_id="test-w")
+            rows = [row for row in bb.snapshot()["intents"] if row["target"] == url]
+            new_rows = [row for row in bb.snapshot()["intents"]
+                        if row["target"] == "https://example.com" + other]
+
+        self.assertEqual(1, len(rows), "报来的路由和抠出来的候选各造了一条 intent")
+        self.assertEqual(1, len(new_rows), "没抠到过的那一条要能进清单 —— 否则这轮根本没回流")
+        self.assertEqual(1, summary["intents_from_routes"])
+        self.assertEqual(_score_candidate(url, ("js",)), rows[0]["priority"],
+                         "回灌把一条 js 候选的优先级压低了")
 
     def test_the_converter_refuses_an_out_of_scope_route(self):
         from agents.src_autopilot import candidate_from_route
