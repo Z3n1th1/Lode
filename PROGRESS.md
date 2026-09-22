@@ -338,13 +338,23 @@ cd console; npm run typecheck; npm run test; npm run build
   `intents_from_routes: 1`，黑板时间线上有 `route_reflow Explorer 报的路由新增 1 个 intent`
   —— 清单在第 1 圈之后真的长出了新目标，这条以前是"有直觉、没有手"。
 
-  **base-join 这条的结论是「候选对了、排名错了」**：候选里确实有
-  `/openidm/config/ui/themerealm`（source `base-join`），但模型挑的是分数更高的**裸碎片**
-  `/config/ui/themerealm`（sourcemap 的权重压过 base-join），4 个 OPTIONS 全打在它和
-  `/config`、`/console` 上 → 404。直接各打一发 OPTIONS 核对：
-  `/config/ui/themerealm` → **404**、`/openidm/config/ui/themerealm` → **200**。所以 base-join
-  造的候选是对的、能打中的那一发就在清单里，错的是同一族里"打不中的排在能打中的前面"
-  （下一步要动的是 `_SOURCE_WEIGHT`/`candidate_id` 那一族的关系，不是 scope）。
+  **base-join 这条的结论是「候选对了、排名错了」，证据是这三趟的候选表 + `http-actions.jsonl`。**
+
+  同一个发现会生成两条候选：裸碎片，和拼上 bundle 自己声明的 base 的形态。模型几乎只打裸的
+  那条（三趟合计 **GET 101 条裸 / 12 条拼接，OPTIONS 9 条裸 / 1 条拼接**），而**两形态同时是
+  候选的 3 个族里，裸的一律 404、拼接的那条是活的**：
+
+  | 族 | 裸碎片 | 拼接形态 |
+  |---|---|---|
+  | `/config/ui/themerealm` | GET 404、OPTIONS 404 | 模型没打过；我各打一发核对 → **OPTIONS 200** |
+  | `/config/uilocale` | GET 404（两趟都） | GET 404、**OPTIONS 200** |
+  | `/info/uiconfig` | 没打过 | **GET 200** |
+
+  机制就在 `_SOURCE_WEIGHT` 里：裸碎片带 `sourcemap`（25）→ **70 分**，拼接形态只带
+  `base-join`（18）→ **63 分**。**派生出来的那条比被派生的那条低** —— 而 `_SOURCE_WEIGHT`
+  上面那段注释写的是"权重压过 js/sourcemap"：对 js（18>15）成立，对 sourcemap（18<25）不成立。
+  所以要动的是"拼接形态继承碎片的来源与分数"（它是同一个发现的另一种写法，不是第二次发现），
+  不是 scope，也不是再新造一种候选。**先不动，等拍板。**
 
   两次都不是被额度停的：第一次 5 圈 / 12 次探索后被 `max_tokens` 截断（见「已知限制 7」），
   第二次 3 圈后被一次瞬时 LLM 传输错误停掉（`ConnectError: [WinError 10053]`），当时还剩
