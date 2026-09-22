@@ -53,16 +53,24 @@ except Exception:
 
 LLM_MAX_TOKENS_ENV = "LODE_LLM_MAX_TOKENS"
 # 决策层和 Explorer 的回包都是**一整条** JSON,思考一多就会被 token 上限从中间截断。
-# 2026-09-21 用真实 Reasoner 提示词(system 4479 / user 10506 字符)对 deepseek-flash 实测:
+# 用真实 Reasoner 提示词对 deepseek-flash 实测(每次只换上限):
 #
-#   max_tokens=2048  content=0 字符 / reasoning_content=7653 字符  → json.loads 报
-#                    "Unterminated string" 之前的空 content 让本函数返回 None,
-#                    于是 reasoner_returned_none,hunt 在第 1 圈就终止、0 个 intent 被看过。
-#   max_tokens=8192  content=1901 字符 / reasoning_content=9442 字符 → 合法 JSON。
+#   2026-09-21  system 4479 / user 10506 字符
+#     max_tokens=2048  content=0 字符 / reasoning_content=7653 字符  → json.loads 报
+#                      "Unterminated string";空 content 让本函数返回 None,于是
+#                      reasoner_returned_none,hunt 在第 1 圈就终止、0 个 intent 被看过。
+#     max_tokens=8192  content=1901 字符 / reasoning_content=9442 字符 → 合法 JSON。
+#   2026-09-23  login-dev.nba.com 真机(候选 31 条、提示词更长)
+#     max_tokens=8192  content=0 字符 / reasoning_content=28902 字符 → 又是 reasoner_failed,
+#                      这一轮在 44/60 个请求处停下,后半程一个 OPTIONS 都没发出去。
+#
+# 同一个上限,提示词一长就不够 —— 要多少取决于"这个提示词会让模型想多久",而那件事只有
+# 模型自己知道。所以给到 32768:**上限是天窗不是预留**,没用到不花钱,而截断的代价是整轮
+# 运行作废。供应商接受 32768 与 65536(实测两个值都收)。仍可用 LODE_LLM_MAX_TOKENS 覆盖。
 #
 # 这不是新开关,是代码回补 `config/model_policy.example.yaml` 里用户已经拍过的
 # `max_tokens: null`(不限制返回长度)。
-DEFAULT_LLM_MAX_TOKENS = 8192
+DEFAULT_LLM_MAX_TOKENS = 32768
 
 
 def configured_max_tokens() -> int:

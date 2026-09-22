@@ -1312,10 +1312,18 @@ class TestLlmBudget(unittest.TestCase):
             os.environ[self.mod.LLM_MAX_TOKENS_ENV] = self._saved
 
     def test_the_default_budget_leaves_room_for_thinking_plus_json(self):
+        """默认值不许回退:2048 和 8192 都在真机上把整轮运行截断过。
+
+        要多少取决于"这个提示词会让模型想多久",而那件事只有模型自己知道 —— 同一个目标,
+        09-21 的思考是 9442 字符(8192 够),09-23 的候选更多、提示词更长,思考 28902 字符
+        (8192 不够:content 空 → reasoner_failed,60 个额度只花了 44 个,后半程一个 OPTIONS
+        都没发出去)。所以这里钉的是"至少覆盖最后一次实测",不是一个漂亮数字。
+        """
         os.environ.pop(self.mod.LLM_MAX_TOKENS_ENV, None)
         self.assertEqual(self.mod.DEFAULT_LLM_MAX_TOKENS, self.mod.configured_max_tokens())
-        self.assertGreater(self.mod.configured_max_tokens(), 2048,
-                           "回到 2048 就是回到 thinking 吃光预算、content 为空")
+        self.assertGreaterEqual(
+            self.mod.configured_max_tokens(), 32768,
+            "8192 在 2026-09-23 的 login-dev 真机上被 28902 字符的思考吃光,整轮运行作废")
 
     def test_the_budget_can_be_overridden_for_another_model(self):
         os.environ[self.mod.LLM_MAX_TOKENS_ENV] = "4096"

@@ -293,23 +293,51 @@ cd console; npm run typecheck; npm run test; npm run build
    不存在的模块**（历史遗留）。飞书任务路由一旦走到那条分支就会 ImportError，走不到就没事。
 5. X/Twitter 采集默认关闭，需要官方 API token。
 6. `npm audit` 未复核（国内镜像 404、官方源 `ECONNRESET`）。
-7. ~~`deepseek-flash` 默认开启思考模式……~~ **已修（`4ecd92f`）。** 这条曾经是整个 hunt 的
-   唯一死因，不是"值得评估"：`agents/src_agent.py` 的 `_default_llm_complete` 硬编码
-   `max_tokens=2048`，实测同一份真实 Reasoner 提示词（system 4479 / user 10506 字符）
+7. ~~`deepseek-flash` 默认开启思考模式……~~ **修过两次,第二次是 2026-09-23。** 这条曾经是
+   整个 hunt 的唯一死因,不是"值得评估"：`agents/src_agent.py` 的 `_default_llm_complete`
+   硬编码 `max_tokens=2048`，实测同一份真实 Reasoner 提示词（system 4479 / user 10506 字符）
 
    | 配置 | content | reasoning_content | JSON |
    |---|---|---|---|
    | `max_tokens=2048`（旧） | **0 字符** | 7653 字符 | 截断 → `Unterminated string` |
-   | `max_tokens=8192`（新缺省） | 1901 字符 | 9442 字符 | 合法 |
+   | `max_tokens=8192`（09-21 的新缺省） | 1901 字符 | 9442 字符 | 合法 |
 
-   空 content 让函数返回 `None` → `reasoner_returned_none` → hunt 在第 1 圈终止。现在 `max_tokens`
-   可配（`LODE_LLM_MAX_TOKENS`），默认 8192 —— 回补 `config/model_policy.example.yaml` 里
-   早写好的 `max_tokens: null`。同时那次失败不再是一句无声的 `None`：会带上
-   `reasoning_content` 长度，且 reasoner 的"没给内容"和"给的不是 JSON"分开报。
+   空 content 让函数返回 `None` → `reasoner_returned_none` → hunt 在第 1 圈终止。当时把缺省
+   提到 8192 并让它可配（`LODE_LLM_MAX_TOKENS`）—— 回补 `config/model_policy.example.yaml`
+   里早写好的 `max_tokens: null`。失败也不再是一句无声的 `None`：带上 `reasoning_content`
+   长度，且"没给内容"和"给的不是 JSON"分开报。
+
+   **但 8192 只是那次那次提示词够用。** 2026-09-23 同一台 login-dev、候选涨到 31 条、提示词更长，
+   8192 又被吃光：`content=0 / reasoning_content=28902 字符 / reasoner_failed`，60 个额度
+   只花了 44 个就停了，后半程**一个 OPTIONS 都没发出去**。要多少取决于"这个提示词会让模型想
+   多久"，而那件事只有模型自己知道 —— 所以缺省改成 **32768**：上限是天窗不是预留，没用到不
+   花钱，而截断的代价是整轮运行作废（供应商接受 32768 与 65536，实测都收）。这条现在由
+   `tests/test_src_agent.py::TestLlmBudget` 钉住"至少覆盖最后一次实测"，改小就会红。
+
+   **说清楚证据强度**：改完之后又跑了一次，`empty content` 那句没再出现（3 次 reasoner 调用都
+   正常返回），但那一次是被另一次瞬时 LLM 传输错误停掉的，所以"32768 到底够不够"还没有一次
+   干净的端到端证明 —— 它只是把 28902 字符那次的天窗抬到了实测之上。
 8. `README_TEST.md` / `USAGE.md` / `docs/*.md` 部分章节仍描述已删功能，未逐篇清理。
    `docs/security-boundary.md` 是唯一跟得上代码的（写权限、能力维度那几段）。
 
 ## 近期历史（新在前）
+
+- 本次（2026-09-23）**真机复跑 login-dev.nba.com**（同一份 `out/nba-probe-scope.json`、额度 60，
+  两台目标 09-23 都能通了：都回 301）。两件要看的里，**回流这条通了**：两次跑都是
+  `intents_from_routes: 1`，黑板时间线上有 `route_reflow Explorer 报的路由新增 1 个 intent`
+  —— 清单在第 1 圈之后真的长出了新目标，这条以前是"有直觉、没有手"。
+
+  **base-join 这条的结论是「候选对了、排名错了」**：候选里确实有
+  `/openidm/config/ui/themerealm`（source `base-join`），但模型挑的是分数更高的**裸碎片**
+  `/config/ui/themerealm`（sourcemap 的权重压过 base-join），4 个 OPTIONS 全打在它和
+  `/config`、`/console` 上 → 404。直接各打一发 OPTIONS 核对：
+  `/config/ui/themerealm` → **404**、`/openidm/config/ui/themerealm` → **200**。所以 base-join
+  造的候选是对的、能打中的那一发就在清单里，错的是同一族里"打不中的排在能打中的前面"
+  （下一步要动的是 `_SOURCE_WEIGHT`/`candidate_id` 那一族的关系，不是 scope）。
+
+  两次都不是被额度停的：第一次 5 圈 / 12 次探索后被 `max_tokens` 截断（见「已知限制 7」），
+  第二次 3 圈后被一次瞬时 LLM 传输错误停掉（`ConnectError: [WinError 10053]`），当时还剩
+  22/60 个额度 —— 也就是说**一次掉线能终结整轮 hunt**，这是下一个该看的健壮性问题。
 
 - 本次（2026-09-23）**「读不到」不等于「没有这条记录」**。`JobRegistry.get()/list()` 是故意
   不加锁的读者,而 `_write` 用 staged + `os.replace` 换文件 —— 落在那扇 Windows 窗里的 `open`
