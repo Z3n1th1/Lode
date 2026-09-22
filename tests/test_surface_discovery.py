@@ -484,6 +484,33 @@ class ApiBaseJoinTests(unittest.TestCase):
         self.assertIn("sourcemap", result.sources["/openidm/config/ui/themerealm"])
         self.assertIn("base-join", result.sources["/openidm/config/ui/themerealm"])
 
+    def test_a_join_inherits_a_source_named_by_a_different_pass(self) -> None:
+        """裸碎片是扫 .map 那趟记的,拼接是扫 JS 那趟拼的 —— 只有合起来才看得出是同一次发现。
+
+        实测(2026-09-23,login-dev.nba.com):``*.map`` 自己不声明 base,所以那趟只记下裸碎片
+        (sourcemap,权重 25);拼接那条只带 js/base-join → 69 分,反而比裸的 70 分低,模型照样
+        打 404 的那条。同一趟里继承是补不上这个差的。
+        """
+        from agents.surface_discovery import SurfaceResult, _extract_text, _inherit_joined_sources
+        from agents.src_autopilot import _score_candidate
+
+        result = SurfaceResult(target="https://example.com/", base_url="https://example.com")
+        scope = self._scope()
+        # 1) .map 那趟:它自己没声明 base,只记下裸碎片
+        _extract_text('var h="/config/ui/themerealm";', result, "sourcemap", scope)
+        # 2) JS 那趟:声明了 /openidm,把碎片解析出来
+        _extract_text(self.BUNDLE, result, "js", scope, bases=_declared_api_bases(self.BUNDLE))
+        # 3) 所有趟扫完之后的收尾
+        _inherit_joined_sources(result)
+
+        joined, bare = "/openidm/config/ui/themerealm", "/config/ui/themerealm"
+        self.assertIn("sourcemap", result.sources[joined],
+                      f"拼接形态没继承到另一趟记下的来源:{sorted(result.sources[joined])}")
+        self.assertGreater(
+            _score_candidate(joined, result.sources[joined]),
+            _score_candidate(bare, result.sources[bare]),
+            f"{sorted(result.sources[joined])} 没有排在 {sorted(result.sources[bare])} 前面")
+
     def test_the_joined_form_outranks_the_bare_fragment(self) -> None:
         """不然排序还是让 404 的那个先被探索。
 

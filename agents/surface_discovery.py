@@ -352,6 +352,9 @@ class SurfaceResult:
     api_urls: set[str] = field(default_factory=set)
     sources: dict[str, set[str]] = field(default_factory=dict)
     url_sources: dict[str, set[str]] = field(default_factory=dict)
+    #: 拼接形态 -> 它是从哪个更短的路径拼出来的。跨越扫描趟的线索:.map 自己不声明 base,
+    #: 所以裸碎片是那趟记的、拼接是 JS 那趟拼的 —— 结束时按这张表把来源并起来。
+    joins: dict[str, set[str]] = field(default_factory=dict)
     requests: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -529,10 +532,32 @@ def _add_under_bases(result: SurfaceResult, value: str, bases: tuple[str, ...],
         return  # already carries a base — nothing to resolve
     for base in bases:
         joined = f"{base}{raw}"
+        fragment = _clean_path(path, "")
         result.add_path(joined, "base-join", scope)
+        result.joins.setdefault(joined, set()).add(fragment)
         if source:
-            # 来源跟着一起继承:拼接形态是碎片解析出来的,不是第二次发现。
+            # 来源跟着一起继承:拼接形态是碎片解析出来的,不是第二次发现。同一趟里的那份
+            # 在这里就并上了;别的趟记下的那份由 ``_inherit_joined_sources`` 在收尾时并。
             result.add_path(joined, source, scope)
+
+
+def _inherit_joined_sources(result: SurfaceResult) -> None:
+    """把裸碎片的**全部**来源并给拼接形态,不管碎片是哪一趟记下的。
+
+    同一趟里继承不够——真实文件是分开的:扫 JS 那趟声明了 ``/openidm`` 并拼出
+    ``/openidm/config/ui/themerealm``(来源 js),而裸碎片 ``/config/ui/themerealm`` 是扫
+    ``*.map`` 那趟记下的(来源 sourcemap,权重 25)。两趟各自只有一个来源,只有合起来才看得出
+    "这是同一次发现"。
+
+    实测(2026-09-23,login-dev.nba.com):不并这一下,拼接形态 69 分,反而比裸碎片的 70 分低
+    —— 模型照样打 404 的那条。并上之后再靠 ``_RESOLVED_FRAGMENT_BONUS`` 稳定地压过它。
+    """
+    for joined, fragments in result.joins.items():
+        names = result.sources.get(joined)
+        if not names:
+            continue
+        for fragment in fragments:
+            names |= result.sources.get(fragment, set())
 
 
 def _extract_json(text: str, result: SurfaceResult, source: str, scope: SurfaceScope, base: str,
@@ -749,6 +774,8 @@ def discover_surface(
         for match in CHUNK_RE.findall(text):
             result.add_script(match, "js", scope, script_url)
         queue.extend(sorted(result.scripts - before - processed))
+    # 所有趟都扫完了才谈继承:拼接形态和它的裸碎片可能分别落在 JS 与 .map 两趟里。
+    _inherit_joined_sources(result)
     return result
 
 
