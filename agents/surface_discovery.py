@@ -461,6 +461,11 @@ def _extract_text(text: str, result: SurfaceResult, source: str, scope: SurfaceS
 #: not telling us anything more useful than a file that declares two.
 MAX_API_BASES = 4
 
+#: 连接层失败(``status == 0``)时,同一个 URL 再试几次。实测(2026-09-23,login-dev.nba.com)
+#: app bundle 单次返回 0,而它正是**唯一**声明 `/openidm` 的文件 —— 整轮爬取因此从 31 条候选
+#: 掉到 4 条(剩下的是 vendor 的 sourcemap),摘要里一个字都没提。4xx/5xx 是对方的回答,不重试。
+TRANSIENT_FETCH_RETRIES = 2
+
 
 # A bundle that declares its own API base makes its relative paths resolvable, and the
 # paths it contains are usually *fragments* of that base rather than URLs. ForgeRock's End
@@ -686,13 +691,30 @@ def discover_surface(
             return 0, "", {}
         # 爬虫是 GET 流量的最大来源(SEED_PATHS 加上 max_scripts 个脚本各一跳),所以它
         # 也要吃同一份额度 —— 只让 agent 侧计数等于把大头漏掉了。被拦掉的请求不计。
+        def _attempt() -> tuple[int, str, dict[str, str]]:
+            if limiter is not None:
+                limiter.acquire(url)
+            outcome = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
+            result.requests.append({"url": url, "status": outcome[0]})
+            return outcome
+
         if budget is not None and not budget.spend():
             result.errors.append(f"blocked:{url}:request_budget_exhausted")
             return 0, "", {}
-        if limiter is not None:
-            limiter.acquire(url)
-        status, text, headers = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
-        result.requests.append({"url": url, "status": status})
+        status, text, headers = _attempt()
+        # ``status == 0`` 是连接层没成,不是对方的回答 —— 一次掉线不等于"这个资产不存在"。
+        # 重试照走同一条路:闸门、额度、限速一步都不跳(它也是真的一次出站)。4xx/5xx 不在这里
+        # 重试,那是对方明确回答过了。
+        for _ in range(TRANSIENT_FETCH_RETRIES):
+            if status != 0:
+                break
+            if budget is not None and not budget.spend():
+                result.errors.append(f"blocked:{url}:request_budget_exhausted")
+                break
+            status, text, headers = _attempt()
+        if status == 0:
+            # 试到底还是不行就记下来。以前这里是静默的:结果差一大截,而摘要里看不出原因。
+            result.errors.append(f"unreachable:{url}")
         if follow and 300 <= status < 400:
             # 跟一跳。不跟的话,回 301/302 的站正文一个字节都取不到,面就是空的 ——
             # 看上去像"这个站没东西",其实是重定向没走(login 跳到 /login/、

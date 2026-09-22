@@ -407,6 +407,56 @@ class RequestMethodTests(unittest.TestCase):
         self.assertEqual("application/x-www-form-urlencoded", self.seen[-1][3])
 
 
+class TransientFetchRetryTests(unittest.TestCase):
+    """一次掉线不等于"这个资产不存在"。
+
+    实测(2026-09-23,login-dev.nba.com):``login/js/app.038f4867.js`` 单次返回 ``status=0``,
+    而它正是**唯一**声明 ``/openidm`` 的文件。整轮爬取因此从 31 条候选掉到 4 条(剩下的是
+    vendor 的 sourcemap),而摘要里一个字都没提 —— 看上去像"这个站没什么东西"。
+    """
+
+    SCRIPT = 'VUE_APP_IDM_URL:"/openidm";var h="/config/ui/themerealm";fetch("/openidm/info/version");'
+    HTML = '<html><script src="/static/app.js"></script></html>'
+    SCRIPT_URL = "https://example.com/static/app.js"
+
+    def _scope(self) -> SurfaceScope:
+        return SurfaceScope(program="fixture", authorization="written authorization",
+                            allowed_domains=("example.com",), delay_seconds=0.0)
+
+    def _fetcher(self, fail_times: int, calls: list):
+        def fetch(url: str, **kwargs):
+            del kwargs
+            calls.append(url)
+            if url == self.SCRIPT_URL:
+                if calls.count(url) <= fail_times:
+                    return 0, "", {}
+                return 200, self.SCRIPT, {"content-type": "application/javascript"}
+            if url.rstrip("/") == "https://example.com":
+                return 200, self.HTML, {"content-type": "text/html"}
+            return 404, "", {"content-type": "text/plain"}
+        return fetch
+
+    def test_a_failed_fetch_is_retried_and_the_run_is_not_gutted(self) -> None:
+        calls: list = []
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=10,
+                                  fetcher=self._fetcher(1, calls))
+        self.assertEqual(2, calls.count(self.SCRIPT_URL), "掉线那一发没有重试")
+        self.assertIn("/openidm/config/ui/themerealm", result.paths,
+                      "重试成功之后,声明 base 的那个文件应当照常起作用")
+        self.assertFalse([e for e in result.errors if e.startswith("unreachable:")], result.errors)
+
+    def test_giving_up_is_recorded_instead_of_silent(self) -> None:
+        from agents.surface_discovery import TRANSIENT_FETCH_RETRIES
+
+        calls: list = []
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=10,
+                                  fetcher=self._fetcher(99, calls))
+        self.assertEqual(TRANSIENT_FETCH_RETRIES + 1, calls.count(self.SCRIPT_URL))
+        self.assertIn(f"unreachable:{self.SCRIPT_URL}", result.errors,
+                      "试到底还是不行必须留痕 —— 静默的后果是一轮空爬看起来像「这个站没东西」")
+        self.assertNotIn("/openidm/config/ui/themerealm", result.paths)
+
+
 class ApiBaseJoinTests(unittest.TestCase):
     """A bundle that declares its API base makes its fragments resolvable.
 
