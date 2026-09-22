@@ -208,7 +208,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-23 实测）：
 
-- Python **761 passed, 7 skipped**（`py310`，约 35s）
+- Python **770 passed, 7 skipped**（`py310`，约 35s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -322,6 +322,51 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 近期历史（新在前）
 
+- 本次（2026-09-23）**把真机当测试台:七趟跑下来,暴露的是同一类毛病**。同一个目标、同一份
+  `out/nba-probe-scope.json`、同一份额度 60,每趟只修上一趟露出来的那一个坑:
+
+  | 跑 | 代码状态 | 圈 | 探索 | 发现 | 回流 | 停在哪 | 请求 |
+  |---|---|---|---|---|---|---|---|
+  | -2 | `6b68b71`, `max_tokens=8192` | 5 | 12 | 0 | 1 | `empty content`(思考 28902 字符吃光预算) | 44 |
+  | -3 | 缺省提到 32768 | 3 | 6 | 0 | 1 | `ConnectError` 10053(代理掐连接) | 38 |
+  | -4 | +传输层重试 +候选排名 | 2 | 3 | 1 | 1 | `unparseable`(2824 字符,看着完整) | 35 |
+  | -5 | +JSON 修复 | 7 | 18 | 5 | 19 | `request_budget_exhausted`(跑满 60) | 60 |
+  | -6 | +跨趟继承 | 3 | 4 | 0 | 0 | `no_queued_intents`(爬虫少了 27 条候选) | 30 |
+  | **-7** | +爬虫重试 | **9** | **24** | **6** | **8** | `request_budget_exhausted` | **60** |
+
+  四次都是同一类毛病:**一次瞬时失败被当成"这东西不存在"** —— 空 content(思考吃光预算)、
+  一次掉线、一条差一点合法的 JSON、一次 `status=0` 的抓取。前三个在 LLM 那条路上,第四个在
+  爬虫那条路上;共同后果都是"运行看起来正常,结果差一大截"。修法也一致:能重试的重试(有界、
+  留痕),不能重试的把原因带出来,而不是折叠成一个 None。
+
+  -7 是第一次跑得干净:9 圈 / 24 次探索 / 6 条 hint / 回流 8 个 intent,60 额度跑满,
+  只剩一条 explorer 的 `unparseable_response`(不致命,继续下一轮)。**但那 6 条不是战果**:
+  全是版本横幅、登录前 UI 配置、`/openidm/config/*` 这类 design-by-default 的信息面,09-21
+  人工复核就是这个结论(见「已知限制 1」),现在是工具自己跑出来了。值得一提的反面证据是模型
+  **自己标了一条误报**:`/enduser/config/ui/themerealm` 200 但 `content-type: text/html`、
+  1069 字节 —— SPA catch-all,它写成「误报面(排除项)」。这正是程序规则要求的判断。
+
+  -6 那趟空跑的原因单独留着:`login/js/app.038f4867.js` 单次 `status=0`,而它是**唯一**声明
+  `/openidm` 的文件 —— 31 条候选掉到 4 条(剩下的是 vendor 的 sourcemap),摘要里 `errors: []`。
+  所以爬虫现在会重试连接层失败(4xx/5xx 不重试,那是对方的回答),试到底才记一条
+  `unreachable:<url>`;代价写在 `TRANSIENT_FETCH_RETRIES` 旁边。
+
+- 本次（2026-09-23）**候选排名:派生出来的那条不许比被派生的低**（`fe43777` + `113ad88`）。
+  同一个发现会生成两条候选（裸碎片 + 拼上 bundle 声明的 base 的形态），但各带各的来源:
+  裸碎片带 `sourcemap`（25）→ 70 分,拼接形态只带 `base-join`（18）→ 63 分 —— 排序把打不中的
+  那条排在能打中的前面（三趟合计 101 发裸 / 12 发拼接）。三处一起修:
+
+  - **同一趟里继承**:`_add_under_bases` 把碎片的来源也记到拼接形态上。
+  - **跨趟继承**:`*.map` 自己不声明 base,所以裸碎片是那趟记的、拼接是 JS 那趟拼的。
+    `SurfaceResult.joins` 记下每个拼接形态来自哪个碎片,所有趟扫完再
+    `_inherit_joined_sources`。只做同一趟那一步时实测 69 vs 70 —— **裸的照样赢**。
+  - **`_RESOLVED_FRAGMENT_BONUS = 6`**:并起来之后两者同分,还得给"解析过的读法"一点证据
+    优势。刻意不靠把 `base-join` 权重调到比谁都大 —— 那是数字跟数字比,下一个 extractor 进来
+    就又翻过去（真机上翻的就是 sourcemap）。
+
+  另外 `_parse_json_response` 现在会修"差一点就合法"的 JSON（字符串里的裸控制字符、尾随逗号,
+  `af4456e`）:两趟真机都死在 unparseable 上,而丢一条回包对 explorer 是一轮、对 reasoner 是整轮。
+
 - 本次（2026-09-23）**传输层的掉线不许终结整轮 hunt**。reasoner 是唯一一条"失败就整轮停"
   的调用（explorer 失败只记一条 error 继续下一轮），而它把两种完全不同的失败当成一种：
   本地代理掐长连接（实测 `ConnectError: [WinError 10053]`）和"思考吃光 token 预算"
@@ -354,7 +399,8 @@ cd console; npm run typecheck; npm run test; npm run build
   `base-join`（18）→ **63 分**。**派生出来的那条比被派生的那条低** —— 而 `_SOURCE_WEIGHT`
   上面那段注释写的是"权重压过 js/sourcemap"：对 js（18>15）成立，对 sourcemap（18<25）不成立。
   所以要动的是"拼接形态继承碎片的来源与分数"（它是同一个发现的另一种写法，不是第二次发现），
-  不是 scope，也不是再新造一种候选。**先不动，等拍板。**
+  不是 scope，也不是再新造一种候选。**已修（见下面 `fe43777` 那条）：同一趟里继承不够，还要
+  跨趟继承 —— `*.map` 自己不声明 base，裸碎片是那趟记的、拼接是 JS 那趟拼的。**
 
   两次都不是被额度停的：第一次 5 圈 / 12 次探索后被 `max_tokens` 截断（见「已知限制 7」），
   第二次 3 圈后被一次瞬时 LLM 传输错误停掉（`ConnectError: [WinError 10053]`），当时还剩
