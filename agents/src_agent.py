@@ -355,20 +355,66 @@ def _shape_signals_section(names: Any, url: str = "") -> str:
     return "Shape signals (from the URL, not a claim):\n" + "\n".join(notes) + "\n\n"
 
 
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+#: 裸控制字符 -> 它们在 JSON 里该有的写法。不在表里的用 \uXXXX(一样合法)。
+_RAW_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _repair_json_text(text: str) -> str:
+    """把模型常给的两种"几乎合法"修成合法 JSON:字符串里的裸控制字符、尾随逗号。
+
+    实测(2026-09-23,login-dev.nba.com):reasoner 的回包 2824 字符、结尾看起来就是一条完整
+    的 JSON(`"stop_reason": ""``}`),却 ``json.loads`` 不过 —— 丢掉它的代价是整轮运行。
+    这种"看着完整"的坏 JSON 最常见的两种成因就是裸换行(JSON 不允许字符串里出现未转义的
+    控制字符)和尾随逗号。
+
+    只修格式,不改内容:字符串里的裸换行本来就只能是换行,`,` 后面跟着 ``}``/``]`` 本来就
+    只能是多余的。修不了就原样交回去,由调用方报 ``unparseable`` —— 真的缺一块仍然要失败。
+    """
+    out: List[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            elif ch < " ":
+                out.append(_RAW_CONTROL_ESCAPES.get(ch) or f"\\u{ord(ch):04x}")
+                continue
+        elif ch == '"':
+            in_string = True
+        out.append(ch)
+    repaired = "".join(out)
+    return _TRAILING_COMMA_RE.sub(r"\1", repaired)
+
+
 def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
     """Robust JSON extraction from LLM output (Cairn pattern)."""
     if not text or not text.strip():
         return None
     stripped = text.strip()
-    # 1. Direct parse
+    repaired = _repair_json_text(stripped)
+    for candidate in ((stripped,) if repaired == stripped else (stripped, repaired)):
+        parsed = _parse_json_candidate(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_json_candidate(text: str) -> Optional[Dict[str, Any]]:
+    """一条文本的三种取法:整条、```json 围栏里、第一个配平的 ``{...}``。"""
     try:
-        obj = json.loads(stripped)
+        obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
     except (json.JSONDecodeError, ValueError):
         pass
     # 2. Markdown fence
-    match = _JSON_FENCE_RE.search(stripped)
+    match = _JSON_FENCE_RE.search(text)
     if match:
         try:
             obj = json.loads(match.group(1))
@@ -377,17 +423,17 @@ def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
         except (json.JSONDecodeError, ValueError):
             pass
     # 3. First { ... } block
-    start = stripped.find("{")
+    start = text.find("{")
     if start >= 0:
         depth = 0
-        for i, ch in enumerate(stripped[start:], start):
+        for i, ch in enumerate(text[start:], start):
             if ch == "{":
                 depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     try:
-                        obj = json.loads(stripped[start:i + 1])
+                        obj = json.loads(text[start:i + 1])
                         if isinstance(obj, dict):
                             return obj
                     except (json.JSONDecodeError, ValueError):
@@ -1319,7 +1365,8 @@ class SrcAgentLoop:
             return None
         parsed = _parse_json_response(raw)
         if parsed is None:
-            self._last_reason_error = (f"unparseable({len(raw)} chars, tail={raw[-60:]!r})")
+            self._last_reason_error = (f"unparseable({len(raw)} chars, "
+                                       f"head={raw[:80]!r}, tail={raw[-60:]!r})")
             return None
         self._last_reason_error = ""
         self._activate_from_reasoner(parsed)

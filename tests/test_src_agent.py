@@ -89,6 +89,35 @@ class TestJsonParsing(unittest.TestCase):
         result = _parse_json_response('{"a": {"b": [1, 2]}, "c": true}')
         self.assertEqual(result, {"a": {"b": [1, 2]}, "c": True})
 
+    def test_a_raw_newline_inside_a_string_is_repaired(self):
+        """模型给"看着完整、却 json.loads 不过"的回包,最常见就是字符串里带了裸换行。
+
+        实测(2026-09-23,login-dev.nba.com):reasoner 的回包 2824 字符、结尾就是一条完整的
+        JSON(`"stop_reason": ""``}`),仍然 unparseable —— 丢掉它的代价是整轮运行。
+        """
+        raw = '{"reasoning": "first line\nsecond line", "should_stop": false}'
+        self.assertEqual({"reasoning": "first line\nsecond line", "should_stop": False},
+                         _parse_json_response(raw))
+
+    def test_a_control_character_the_plain_way_is_repaired_too(self):
+        raw = '{"a": "tab\there", "b": "bell\x07"}'
+        self.assertEqual({"a": "tab\there", "b": "bell\x07"}, _parse_json_response(raw))
+
+    def test_a_trailing_comma_is_repaired(self):
+        self.assertEqual({"a": 1}, _parse_json_response('{"a": 1,}'))
+        self.assertEqual({"a": [1, 2]}, _parse_json_response('{"a": [1, 2,]}'))
+
+    def test_repair_does_not_turn_breakage_into_success(self):
+        """修的是格式,不是内容:真的缺一块就还是 None。"""
+        self.assertIsNone(_parse_json_response('{"a": [1, 2'))
+        self.assertIsNone(_parse_json_response('{"a": 1,,,}'))
+
+    def test_a_quote_inside_a_string_is_not_taken_for_the_end(self):
+        """字符串里的转义引号不该打断扫描 —— 修的那一步也要认它。"""
+        raw = '{"reasoning": "he said \\"ok\\"\nthen stopped"}'
+        self.assertEqual({"reasoning": 'he said "ok"\nthen stopped'},
+                         _parse_json_response(raw))
+
 
 class TestBlackboardContext(unittest.TestCase):
     def test_empty_snapshot(self):
