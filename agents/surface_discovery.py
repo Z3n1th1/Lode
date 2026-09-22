@@ -451,7 +451,7 @@ def _extract_text(text: str, result: SurfaceResult, source: str, scope: SurfaceS
         for match in regex.finditer(text):
             value = match.group(1) if match.lastindex else match.group(0)
             result.add_path(value, source, scope)
-            _add_under_bases(result, value, bases, scope)
+            _add_under_bases(result, value, bases, scope, source=source)
 
 
 #: How many declared bases one bundle may contribute. A file that declares ten of them is
@@ -502,12 +502,18 @@ def _declared_api_bases(text: str) -> tuple[str, ...]:
 
 
 def _add_under_bases(result: SurfaceResult, value: str, bases: tuple[str, ...],
-                     scope: SurfaceScope) -> None:
+                     scope: SurfaceScope, *, source: str = "") -> None:
     """Also record ``base + fragment`` for every declared base.
 
-    The fragment is kept as well — sometimes it really is a path. The joined form is just
-    the one with evidence behind it, so it is scored higher (``base-join`` in
-    ``agents.src_autopilot._SOURCE_WEIGHT``) and wins the ranking.
+    The fragment is kept as well — sometimes it really is a path. But the joined form is the
+    *same discovery* with one more piece of evidence (the bundle said the base out loud), so it
+    carries the fragment's source too and can never rank below it. Without that inheritance the
+    two entries were the same finding wearing different provenance, and the bundle's own
+    evidence lost to whichever extractor happened to name the fragment:
+
+    实测(2026-09-23,login-dev.nba.com 三趟):裸碎片带 ``sourcemap``(25) → 70 分,拼接形态只带
+    ``base-join``(18) → 63 分,于是模型打了 101 发裸的、12 发拼接的;两形态同时在清单里的
+    3 个族里,裸的一律 404,拼接的那条是活的(200 / OPTIONS 200)。
     """
     if not bases:
         return
@@ -522,7 +528,11 @@ def _add_under_bases(result: SurfaceResult, value: str, bases: tuple[str, ...],
     if any(path == base or path.startswith(base + "/") for base in bases):
         return  # already carries a base — nothing to resolve
     for base in bases:
-        result.add_path(f"{base}{raw}", "base-join", scope)
+        joined = f"{base}{raw}"
+        result.add_path(joined, "base-join", scope)
+        if source:
+            # 来源跟着一起继承:拼接形态是碎片解析出来的,不是第二次发现。
+            result.add_path(joined, source, scope)
 
 
 def _extract_json(text: str, result: SurfaceResult, source: str, scope: SurfaceScope, base: str,

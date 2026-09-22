@@ -432,11 +432,11 @@ class ApiBaseJoinTests(unittest.TestCase):
     def _scope(self) -> SurfaceScope:
         return SurfaceScope("fixture", "written authorization", allowed_hosts=["example.com"])
 
-    def _extract(self, text: str):
+    def _extract(self, text: str, *, source: str = "js"):
         from agents.surface_discovery import SurfaceResult, _extract_text
 
         result = SurfaceResult(target="https://example.com/", base_url="https://example.com")
-        _extract_text(text, result, "js", self._scope(),
+        _extract_text(text, result, source, self._scope(),
                       bases=_declared_api_bases(text))
         return result
 
@@ -474,13 +474,38 @@ class ApiBaseJoinTests(unittest.TestCase):
         self.assertFalse([p for p in base_joined if p.endswith(".svg")], base_joined)
         self.assertFalse([p for p in base_joined if "#" in p], base_joined)
 
+    def test_the_joined_form_inherits_the_fragment_source(self) -> None:
+        """拼接形态是同一次发现的解析结果,不是第二次发现 —— 来源跟着一起继承。
+
+        不继承的话两条候选是"同一次发现穿了不同的来源外衣",而 bundle 自己那条证据会输给
+        碰巧先命名它的 extractor(实测就是输给 sourcemap)。
+        """
+        result = self._extract(self.BUNDLE, source="sourcemap")
+        self.assertIn("sourcemap", result.sources["/openidm/config/ui/themerealm"])
+        self.assertIn("base-join", result.sources["/openidm/config/ui/themerealm"])
+
     def test_the_joined_form_outranks_the_bare_fragment(self) -> None:
-        """不然排序还是让 404 的那个先被探索。"""
+        """不然排序还是让 404 的那个先被探索。
+
+        比的是**提取结果里真实的 sources**,而且在 ``sourcemap`` 下也比一次:2026-09-23 真机
+        翻的就是 sourcemap(25) 压过 base-join(18),而只比 ``["base-join"]`` 对 ``["js"]``
+        的那一版测不到它。
+        """
         from agents import src_autopilot
 
-        joined = src_autopilot._score_candidate("/openidm/config/ui/themerealm", ["base-join"])
-        bare = src_autopilot._score_candidate("/config/ui/themerealm", ["js"])
-        self.assertGreater(joined, bare)
+        for source in ("js", "sourcemap"):
+            result = self._extract(self.BUNDLE, source=source)
+            pairs = (("/config/ui/themerealm", "/openidm/config/ui/themerealm"),
+                     ("/info/uiconfig", "/openidm/info/uiconfig"))
+            for bare, joined in pairs:
+                with self.subTest(source=source, joined=joined):
+                    self.assertIn(bare, result.paths)
+                    self.assertIn(joined, result.paths)
+                    self.assertGreater(
+                        src_autopilot._score_candidate(joined, result.sources[joined]),
+                        src_autopilot._score_candidate(bare, result.sources[bare]),
+                        f"{joined} {sorted(result.sources[joined])} 没有排在 "
+                        f"{bare} {sorted(result.sources[bare])} 前面")
 
 
 if __name__ == "__main__":

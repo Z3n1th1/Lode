@@ -55,9 +55,14 @@ _SOURCE_WEIGHT = {
     "openapi": 30,
     "sourcemap": 25,
     "seed": 20,
-    # 拼上 bundle 自己声明的 API base 之后的路径。权重压过 js/sourcemap,因为它比
-    # "这串字看着像路径"多了半条证据:bundle 亲口说了 base 是 /openidm。真机实测里
-    # 没有它的时候,三个 OPTIONS 探针全打在缺前缀的 404 上。
+    # 拼上 bundle 自己声明的 API base 之后的路径。真机实测里没有它的时候,三个 OPTIONS
+    # 探针全打在缺前缀的 404 上。
+    #
+    # 注意这个数字**不是**"压过所有 extractor"的手段:它只压过 js(15),压不过 sourcemap(25)。
+    # 实测(2026-09-23,login-dev.nba.com 三趟)就是在这里翻的:裸碎片带 sourcemap → 70 分,
+    # 拼接形态只带 base-join → 63 分,模型于是打了 101 发裸的、12 发拼接的,而两形态同时在
+    # 清单里的 3 个族里裸的一律 404、拼接的是活的。排序靠 `_RESOLVED_FRAGMENT_BONUS`
+    # 结构化地保证,不靠在这里逐个比大小。
     "base-join": 18,
     "js": 15,
     # Explorer 在响应里看见的路由。低于 js:那是模型对响应的阅读,比从 bundle 里抠出来的
@@ -67,6 +72,14 @@ _SOURCE_WEIGHT = {
     "robots": 8,
     "sitemap": 8,
 }
+
+#: 拼上 base 的那一条比裸碎片多一条证据 —— bundle 亲口声明了 base,而裸碎片只是"这串字
+#: 看着像路径"。给一个小加成,让同族里**解析过的那条排在没解析的前面**。
+#:
+#: 刻意不靠把 ``_SOURCE_WEIGHT["base-join"]`` 调到比所有 extractor 都大:那是拿数字跟数字比,
+#: 下一个 extractor 加进来(或者某个 extractor 调个权重)就又翻过去了 —— 实测翻的就是
+#: sourcemap(25) 对 base-join(18)。加成按"半条证据"给,所以小于 medium 信号的 15。
+_RESOLVED_FRAGMENT_BONUS = 6
 
 
 def _safe_query(query: str) -> str:
@@ -123,8 +136,10 @@ def _canonical_url(value: Any, scope: SurfaceScope, *, base_url: str = "") -> tu
 def _score_candidate(url: str, sources: Iterable[str]) -> int:
     parts = urlsplit(url)
     segments = {item for item in re.split(r"[^a-z0-9]+", parts.path.lower()) if item}
+    names = [str(source).lower() for source in sources]
     score = 10
-    score += max((_SOURCE_WEIGHT.get(str(source).lower(), 5) for source in sources), default=0)
+    score += max((_SOURCE_WEIGHT.get(name, 5) for name in names), default=0)
+    score += _RESOLVED_FRAGMENT_BONUS if "base-join" in names else 0
     score += 35 if segments & _HIGH_SIGNAL else 0
     score += 15 if segments & _MEDIUM_SIGNAL else 0
     score += 10 if parts.query else 0
