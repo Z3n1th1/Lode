@@ -208,7 +208,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
 当前基线（2026-09-23 实测）：
 
-- Python **757 passed, 7 skipped**（`py310`，约 35s）
+- Python **761 passed, 7 skipped**（`py310`，约 35s）
 - 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
@@ -322,6 +322,17 @@ cd console; npm run typecheck; npm run test; npm run build
 
 ## 近期历史（新在前）
 
+- 本次（2026-09-23）**传输层的掉线不许终结整轮 hunt**。reasoner 是唯一一条"失败就整轮停"
+  的调用（explorer 失败只记一条 error 继续下一轮），而它把两种完全不同的失败当成一种：
+  本地代理掐长连接（实测 `ConnectError: [WinError 10053]`）和"思考吃光 token 预算"
+  （`empty content`）。现在按失败文本分两层：传输层（Connect/Timeout/10053/10054/5xx/429）
+  重试，有界三发、带退避，并且**在时间线上留一条 `llm_retry`**（不然它和"这一轮就是慢"
+  长得一样）；内容/参数层（`empty content`、`unparseable`、没配 provider）**第一发就如实报**，
+  不重试 —— 那句 `reasoning_content=28902 chars` 正是这个 bug 停了两天的唯一线索，不能被
+  "重试掉了"。有界性也钉了：一直掉线就三发之后报 `reasoner_failed`。
+  `tests/test_src_agent.py::TestReasonerTransientRetry` 把单发行为复现成旧的失败
+  （`reasoner_failed` / 0 次探索），所以这几条测试钉的是真行为，不是恒真的断言。
+
 - 本次（2026-09-23）**真机复跑 login-dev.nba.com**（同一份 `out/nba-probe-scope.json`、额度 60，
   两台目标 09-23 都能通了：都回 301）。两件要看的里，**回流这条通了**：两次跑都是
   `intents_from_routes: 1`，黑板时间线上有 `route_reflow Explorer 报的路由新增 1 个 intent`
@@ -337,7 +348,7 @@ cd console; npm run typecheck; npm run test; npm run build
 
   两次都不是被额度停的：第一次 5 圈 / 12 次探索后被 `max_tokens` 截断（见「已知限制 7」），
   第二次 3 圈后被一次瞬时 LLM 传输错误停掉（`ConnectError: [WinError 10053]`），当时还剩
-  22/60 个额度 —— 也就是说**一次掉线能终结整轮 hunt**，这是下一个该看的健壮性问题。
+  22/60 个额度 —— **一次掉线能终结整轮 hunt**，这已经修了（见下一条）。
 
 - 本次（2026-09-23）**「读不到」不等于「没有这条记录」**。`JobRegistry.get()/list()` 是故意
   不加锁的读者,而 `_write` 用 staged + `os.replace` 换文件 —— 落在那扇 Windows 窗里的 `open`

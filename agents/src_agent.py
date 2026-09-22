@@ -99,6 +99,32 @@ def last_llm_error() -> str:
     return _LAST_LLM_ERROR["error"]
 
 
+# 一次掉线不该终结整轮 hunt。``_httpx_provider`` 已经按家重试过 3 次(1.5s/3s 退避),
+# 但那是"换一条路再试";这里是"这一家刚才那一发有没有过去"—— 本地代理掐长连接
+# (实测 `ConnectError: [WinError 10053]`,当时还剩 22/60 个额度就整轮停了)属于前者,
+# 而重试是唯一能过去的办法。
+#
+# 反过来,"empty content"/"unparseable" 是内容或参数的问题:重试只会再烧一次同样的预算,
+# 而且会把诊断淹没 —— 那两句正是 hunt 停了两天的唯一线索,不能变成"重试掉了"。
+_TRANSIENT_LLM_MARKERS = (
+    "connecterror", "connection", "connecttimeout", "readtimeout", "timeout",
+    "remotedisconnected", "protocolerror", "10053", "10054",
+    "http 429", "http 500", "http 502", "http 503", "http 504",
+)
+
+
+def is_transient_llm_failure(reason: str) -> bool:
+    """传输层的失败(可以重试),还是内容/参数层的失败(重试没有意义)。"""
+    text = str(reason or "").lower()
+    return any(marker in text for marker in _TRANSIENT_LLM_MARKERS)
+
+
+#: 关键路径(reasoner)上一次传输失败之后重试几次、每次之间退避多久。有界:三发之后
+#: 还是不行就如实报 `reasoner_failed`,不装成成功。
+REASON_TRANSIENT_ATTEMPTS = 3
+REASON_TRANSIENT_BACKOFF = 3.0
+
+
 def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
     """LLM completion through the single shared client.
 
@@ -1270,14 +1296,26 @@ class SrcAgentLoop:
             blackboard_context=context,
             max_explore=self.config.max_explore_per_cycle,
         )
-        raw = self._complete(
-            self._system(REASONER_SYSTEM), user_msg,
-            timeout=self.config.timeout,
-            prefer=self.config.reasoner_prefer,
-            only=self.config.reasoner_only,
-        )
+        raw = None
+        for attempt in range(REASON_TRANSIENT_ATTEMPTS):
+            raw = self._complete(
+                self._system(REASONER_SYSTEM), user_msg,
+                timeout=self.config.timeout,
+                prefer=self.config.reasoner_prefer,
+                only=self.config.reasoner_only,
+            )
+            if raw is not None:
+                break
+            reason = last_llm_error() or "no content"
+            self._last_reason_error = f"llm_failed: {reason}"
+            if not is_transient_llm_failure(reason):
+                return None
+            if attempt + 1 < REASON_TRANSIENT_ATTEMPTS:
+                # 可见地重试:否则"这一轮回合比别人慢"和"重试过了"在时间线上长得一样。
+                self._timeline("llm_retry", "",
+                               f"reasoner 第 {attempt + 1} 发失败(传输层):{reason[:120]}")
+                time.sleep(REASON_TRANSIENT_BACKOFF * (attempt + 1))
         if raw is None:
-            self._last_reason_error = f"llm_failed: {last_llm_error() or 'no content'}"
             return None
         parsed = _parse_json_response(raw)
         if parsed is None:

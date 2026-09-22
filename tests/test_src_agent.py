@@ -1349,6 +1349,102 @@ class TestLlmBudget(unittest.TestCase):
         self.assertIn(mod.LLM_MAX_TOKENS_ENV, reason, "要给出可操作的那一步")
 
 
+class TestReasonerTransientRetry(unittest.TestCase):
+    """一次掉线不该终结整轮 hunt —— 但"内容问题"必须照旧当场报出来。
+
+    实测(2026-09-23,login-dev.nba.com):`llm_failed: ConnectError: [WinError 10053]` 让整轮
+    hunt 在 38/60 个请求处停下,剩下 22 个额度一发都没花。传输层的失败重试就能过去;而
+    `empty content`(思考吃光预算)重试只会再烧一次同样的额度,还要把诊断淹没 —— 那句
+    "reasoning_content=28902 chars" 正是这个 bug 停了两天的唯一线索。
+    """
+
+    def _reasoner(self, fail_reason, counter, bb, *, fail_first=None):
+        """Reasoner 先失败 ``fail_first`` 次(或一直失败),之后正常选 intent。"""
+        def complete(system, user, **kwargs):
+            if "Reasoner" in system:
+                counter["calls"] += 1
+                if fail_first is None or counter["calls"] <= fail_first:
+                    import agents.src_agent as mod
+
+                    mod._note_llm_failure(fail_reason)
+                    return None
+                ids = [row["intent_id"] for row in bb.snapshot()["intents"]
+                       if row.get("status") == "queued"]
+                return json.dumps({
+                    "reasoning": "t", "should_stop": False,
+                    "selected_intents": [{"intent_id": item, "hypothesis": "h",
+                                          "check_description": "c"} for item in ids],
+                })
+            return json.dumps({"analysis": "x", "findings": [], "conclusion": "dead_end",
+                               "dead_end_reason": "nothing"})
+        return complete
+
+    def _run(self, fake, bb_path):
+        import agents.src_agent as mod
+
+        with patch.object(mod, "REASON_TRANSIENT_BACKOFF", 0.0):
+            return run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                 fetcher=lambda url, **kw: (200, "{}", {}),
+                                 llm_complete_fn=fake, worker_id="test-w")
+
+    def test_the_classifier_separates_transport_from_content(self):
+        from agents.src_agent import is_transient_llm_failure
+
+        for transient in ("ConnectError: [WinError 10053] 连接被中止",
+                          "ReadTimeout: read timed out", "ConnectTimeout: ...",
+                          "HTTP 503: upstream unavailable", "HTTP 429: slow down"):
+            self.assertTrue(is_transient_llm_failure(transient), transient)
+        for fatal in ("empty content, reasoning_content=28902 chars (raise LODE_LLM_MAX_TOKENS)",
+                      "unparseable(120 chars, tail='...')",
+                      "no provider configured (LLM_PROVIDERS / LLM_API_KEY)",
+                      "HTTP 400: bad request"):
+            self.assertFalse(is_transient_llm_failure(fatal), fatal)
+
+    def test_a_transport_failure_is_retried_and_the_cycle_goes_on(self):
+        counter = {"calls": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 2)
+            summary = self._run(self._reasoner("ConnectError: [WinError 10053]", counter, bb,
+                                               fail_first=1), bb_path)
+            timeline = [str(row.get("kind")) for row in bb.snapshot().get("timeline", [])]
+
+        self.assertGreaterEqual(counter["calls"], 2, "第一发失败之后没有重试")
+        self.assertNotEqual("reasoner_failed", summary["stop_reason"], summary.get("errors"))
+        self.assertGreater(summary["total_explored"], 0, "重试之后这一轮还是没探索任何东西")
+        self.assertIn("llm_retry", timeline, "重试要留痕 —— 不然它和「这一轮就是慢」长得一样")
+
+    def test_a_content_failure_is_reported_on_the_first_shot(self):
+        """内容问题不许重试:既烧额度,又把诊断淹没。"""
+        counter = {"calls": 0}
+        fatal = "empty content, reasoning_content=28902 chars (raise LODE_LLM_MAX_TOKENS)"
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 2)
+            summary = self._run(self._reasoner(fatal, counter, bb), bb_path)
+
+        self.assertEqual("reasoner_failed", summary["stop_reason"])
+        self.assertEqual(1, counter["calls"], "内容问题被重试了")
+        self.assertIn(fatal, " ".join(summary["errors"]), "诊断要原样留在摘要里")
+
+    def test_retrying_is_bounded(self):
+        """一直掉线:到了上限就如实报,不无限重试。"""
+        from agents.src_agent import REASON_TRANSIENT_ATTEMPTS
+
+        counter = {"calls": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 2)
+            summary = self._run(self._reasoner("ConnectError: [WinError 10053]", counter, bb),
+                                bb_path)
+
+        self.assertEqual(REASON_TRANSIENT_ATTEMPTS, counter["calls"])
+        self.assertEqual("reasoner_failed", summary["stop_reason"])
+
+
 class TestRequestBudget(unittest.TestCase):
     """一轮能发多少请求。红线要求"最小化",而在这之前没有任何计数器。"""
 
