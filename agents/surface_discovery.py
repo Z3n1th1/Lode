@@ -12,15 +12,18 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import secrets
 import ssl
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
+import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from core.action_admission import ADMISSIBLE_METHODS as _ADMISSIBLE_METHODS
 from core.rate_limit import limiter_for
@@ -34,10 +37,41 @@ API_PREFIXES = {
     "orders", "payment", "pay", "message", "notify", "data", "report",
     "search", "query", "list", "detail", "info", "profile", "manage",
     "console", "monitor", "internal", "debug", "health", "status", "version",
+    # Resource nouns the list only had half of. `orders` was here and `products` was
+    # not, so a bundle that built its URL by concatenation lost the endpoint entirely:
+    # `API_BASE + "/products?q="` leaves a bare fragment, `_looks_high_signal` rejects
+    # it, and the candidate never exists. Measured 2026-09-25 on ranges/lode-range,
+    # where that took SQLi recall from 4/5 to 0/9 before the fixture was corrected.
+    #
+    # Adding words fixes instances, not the class — any hand-written noun list is
+    # incomplete by construction, and this is the third such list to lose something
+    # real today. Kept deliberately short for that reason: every entry widens candidate
+    # generation, and candidates are what the request budget is spent on.
+    "product", "products", "item", "items", "cart", "catalog",
+    "category", "categories", "post", "posts", "comment", "comments",
+    "article", "articles", "tag", "tags",
 }
 DISCOVERY_RE = re.compile(
     r"(?:^|/)(?:swagger|api-docs|openapi|graphql|graphiql|actuator|healthz?|"
     r"readyz?|livez?|status|version|metrics|info|config|schema)(?:/|$|[.?_-])",
+    re.I,
+)
+# Exposure, not API surface: paths that matter because they *leak* something, not
+# because they route somewhere. Deliberately a second dimension rather than more
+# entries in API_PREFIXES — the two answer different questions and get tuned apart.
+#
+# Why it exists: robots.txt is the one place a site volunteers where its own
+# secrets live (`Disallow: /.git`, `Disallow: /backup`). Those lines were always
+# parsed, but `_looks_high_signal` kept only API-shaped paths, so they were dropped
+# silently — measured 2026-09-25 on ranges/lode-range, where three planted bugs
+# (`/.git/config`, `/.env`, `/backup/users.sql`) never became candidates while the
+# knowledge base already shipped an `insecure-scm-test` module about exactly this.
+EXPOSURE_RE = re.compile(
+    r"(?:^|/)(?:\.git|\.svn|\.hg|\.env|\.aws|\.ssh|\.htpasswd|\.htaccess"
+    r"|id_rsa|id_dsa|credentials|secrets?|passwd|shadow|phpinfo|server-status"
+    r"|wp-config|web\.config|config\.php|backup|backups|dump|dumps|db|database"
+    r"|archive|archives|private|old|tmp|temp)(?:$|[/.?_-])"
+    r"|\.(?:sql|bak|old|orig|save|swp|swo|dump|sqlite3?|tar|tgz|7z|rar|pem|p12|pfx|jks)(?:$|[?#])",
     re.I,
 )
 STATIC_RE = re.compile(r"\.(?:js|mjs|css|map|json|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|pdf|zip)(?:[?#].*)?$", re.I)
@@ -55,14 +89,35 @@ ROUTER_RE = re.compile(r"(?:path|redirect)\s*:\s*[\"'](/[^\"']{1,240})[\"']", re
 SOURCE_MAP_RE = re.compile(r"//#\s*sourceMappingURL=([^\s]+)")
 CHUNK_RE = re.compile(r"[\"']([^\"']+\.(?:js|mjs|map)(?:\?[^\"']*)?)[\"']", re.I)
 
-SEED_PATHS = (
-    "/asset-manifest.json", "/manifest.json", "/static/js/manifest.json",
-    "/build/asset-manifest.json", "/webpack-manifest.json", "/swagger.json",
-    "/swagger/v1/swagger.json", "/swagger/v2/swagger.json", "/api-docs",
-    "/api-docs.json", "/v2/api-docs", "/v3/api-docs", "/openapi.json",
-    "/openapi.yaml", "/swagger-ui.html", "/graphql", "/graphiql",
-    "/robots.txt", "/sitemap.xml",
+# Probes sent to every target, in two named groups so the spend is legible.
+#
+# Both groups draw on the SAME run budget as the agent loop — the total is a promise
+# to the program (docs/security-boundary.md) — so "make room for the exposure probes"
+# cannot mean exempting them from the cap. It means not spending requests on
+# near-duplicate framework paths. Measured 2026-09-25 on ranges/lode-range: adding
+# three exposure probes displaced three agent requests and cost a cycle, because the
+# list carried six manifest/swagger variants that only ever answer on the one
+# framework that names them. One representative per family is kept.
+EXPOSURE_PATHS = (
+    # `/.env` belongs here rather than in extraction because nothing on a page ever
+    # *links* to it — there is no signal to find, only a path to try.
+    "/.env", "/.git/config", "/backup/",
 )
+FRAMEWORK_PATHS = (
+    "/asset-manifest.json", "/manifest.json",
+    "/swagger.json", "/swagger-ui.html", "/v3/api-docs", "/openapi.json",
+    "/graphql",
+    "/actuator/health", "/druid", "/nacos", "/api/workflow/search",
+)
+# Order is budget priority: a tight budget truncates the tail, so highest yield
+# first — exposure, then robots/sitemap (the crawl's main source of paths), then the
+# framework sweep. High-risk management/orchestration probes replaced near-duplicate
+# swagger/openapi variants (api-docs, v2/api-docs, openapi.yaml) so the per-target
+# tax stays ≤16 while Origin-Direct / RCE surfaces get a first look.
+# Dropped on purpose: /static/js/manifest.json, /webpack-manifest.json
+# and /build/asset-manifest.json, /swagger/v{1,2}/swagger.json, /graphiql,
+# /api-docs, /api-docs.json, /v2/api-docs, /openapi.yaml.
+SEED_PATHS = EXPOSURE_PATHS + ("/robots.txt", "/sitemap.xml") + FRAMEWORK_PATHS
 
 
 def _host(value: str) -> str:
@@ -205,6 +260,9 @@ class SurfaceScope:
     allowed_methods: tuple[str, ...] = _SAFE_METHODS
     # 允许带请求体。单独一个开关,因为"可以发 POST"和"可以发任意 body"是两件事。
     allow_request_body: bool = False
+    # 只改变 scope 内候选的排序，绝不扩大主机/方法/请求范围。
+    # 默认遵循操作员方向：优先严重/高危/RCE 形状。
+    priority_objectives: tuple[str, ...] = ("critical", "high", "rce")
     timeout_seconds: float = 8.0
     delay_seconds: float = 0.4
 
@@ -212,6 +270,12 @@ class SurfaceScope:
         # 归一化放在类型上,不只放在 from_mapping 里:直接构造 SurfaceScope 的调用方
         # 同样不该拿到一份"GET/HEAD 被声明掉"的授权。幂等,所以两种路径的结果一致。
         object.__setattr__(self, "allowed_methods", _method_tuple(self.allowed_methods))
+        allowed_priorities = {"critical", "high", "rce", "orphan_origin", "management"}
+        priorities = tuple(dict.fromkeys(
+            str(item).strip().lower() for item in self.priority_objectives
+            if str(item).strip().lower() in allowed_priorities
+        ))
+        object.__setattr__(self, "priority_objectives", priorities)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "SurfaceScope":
@@ -256,6 +320,10 @@ class SurfaceScope:
             forbidden=forbidden,
             allowed_methods=_method_tuple(data.get("allowed_methods") or data.get("methods")),
             allow_request_body=_as_bool(data.get("allow_request_body")),
+            priority_objectives=tuple(str(item) for item in _as_tuple(
+                data.get("priority_objectives") or data.get("priorities")
+                or ("critical", "high", "rce")
+            )),
             timeout_seconds=timeout,
             delay_seconds=delay,
         )
@@ -357,6 +425,10 @@ class SurfaceResult:
     joins: dict[str, set[str]] = field(default_factory=dict)
     requests: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: probe group -> requests actually sent (exposure / robots / framework). The
+    #: crawl and the agent loop share one budget, so without this the only visible
+    #: number is the total and a thin agent run looks unexplained.
+    probe_spend: dict[str, int] = field(default_factory=dict)
 
     def add_path(self, value: str, source: str, scope: SurfaceScope) -> None:
         raw = str(value or "").strip().strip("\"'` ")
@@ -425,9 +497,11 @@ def _looks_api_relative(value: str) -> bool:
 
 
 def _looks_high_signal(path: str) -> bool:
+    """Worth a request? Either it routes somewhere, or it leaks something."""
     value = (path or "").lower()
     first = value.lstrip("/").split("/", 1)[0].split("?", 1)[0]
-    return first in API_PREFIXES or "/api/" in value or bool(DISCOVERY_RE.search(value))
+    return (first in API_PREFIXES or "/api/" in value
+            or bool(DISCOVERY_RE.search(value)) or bool(EXPOSURE_RE.search(value)))
 
 
 def _fingerprints(text: str, content_type: str) -> set[str]:
@@ -446,6 +520,59 @@ def _fingerprints(text: str, content_type: str) -> set[str]:
     if "json" in content_type.lower() and ("paths" in lower or "swagger" in lower):
         found.add("OpenAPI JSON")
     return found
+
+
+def _response_content_type(headers: Mapping[str, str]) -> str:
+    return next((str(value).split(";", 1)[0].strip().lower()
+                 for key, value in headers.items() if str(key).lower() == "content-type"), "")
+
+
+def _normalized_response_text(text: str, request_url: str) -> str:
+    """Normalize only volatile request IDs and the requested path for template comparison."""
+    value = str(text or "").lower()[:8_000]
+    path = urlsplit(request_url).path.lower().rstrip("/")
+    if path:
+        value = value.replace(path, "<request-path>")
+    value = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+        "<request-id>", value,
+    )
+    value = re.sub(r"\b[0-9a-f]{20,}\b", "<request-id>", value)
+    value = re.sub(r"\b\d{10,}\b", "<request-number>", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _matches_soft_404(
+    status: int,
+    text: str,
+    headers: Mapping[str, str],
+    url: str,
+    baseline: tuple[int, str, Mapping[str, str], str] | None,
+) -> bool:
+    """Match a successful response against one random-path response conservatively."""
+    if baseline is None:
+        return False
+    baseline_status, baseline_text, baseline_headers, baseline_url = baseline
+    if not (200 <= status < 300 and status == baseline_status and baseline_text):
+        return False
+    if _response_content_type(headers) != _response_content_type(baseline_headers):
+        return False
+    candidate_title = re.search(r"<title\b[^>]*>(.*?)</title>", text, re.I | re.S)
+    baseline_title = re.search(r"<title\b[^>]*>(.*?)</title>", baseline_text, re.I | re.S)
+    if candidate_title and baseline_title:
+        left_title = _normalized_response_text(candidate_title.group(1), url)
+        right_title = _normalized_response_text(baseline_title.group(1), baseline_url)
+        if left_title != right_title:
+            return False
+    left = _normalized_response_text(text, url)
+    right = _normalized_response_text(baseline_text, baseline_url)
+    if not left or not right:
+        return False
+    if min(len(left), len(right)) < 80:
+        return left == right
+    if max(len(left), len(right)) > min(len(left), len(right)) * 1.25:
+        return False
+    return SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.985
 
 
 def _extract_text(text: str, result: SurfaceResult, source: str, scope: SurfaceScope,
@@ -609,6 +736,46 @@ def _extract_robots(text: str, result: SurfaceResult, scope: SurfaceScope) -> No
             result.add_path(line.split("<loc>", 1)[1].split("</loc>", 1)[0], "sitemap", scope)
 
 
+def _decompress_http_body(payload: bytes, content_encoding: str = "") -> bytes:
+    """Undo Content-Encoding so extractors see HTML/JS, not the wire bytes.
+
+    urllib does not decompress. Many CDNs gzip regardless of ``Accept-Encoding``;
+    the body starts with ``\\x1f\\x8b`` while Content-Type still says text/html.
+    Passing that blob to the HTML parser yields zero scripts and zero paths, which
+    looks like "this host has no surface". Truncated reads (``max_bytes``) still
+    yield whatever prefix zlib can inflate.
+    """
+    if not payload:
+        return payload
+    encoding = (content_encoding or "").split(",")[0].strip().lower()
+    looks_gzip = encoding in {"gzip", "x-gzip"} or payload.startswith(b"\x1f\x8b")
+    if looks_gzip:
+        try:
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            out = decoder.decompress(payload) + decoder.flush()
+            return out or payload
+        except zlib.error:
+            return payload
+    if encoding == "deflate":
+        for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            try:
+                return zlib.decompress(payload, wbits)
+            except zlib.error:
+                continue
+        return payload
+    return payload
+
+
+def _decode_http_body(payload: bytes, headers: Mapping[str, str]) -> str:
+    raw = _decompress_http_body(payload, headers.get("content-encoding", ""))
+    charset_match = re.search(r"charset=([\w.-]+)", headers.get("content-type", ""), re.I)
+    charset = charset_match.group(1) if charset_match else "utf-8"
+    try:
+        return raw.decode(charset, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
 def _request_text(
     method: str,
     url: str,
@@ -628,23 +795,51 @@ def _request_text(
     headers = {
         "User-Agent": "pentest-agent-src-surface/1.0",
         "Accept": "text/html,application/json,text/plain,*/*;q=0.5",
+        # urllib defaults to identity if this is missing. We accept gzip and undo
+        # it ourselves; several authorized hosts gzip even when identity is asked.
+        "Accept-Encoding": "gzip, deflate",
     }
     if body:
         headers["Content-Type"] = content_type or "application/x-www-form-urlencoded"
     request = Request(url, data=body or None, headers=headers, method=str(method).upper())
-    opener = build_opener(_NoRedirect())
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            payload = response.read(max_bytes)
-            headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
-            charset_match = re.search(r"charset=([\w.-]+)", headers.get("content-type", ""), re.I)
-            charset = charset_match.group(1) if charset_match else "utf-8"
-            return int(response.status), payload.decode(charset, errors="replace"), headers
-    except HTTPError as exc:
-        # 把响应头留下:3xx 的 Location 就在这里面,后面跟一跳要用。
-        return int(exc.code), "", {str(key).lower(): str(value) for key, value in (exc.headers or {}).items()}
-    except (OSError, URLError, TimeoutError, ValueError):
-        return 0, "", {}
+    # Verified TLS first. A broken chain on an *authorized* host used to look like
+    # "unreachable" (status 0) and the crawl never started. Retry once without
+    # verify so the HTML is still collected; the response is stamped so the
+    # fingerprint can say why.
+    contexts: tuple[ssl.SSLContext | None, ...] = (None, ssl._create_unverified_context())
+    last_error: Exception | None = None
+    for index, context in enumerate(contexts):
+        opener = build_opener(_NoRedirect()) if context is None else build_opener(
+            _NoRedirect(), HTTPSHandler(context=context))
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                payload = response.read(max_bytes)
+                headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+                if index:
+                    headers["x-lode-tls"] = "certificate_verify_failed"
+                return int(response.status), _decode_http_body(payload, headers), headers
+        except HTTPError as exc:
+            # 把响应头留下:3xx 的 Location 就在这里面,后面跟一跳要用。正文也留下 —
+            # 401/403 的 JSON 错误体经常带着真正的 API 路径,丢掉就等于丢掉面。
+            headers = {str(key).lower(): str(value) for key, value in (exc.headers or {}).items()}
+            try:
+                payload = exc.read(max_bytes)
+            except Exception:
+                payload = b""
+            if index:
+                headers["x-lode-tls"] = "certificate_verify_failed"
+            return int(exc.code), _decode_http_body(payload, headers) if payload else "", headers
+        except (OSError, URLError, TimeoutError, ValueError) as exc:
+            last_error = exc
+            if index == 0 and _tls_verify_failed(exc):
+                continue
+            return 0, "", {}
+    del last_error
+    return 0, "", {}
+
+
+def _tls_verify_failed(exc: BaseException) -> bool:
+    return "CERTIFICATE_VERIFY_FAILED" in str(exc)
 
 
 def _fetch_text(url: str, *, timeout: float, max_bytes: int = 1_500_000) -> tuple[int, str, dict[str, str]]:
@@ -665,6 +860,7 @@ def discover_surface(
     max_scripts: int = 40,
     fetcher: Callable[..., tuple[int, str, dict[str, str]]] | None = None,
     budget: Any = None,
+    extra_seeds: Sequence[str] = (),
 ) -> SurfaceResult:
     scope.require_authorization()
     target = target.strip()
@@ -707,6 +903,8 @@ def discover_surface(
             result.errors.append(f"blocked:{url}:request_budget_exhausted")
             return 0, "", {}
         status, text, headers = _attempt()
+        if headers.get("x-lode-tls") == "certificate_verify_failed":
+            result.fingerprints.add("TLS certificate verify failed")
         # ``status == 0`` 是连接层没成,不是对方的回答 —— 一次掉线不等于"这个资产不存在"。
         # 重试照走同一条路:闸门、额度、限速一步都不跳(它也是真的一次出站)。4xx/5xx 不在这里
         # 重试,那是对方明确回答过了。
@@ -753,6 +951,11 @@ def discover_surface(
         base = urlunsplit((landed.scheme.lower(), landed.netloc, "", "", ""))
         start = final_url.rstrip("/") or base
     result.fingerprints.update(_fingerprints(html, headers.get("content-type", "")))
+    try:
+        from intel.wih import tag_text
+        result.fingerprints.update(tag_text(html))
+    except Exception:
+        pass
     if status == 0:
         result.errors.append("base_unreachable")
         return result
@@ -765,12 +968,68 @@ def discover_surface(
     for asset in parser.assets:
         result.add_script(asset, "html", scope, start + "/")
 
-    for seed in SEED_PATHS:
+    extra = tuple(str(item).strip() for item in extra_seeds if str(item).strip())
+    extra_set = set(extra)
+    soft404_baseline: tuple[int, str, Mapping[str, str], str] | None = None
+    soft404_baseline_attempted = False
+    for seed in tuple(SEED_PATHS) + extra:
         seed_url = urljoin(base + "/", seed.lstrip("/"))
+        sent_before = len(result.requests)
         seed_status, text, seed_headers = fetch(seed_url)
+        # Book only the probes that actually went out: a budget-exhausted or
+        # scope-blocked probe spends nothing and must not read as spend.
+        if len(result.requests) > sent_before:
+            group = ("exposure" if seed in EXPOSURE_PATHS
+                     else "robots" if seed.endswith(("robots.txt", "sitemap.xml"))
+                     else "fingerprint" if seed in extra_set
+                     else "framework")
+            # Retries and in-scope redirects can add more than one outbound
+            # request for this logical probe. Report actual requests so the
+            # metric reconciles with the shared request budget.
+            result.probe_spend[group] = result.probe_spend.get(group, 0) + (
+                len(result.requests) - sent_before
+            )
         if not text or seed_status == 0:
             continue
+        if 200 <= seed_status < 300 and text != html and text.strip():
+            # Calibrate once, and only when a successful probe differs from the root.
+            # The request uses the normal scope, rate and shared-budget gates above.
+            if not soft404_baseline_attempted:
+                soft404_baseline_attempted = True
+                nonce = secrets.token_hex(12)
+                baseline_url = urljoin(base + "/", f"__lode_miss__/{nonce}")
+                baseline_sent_before = len(result.requests)
+                baseline_status, baseline_text, baseline_headers = fetch(baseline_url)
+                actual_spend = len(result.requests) - baseline_sent_before
+                if actual_spend:
+                    result.probe_spend["quality"] = result.probe_spend.get("quality", 0) + actual_spend
+                if 200 <= baseline_status < 300 and baseline_text:
+                    soft404_baseline = (
+                        baseline_status, baseline_text, baseline_headers, baseline_url,
+                    )
+            if _matches_soft_404(seed_status, text, seed_headers, seed_url, soft404_baseline):
+                result.fingerprints.add("soft-404 fallback")
+                continue
         result.fingerprints.update(_fingerprints(text, seed_headers.get("content-type", "")))
+        if seed in extra_set:
+            try:
+                from intel.fingerprint import match_body
+                result.fingerprints.update(match_body(text))
+            except Exception:
+                pass
+            try:
+                from intel.wih import tag_text
+                result.fingerprints.update(tag_text(text))
+            except Exception:
+                pass
+        # A probe that answers 2xx with its own body is itself a discovered path. The
+        # seeds used to be mined for content only, so a file's *existence* was never
+        # recorded — `/.env` answered 200 and still never became a candidate.
+        # `text != html` is the soft-404 guard: a site that returns its index page for
+        # every path (SPA shells — the NBA case) would otherwise manufacture surface
+        # out of nothing, which is a worse failure than the one being fixed.
+        if 200 <= seed_status < 300 and text != html:
+            result.add_path(seed, "seed", scope)
         if seed.endswith(("robots.txt", "sitemap.xml")):
             _extract_robots(text, result, scope)
         elif seed.endswith((".json", ".yaml")) or "openapi" in seed or "swagger" in seed or "manifest" in seed:
@@ -789,6 +1048,11 @@ def discover_surface(
         if script_status == 0 or not text:
             continue
         result.fingerprints.update(_fingerprints(text, script_headers.get("content-type", "")))
+        try:
+            from intel.wih import tag_text
+            result.fingerprints.update(tag_text(text))
+        except Exception:
+            pass
         # 这个 bundle 自己声明了 API base 的话,它里面的相对片段就是拼上 base 才成立的。
         bases = _declared_api_bases(text)
         if urlsplit(script_url).path.lower().endswith(".map"):
@@ -821,6 +1085,7 @@ def surface_to_dict(result: SurfaceResult) -> dict[str, Any]:
         "url_sources": {key: sorted(value) for key, value in sorted(result.url_sources.items())},
         "requests": result.requests,
         "errors": result.errors,
+        "probe_spend": dict(sorted(result.probe_spend.items())),
     }
 
 

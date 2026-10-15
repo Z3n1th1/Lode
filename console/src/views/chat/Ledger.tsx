@@ -2,7 +2,7 @@ import { ArrowDown } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ChatEvent, ChatMode } from '../../api'
-import { foldSubtasks, groupToolRuns, isSubtaskEvent, pendingApprovals } from '../../chatEvents'
+import { foldSubtasks, groupToolRuns, isSubtaskEvent, LEDGER_SUBTASK_KINDS, pendingApprovals } from '../../chatEvents'
 import { sliceRecent } from '../../chatTools'
 import { Button } from '../../components/ui/button'
 import LedgerRow from './LedgerRow'
@@ -10,12 +10,6 @@ import ToolRunRow from './ToolRunRow'
 
 const PAGE_SIZE = 60
 const STICK_SLACK = 56
-/** 只有真正跑起来的子任务才单独成行:对话回合本身就是这段对话。
- *
- *  新加一种任务 kind 时要同步这里,否则那一整轮事件在对话里什么都不渲染 ——
- *  `subtask_progress` / `subtask_finished` 是折进节点里的,不会自己成行。
- *  `target_run` = 从「新建项目」的确认单开出来的那一轮,它没有对话回合可依附。 */
-const SUBTASK_KINDS = new Set(['src_loop', 'surface_scan', 'target_run'])
 
 function clockOf(ts: unknown): string {
   const value = Number(ts)
@@ -174,7 +168,7 @@ export default function Ledger({ events, modes, busy, echo, onStop }: Props) {
             // 只有子任务行值得画卡片,其余事件照常渲染
             if (
               event.kind === 'subtask_started' &&
-              (!node || firstSubtaskSeq.get(jobId) !== event.seq || !SUBTASK_KINDS.has(node.kind))
+              (!node || firstSubtaskSeq.get(jobId) !== event.seq || !LEDGER_SUBTASK_KINDS.has(node.kind))
             ) {
               return null
             }

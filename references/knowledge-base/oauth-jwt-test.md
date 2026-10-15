@@ -30,7 +30,9 @@ public_key = open('public.pem', 'rb').read()
 fake_token = jwt.encode({"user": "admin"}, public_key, algorithm='HS256')
 ```
 
-### 1.2 密钥爆破
+### 1.2 密钥爆破（只许离线，禁止打登录口）
+
+hashcat / jwt_tool 只在**本机**对已拿到的 JWT 跑。禁止对目标登录口在线爆破、撞库、批量试密。
 
 ```bash
 # jwt_tool 爆破

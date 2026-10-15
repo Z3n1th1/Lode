@@ -171,7 +171,7 @@ launchctl load ~/Library/LaunchAgents/com.lode.console.plist
 
 ### 阶段 1：单机
 ```
-一台机器跑全部：Console + SRC agent + SignalHarbor
+一台机器跑全部：Console + SRC agent + Pulse
 ```
 适合自己用，最简单。
 

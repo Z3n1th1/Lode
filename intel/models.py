@@ -86,6 +86,19 @@ class AssetCandidate:
     title: str = ""
     summary: str = ""
     published_at: str = ""
+    evidence_refs: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def all_evidence_refs(self) -> tuple[str, ...]:
+        """Bounded, deduplicated references, including the legacy primary ref."""
+        result: list[str] = []
+        for raw in (*_strings(self.evidence_refs), self.evidence_ref):
+            ref = str(raw or "").strip()[:500]
+            if ref and ref not in result:
+                result.append(ref)
+            if len(result) >= 20:
+                break
+        return tuple(result)
 
     @property
     def key(self) -> str:
@@ -117,6 +130,7 @@ class AssetCandidate:
             "confidence": round(max(0.0, min(float(self.confidence), 1.0)), 3),
             "scope_status": self.scope_status,
             "evidence_ref": self.evidence_ref,
+            "evidence_refs": list(self.all_evidence_refs),
             "tags": list(dict.fromkeys(self.tags)),
             "score": round(float(self.score), 2),
             "is_new": bool(self.is_new),
@@ -139,6 +153,7 @@ class AssetCandidate:
             confidence=float(value.get("confidence", 0.5) or 0.5),
             scope_status=str(value.get("scope_status") or "in_scope"),
             evidence_ref=str(value.get("evidence_ref") or "").strip()[:500],
+            evidence_refs=_strings(value.get("evidence_refs")),
             tags=_strings(value.get("tags")),
             score=float(value.get("score", 0.0) or 0.0),
             is_new=bool(value.get("is_new", False)),

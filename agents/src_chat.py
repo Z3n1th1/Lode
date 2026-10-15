@@ -155,8 +155,9 @@ SRC_TOOLS = [
                 "Two tiers, both pulled the same way: pattern modules ('mobile' Android client "
                 "surface, 'url-trust' host/allowlist trust boundaries, 'evidence' how to make a "
                 "finding stick, 'idor', 'ssrf', 'injection', 'auth', 'recon', 'chains') and the "
-                "long-form knowledge base ('idor-test', 'ssrf-test', 'xss-test', 'http-smuggling-test' "
-                "… 48 cards). Read ONE at a time, at the point it is relevant — never pull the whole "
+                "long-form knowledge base ('case-index', 'orphan-origin-test', 'sandbox-escape-test', "
+                "'arl-recon', 'idor-test', 'ssrf-test', 'xss-test' …). Read ONE at a time, at the "
+                "point it is relevant — never pull the whole "
                 "set. An unknown name returns the list of what exists."
             ),
             "parameters": {

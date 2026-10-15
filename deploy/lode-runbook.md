@@ -1,10 +1,10 @@
-# Lode / SignalHarbor VPS 运行手册
+# Lode / Pulse VPS 运行手册
 
-面向使用者的名字是 **Lode（Lode）** 和 **SignalHarbor（信号舱）**；源码兼容名仍是 `pentest-agent`、`intel`、`news`。
+面向使用者的名字是 **Lode** 和 **Pulse**；源码兼容模块名仍是 `pentest-agent`、`intel`、`news`。
 
 这里提供的是本地部署模板，不是已在你的 VPS 上完成的安全验收。systemd 配置、网络出口与实际运行效果还需要在目标服务器验证；不能承诺零漏洞、不会被反制或运行时可读源码绝不泄漏。
 
-## SignalHarbor 长期采集
+## Pulse 长期采集
 
 创建独立用户和目录，不要用 root 跑，也不要与 SRC 执行器共用 UID：
 
@@ -51,7 +51,7 @@ journalctl -u signalharbor.service -n 100 --no-pager
 
 建议 SRC 执行 worker 与主控、私有 skill、报告和审批签名私钥分机。worker 视为可能被恶意响应、文档或第三方工具攻陷：不用 root、不授予 sudo、禁用 Docker socket、限制资源、任务结束可重建；审批签名只能由隔离的主控签发。
 
-应用 URL 检查是第一道门，不替代物理出站隔离。需要在宿主防火墙或独立出口网关验收：只允许登记来源/授权目标，阻断私网、loopback、云 metadata 和未授权 DNS/协议，并检查重定向和 DNS 变化。Clash Fake-IP 不应通过放宽私网校验解决。信号舱的 RSS、DeepSeek 和飞书出口与 SRC 目标出口分开管理；没有完成这项验收，不宣称已具备防外发能力。
+应用 URL 检查是第一道门，不替代物理出站隔离。需要在宿主防火墙或独立出口网关验收：只允许登记来源/授权目标，阻断私网、loopback、云 metadata 和未授权 DNS/协议，并检查重定向和 DNS 变化。Clash Fake-IP 不应通过放宽私网校验解决。Pulse 的 RSS、DeepSeek 和飞书出口与 SRC 目标出口分开管理；没有完成这项验收，不宣称已具备防外发能力。
 
 在 VPS 上先运行 `systemd-analyze verify /etc/systemd/system/signalharbor.service /etc/systemd/system/signalharbor.timer`，再验证采集、摘要、通知及出站拒绝日志。`systemd-analyze security signalharbor.service` 的评分只代表配置检查，不能代替渗透/逃逸或业务数据保护测试。
 

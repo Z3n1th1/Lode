@@ -62,11 +62,26 @@ def build(ctx: Ctx) -> APIRouter:
                                 detail="llm_settings_unavailable")
         path = llm_settings.settings_path(ctx.state_dir)
         content = llm_settings.mask_settings(llm_settings.read_settings(path))
+        try:
+            from core.cli_engines import configured_engine as _engine
+        except Exception:  # noqa: BLE001
+            def _engine(explicit: str = "", *, role: str = "reasoner") -> str:
+                del explicit
+                return {
+                    "hunter": "provider", "reasoner": "provider",
+                    "explorer": "provider", "verifier": "grok",
+                    "specialist": "codex",
+                }.get(role, "provider")
         content["effective"] = {
             "providers_env_override": bool(os.environ.get("LLM_PROVIDERS", "").strip()),
             "legacy_env_override": bool(os.environ.get("LLM_API_KEY", "").strip()),
             "reasoner_prefer": os.environ.get("SRC_REASONER_PREFER", ""),
             "explorer_prefer": os.environ.get("SRC_EXPLORER_PREFER", ""),
+            "hunter_engine": _engine("", role="hunter"),
+            "reasoner_engine": _engine("", role="reasoner"),
+            "explorer_engine": _engine("", role="explorer"),
+            "verifier_engine": _engine("", role="verifier"),
+            "specialist_engine": _engine("", role="specialist"),
         }
         content["settings_path"] = str(path)
         return JSONResponse(content=content, headers=_NOSTORE)
@@ -83,6 +98,7 @@ def build(ctx: Ctx) -> APIRouter:
             doc = llm_settings.write_settings(
                 [p.model_dump() for p in payload.providers],
                 payload.tiers,
+                payload.engines,
                 path=path,
                 stored=stored,
             )

@@ -3,14 +3,17 @@ param(
     [ValidateSet('run', 'collect', 'watch')][string]$Mode = 'watch',
     [string]$OutDir = (Join-Path $PSScriptRoot 'news-data'),
     [string]$Registry = (Join-Path $PSScriptRoot 'sources.news.example.json'),
+    [string]$EnvFile = (Join-Path $PSScriptRoot '.env.news.local'),
     [ValidateRange(1, 30)][double]$Timeout = 8,
     [ValidateRange(60, 86400)][double]$IntervalSec = 1800,
     [ValidateRange(0, 1000000)][int]$MaxRuns = 0,
-    [ValidateRange(0, 1000000)][int]$MaxConsecutiveErrors = 5,
+    [ValidateRange(0, 1000000)][int]$MaxConsecutiveErrors = 0,
     [ValidateRange(1, 20)][int]$MaxAiItems = 5,
     [switch]$NoAi,
     [switch]$Feishu,
-    [ValidateRange(1, 10)][int]$FeishuMaxItems = 3
+    [switch]$Discord,
+    [switch]$DryRun,
+    [Alias('MaxMessages')][ValidateRange(1, 10)][int]$FeishuMaxItems = 3
 )
 
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -40,7 +43,7 @@ if ($env:PA_PYTHON) {
 # Windows Store aliases may exist without a usable interpreter.
 foreach ($candidate in $pythonCandidates) {
     try {
-        & $candidate.Exe @($candidate.Prefix) -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>$null
+        & $candidate.Exe @($candidate.Prefix) -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $pythonExe = $candidate.Exe
             $pythonPrefix = @($candidate.Prefix)
@@ -54,11 +57,14 @@ if (-not $pythonExe) {
     throw 'Python 3.10+ runtime not found. Install Python or set PA_PYTHON to its executable.'
 }
 
-$newsArgs = @('-m', 'news', 'run', '--registry', $Registry, '--state-dir', $OutDir,
-    '--max-ai-items', $MaxAiItems, '--max-messages', $FeishuMaxItems,
-    '--timeout', $Timeout, '--allow-missing-ai')
-if ($NoAi) { $newsArgs += '--no-ai' }
+if ($Discord) { throw 'Pulse digest currently supports Feishu delivery; Discord remains available only for the legacy article pipeline.' }
+$newsArgs = @('-m', 'news', 'digest', '--registry', $Registry, '--state-dir', $OutDir,
+    '--timeout', $Timeout)
+if ((Test-Path -LiteralPath $EnvFile) -or $PSBoundParameters.ContainsKey('EnvFile')) {
+    $newsArgs += @('--env-file', $EnvFile)
+}
 if ($Feishu) { $newsArgs += '--feishu' }
+if ($DryRun) { $newsArgs += '--dry-run' }
 
 $runCount = 0
 $consecutiveErrors = 0

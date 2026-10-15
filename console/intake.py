@@ -53,6 +53,7 @@ TOGGLE_OPTIONS: Dict[str, str] = {
     "proxy_route": "proxy_route",
     "network_gate": "network_gate",
     "edge_human_gate": "edge_human_gate",
+    "arl_next": "arl_next",
 }
 
 
@@ -148,12 +149,14 @@ def _canonical_host(target_card: Dict[str, Any]) -> str:
 def _result(source: Dict[str, Any], materialized: Dict[str, Any]) -> Dict[str, Any]:
     """One shape for both a fresh confirm and a replayed one."""
     profile = source.get("profile_name") or source.get("profile") or ""
+    options = source.get("options") if isinstance(source.get("options"), dict) else {}
     return {
         "intake_id": str(source.get("intake_id", "")),
         "target": str(source.get("target", "")),
         "canonical_host": _canonical_host(materialized["target_card"]),
         "profile_name": str(profile),
         "instruction": str(source.get("instruction", "")),
+        "options": options,
         "options_digest": str(source.get("options_digest", "")),
         "target_id": materialized["target_id"],
         "target_card_digest": materialized["target_card_digest"],

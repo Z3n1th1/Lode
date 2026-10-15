@@ -22,7 +22,10 @@ _FALLBACK: Dict[str, Dict[str, Any]] = {
                 "tools": ["scan_target", "run_agent_analysis", "fetch_url", "show_blackboard",
                           "add_candidates", "show_progress", "auto_scan", "read_knowledge"],
                 "system_fragment": "挖洞模式：黑盒 SRC 与授权渗透同一套打法，"
-                                   "只在授权范围内动手，先侦察再逐点验证，写操作先要人工确认。"},
+                                   "只在授权范围内动手。"
+                                   "存在性探针（注入/越权/XSS/RCE 形状的 id/whoami/echo/time）要发；"
+                                   "查询与新增测试数据可做；删除/拖库/改已有数据、反弹、webshell 由闸门硬拒。"
+                                   "本机命令走命令研判正则门。"},
 }
 
 AUTONOMY_LEVELS = ("none", "ask", "auto")

@@ -280,6 +280,36 @@ class IntakeRunTests(_GateCase):
         self.assertEqual(body["target_card_digest"], jobs[0]["payload"]["target_card_digest"])
         self.assertTrue(_wait(lambda: seen and seen[0].job_id == run["job_id"]))
 
+    def test_arl_next_toggle_reaches_the_job_payload(self) -> None:
+        seen: list = []
+
+        def fake_run(job, ctx):
+            seen.append(job)
+            return {"summary_ref": "test:fake"}
+
+        client = self.client({"target_run": fake_run})
+        preview = self.submit(client, toggles={"arl_next": True, "asset_inventory": True})
+        self.assertTrue(preview["options"]["arl_next"]["enabled"])
+        self.assertEqual("fingerprint_import", preview["options"]["arl_next"]["mode"])
+        body = self.confirm(client, preview).json()
+        self.assertTrue(_wait(lambda: seen and seen[0].job_id == body["run"]["job_id"]))
+        self.assertTrue(seen[0].payload.get("arl_next"))
+        self.assertFalse(seen[0].payload.get("fingerprint_precise"))
+
+    def test_precise_fingerprint_toggle_reaches_the_job_payload(self) -> None:
+        seen: list = []
+
+        def fake_run(job, ctx):
+            seen.append(job)
+            return {"summary_ref": "test:fake"}
+
+        client = self.client({"target_run": fake_run})
+        preview = self.submit(client, toggles={"fingerprint_precise": True})
+        body = self.confirm(client, preview).json()
+        self.assertTrue(_wait(lambda: seen and seen[0].job_id == body["run"]["job_id"]))
+        self.assertTrue(seen[0].payload.get("fingerprint_precise"))
+        self.assertFalse(seen[0].payload.get("arl_next"))
+
     def test_a_replayed_confirm_does_not_start_a_second_run(self) -> None:
         client = self.client()
         preview = self.submit(client)

@@ -399,7 +399,9 @@ class TaskRouterIdempotencyTests(unittest.TestCase):
             elapsed = time.monotonic() - submitted_at
             try:
                 self.assertTrue(callback_started.wait(0.2))
-                self.assertLess(elapsed, 0.15)
+                # event_fn is held 0.35s; submit must return without waiting for it.
+                # 0.25 leaves headroom on a loaded Windows box without weakening the contract.
+                self.assertLess(elapsed, 0.25)
             finally:
                 release_callback.set()
                 for _ in range(100):

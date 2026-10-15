@@ -236,7 +236,7 @@ def default_options() -> Dict[str, Any]:
         # 能力型开关:mode 写的是"开着的时候最多做到哪一层",不随开关变化。
         "asset_inventory": {"enabled": False, "mode": "not_requested"},
         "fingerprint": {"enabled": False, "mode": "not_requested"},
-        "arl_next": {"enabled": False, "mode": "not_available"},
+        "arl_next": {"enabled": False, "mode": "fingerprint_import"},
         "intelligence": {"enabled": False, "mode": "metadata_only"},
         "poc_research": {"enabled": False, "mode": "metadata_only"},
         "proxy_route": {"enabled": False, "profile": ""},
@@ -699,6 +699,7 @@ class IntakeState:
                 "instruction": preview.instruction,
                 "instruction_digest": preview.instruction_digest,
                 "scope_digest": preview.scope_digest,
+                "options": dict(preview.options),
                 "options_digest": preview.options_digest,
                 "expires_at": preview.expires_at,
             }
@@ -717,6 +718,7 @@ class IntakeState:
             )
             self._pending.pop(preview.key, None)
             self._completed_by_message[(user_id, chat_id, message_id)] = dict(result)
+            self._completed_by_intake[(user_id, chat_id, preview.intake_id)] = dict(result)
             return result
 
     def consume_scope_confirmation(

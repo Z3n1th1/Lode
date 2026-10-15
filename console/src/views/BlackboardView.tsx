@@ -6,6 +6,8 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import EmptyState from '../components/ui/empty-state'
 import Table, { type Column } from '../components/ui/table'
+import { useAuth } from '../store/auth'
+import { useChat } from '../store/chat'
 import { usePanels } from '../store/panels'
 import type { SrcCandidate, SrcIntent } from '../api'
 
@@ -56,11 +58,29 @@ export default function BlackboardView() {
     <section className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="黑板"
-        meta={`${view.available ? `revision ${view.revision ?? 0}` : '无数据'}`}
+        meta={
+          view.available
+            ? `${view.session_id ? `${view.session_id} · ` : ''}revision ${view.revision ?? 0}`
+            : '无数据'
+        }
         actions={
-          <Button variant="ghost" size="icon-sm" aria-label="刷新" onClick={reload} disabled={loading}>
-            <RefreshCw size={14} className={loading ? 'animate-spin' : undefined} />
-          </Button>
+          <span className="flex items-center gap-1">
+            {view.session_id ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void useChat.getState().attach(view.session_id as string)
+                  useAuth.getState().setRoute('chat')
+                }}
+              >
+                打开对话
+              </Button>
+            ) : null}
+            <Button variant="ghost" size="icon-sm" aria-label="刷新" onClick={reload} disabled={loading}>
+              <RefreshCw size={14} className={loading ? 'animate-spin' : undefined} />
+            </Button>
+          </span>
         }
       />
 
@@ -68,6 +88,7 @@ export default function BlackboardView() {
         <Metric label="状态" value={run.status ?? '—'} />
         <Metric label="轮次" value={run.round != null ? `${run.round}/${run.max_rounds ?? '?'}` : '—'} />
         <Metric label="候选" value={run.candidate_count ?? view.candidates.length} />
+        <Metric label="主机" value={view.hosts?.length ? view.hosts.length : '—'} />
         <Metric label="中断原因" value={run.stop_reason ?? '—'} />
       </div>
 

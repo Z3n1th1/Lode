@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from agents.surface_discovery import (
-    SurfaceScope, _declared_api_bases, discover_surface, write_surface_outputs,
+    SEED_PATHS, SurfaceScope, _declared_api_bases, discover_surface, write_surface_outputs,
 )
 
 
@@ -47,7 +47,9 @@ class SrcSurfaceDiscoveryTests(unittest.TestCase):
         self.assertIn("https://api.example.com/from-js", result.api_urls)
         self.assertNotIn("https://outside.example.net/no", result.api_urls)
         self.assertIn("OpenAPI JSON", result.fingerprints)
-        self.assertLessEqual(len(result.requests), 1 + 20 + 3)
+        # Bound is expressed off SEED_PATHS rather than a literal: this assertion is
+        # about "the crawl stays bounded", not about how long the probe list is.
+        self.assertLessEqual(len(result.requests), 1 + len(SEED_PATHS) + 3)
 
     def test_target_outside_scope_is_rejected_before_get(self) -> None:
         scope = SurfaceScope(
@@ -407,6 +409,141 @@ class RequestMethodTests(unittest.TestCase):
         self.assertEqual("application/x-www-form-urlencoded", self.seen[-1][3])
 
 
+class GzipBodyTests(unittest.TestCase):
+    """Compressed bodies have to become HTML/JS, not gzip magic.
+
+    urllib does not decompress. A 200 whose body starts with ``\\x1f\\x8b`` while
+    Content-Type says text/html used to parse as garbage: zero scripts, zero
+    paths, empty blackboard. That is the silent no-op, not "this host is empty".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import gzip
+        import os
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        os.environ["NO_PROXY"] = "127.0.0.1"
+        os.environ["no_proxy"] = "127.0.0.1"
+
+        html = b'<html><script src="/static/app.js"></script></html>'
+        script = b'fetch("/api/internal");'
+        cls.gzip_html = gzip.compress(html)
+        cls.gzip_script = gzip.compress(script)
+        cls.plain_html = html
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):  # noqa: N802
+                if self.path == "/naked-gzip":
+                    body = GzipBodyTests.gzip_html
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/":
+                    body = GzipBodyTests.gzip_html
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/static/app.js":
+                    body = GzipBodyTests.gzip_script
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/javascript")
+                    self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:
+                pass
+
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def test_gzip_content_encoding_is_decoded_to_html(self) -> None:
+        from agents.surface_discovery import _request_text
+
+        status, body, _headers = _request_text("GET", self._url("/"), timeout=5.0)
+        self.assertEqual(200, status)
+        self.assertIn("<script src=\"/static/app.js\">", body)
+        self.assertFalse(body.startswith("\x1f\x8b"))
+
+    def test_gzip_magic_is_decoded_even_without_the_header(self) -> None:
+        from agents.surface_discovery import _request_text
+
+        status, body, _headers = _request_text("GET", self._url("/naked-gzip"), timeout=5.0)
+        self.assertEqual(200, status)
+        self.assertIn("<script src=\"/static/app.js\">", body)
+
+    def test_truncated_gzip_still_yields_a_prefix(self) -> None:
+        import gzip
+        from agents.surface_discovery import _decompress_http_body
+
+        blob = gzip.compress(b"<html>" + (b"x" * 8000) + b"</html>")
+        out = _decompress_http_body(blob[:80], "gzip")
+        self.assertTrue(out.startswith(b"<html>"), out[:20])
+
+    def test_discover_surface_extracts_scripts_from_gzip_html(self) -> None:
+        from agents.surface_discovery import SurfaceScope, discover_surface
+
+        scope = SurfaceScope(
+            program="fixture-src",
+            authorization="written authorization fixture",
+            allowed_ips=("127.0.0.1",),
+            delay_seconds=0.0,
+        )
+        result = discover_surface(scope, self._url("/"), max_scripts=4)
+        self.assertEqual(200, result.status)
+        self.assertIn(self._url("/static/app.js"), result.scripts)
+        self.assertIn("/api/internal", result.paths)
+
+
+class TlsVerifyRetryTests(unittest.TestCase):
+    def test_only_certificate_verify_failures_are_retried(self) -> None:
+        from agents.surface_discovery import _tls_verify_failed
+
+        self.assertTrue(_tls_verify_failed(OSError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate")))
+        self.assertFalse(_tls_verify_failed(OSError(
+            "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")))
+
+    def test_insecure_retry_stamp_is_fingerprinted(self) -> None:
+        def fetcher(url, **kwargs):
+            del kwargs
+            if url.rstrip("/") == "https://example.com":
+                return 200, "<html></html>", {
+                    "content-type": "text/html",
+                    "x-lode-tls": "certificate_verify_failed",
+                }
+            return 404, "", {}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_domains=("example.com",), delay_seconds=0),
+            "https://example.com", max_scripts=1, fetcher=fetcher)
+        self.assertIn("TLS certificate verify failed", result.fingerprints)
+
+
 class TransientFetchRetryTests(unittest.TestCase):
     """一次掉线不等于"这个资产不存在"。
 
@@ -583,6 +720,215 @@ class ApiBaseJoinTests(unittest.TestCase):
                         src_autopilot._score_candidate(bare, result.sources[bare]),
                         f"{joined} {sorted(result.sources[joined])} 没有排在 "
                         f"{bare} {sorted(result.sources[bare])} 前面")
+
+
+class ExposurePathTests(unittest.TestCase):
+    """Leak paths must survive candidate generation; route-shaped noise must not.
+
+    Measured 2026-09-25 on ranges/lode-range: robots.txt disallowed `/.git` and
+    `/backup` and both were parsed and then thrown away by `_looks_high_signal`,
+    so three planted exposure bugs never became candidates on an otherwise strong
+    run (8/12). These tests pin both halves — what must now get through, and the
+    API-shaped filtering that must not get loosened to achieve it.
+    """
+
+    def _scope(self) -> SurfaceScope:
+        return SurfaceScope("fixture", "written authorization", allowed_domains=["example.com"])
+
+    def _robots_paths(self, text: str) -> set[str]:
+        from agents.surface_discovery import SurfaceResult, _extract_robots
+
+        result = SurfaceResult(target="https://example.com/", base_url="https://example.com")
+        _extract_robots(text, result, self._scope())
+        return result.paths
+
+    def test_a_disallowed_exposure_path_survives_extraction(self) -> None:
+        paths = self._robots_paths("User-agent: *\nDisallow: /.git\nDisallow: /backup\n")
+        self.assertIn("/.git", paths)
+        self.assertIn("/backup", paths)
+
+    def test_exposure_shaped_paths_are_kept(self) -> None:
+        from agents.surface_discovery import _looks_high_signal
+
+        for path in ("/.env", "/.git/config", "/backup/users.sql", "/dump.sql",
+                     "/id_rsa", "/wp-config.php.bak", "/server-status", "/db/backup.tar.gz"):
+            with self.subTest(path=path):
+                self.assertTrue(_looks_high_signal(path))
+
+    def test_route_filtering_is_not_loosened(self) -> None:
+        """The fix adds a dimension; it must not turn the filter into "keep everything"."""
+        from agents.surface_discovery import _looks_high_signal
+
+        for path in ("/about", "/login", "/docs", "/robots.txt", "/sitemap.xml", "/"):
+            with self.subTest(path=path):
+                self.assertFalse(_looks_high_signal(path))
+
+    def test_a_resource_noun_built_by_concatenation_is_not_lost(self) -> None:
+        """`orders` was in API_PREFIXES and `products` was not.
+
+        Measured 2026-09-25: a bundle that builds its URL as
+        ``API_BASE + "/products?q="`` leaves a bare fragment, the filter rejects it, and
+        the endpoint never becomes a candidate — which took SQLi recall from 4/5 to 0/9
+        on ranges/lode-range. These are the noun pairs the list only half had.
+        """
+        from agents.surface_discovery import _looks_high_signal
+
+        for path in ("/products?q=", "/product/1", "/items", "/cart", "/catalog",
+                     "/categories/2", "/posts", "/comments/1", "/articles", "/tags"):
+            with self.subTest(path=path):
+                self.assertTrue(_looks_high_signal(path))
+
+    def test_a_seeded_exposure_path_is_recorded_when_it_answers(self) -> None:
+        """A probe that returns its own body means the file exists — record it.
+
+        Before this, seeds were mined for content only, so `/.env` answered 200 and
+        still never appeared as a candidate.
+        """
+        index = "<html><body>welcome</body></html>"
+        env = "SECRET_KEY=abc\nDATABASE_URL=postgres://u:p@h/db\n"
+
+        def fetcher(url: str, **kwargs):
+            del kwargs
+            if url == "https://example.com/":
+                return 200, index, {"content-type": "text/html"}
+            if url == "https://example.com/.env":
+                return 200, env, {"content-type": "text/plain"}
+            if url == "https://example.com/robots.txt":
+                return 200, "User-agent: *\n", {"content-type": "text/plain"}
+            return 404, "", {"content-type": "text/plain"}
+
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=1, fetcher=fetcher)
+        self.assertIn("/.env", result.paths)
+        self.assertIn("seed", result.sources["/.env"])
+        # Non-exposure seeds are still not surface: the probe list is not a path list.
+        self.assertNotIn("/robots.txt", result.paths)
+
+    def test_a_soft_404_never_manufactures_surface(self) -> None:
+        """An SPA shell answers 200 with its index page for *every* path.
+
+        Without the body-comparison guard the new seed recording would turn three
+        probes into three fake paths on exactly the targets that have no surface —
+        the NBA failure mode.
+        """
+        index = "<html><body>single page app</body></html>"
+
+        def fetcher(url: str, **kwargs):
+            del kwargs
+            return 200, index, {"content-type": "text/html"}
+
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=1, fetcher=fetcher)
+        for path in ("/.env", "/.git/config", "/backup/"):
+            with self.subTest(path=path):
+                self.assertNotIn(path, result.paths)
+
+    def test_a_custom_200_not_found_template_is_filtered_by_one_lazy_baseline(self) -> None:
+        import json
+        import uuid
+        from urllib.parse import urlsplit
+
+        index = "<html><body>application home</body></html>"
+
+        def fallback(url: str) -> str:
+            path = urlsplit(url).path
+            return (
+                f"<html><title>Not Found</title><body>route {path} is unavailable; "
+                f"request {uuid.uuid4()}</body></html>"
+            )
+
+        def fetcher(url: str, **kwargs):
+            del kwargs
+            if url == "https://example.com/":
+                return 200, index, {"content-type": "text/html"}
+            if "/__lode_miss__/" in url or url.endswith(("/.env", "/.git/config", "/backup/")):
+                return 200, fallback(url), {"content-type": "text/html"}
+            if url.endswith("/swagger.json"):
+                return 200, json.dumps({"openapi": "3.0.0", "paths": {"/api/health": {}}}), {
+                    "content-type": "application/json",
+                }
+            return 404, "", {"content-type": "text/plain"}
+
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=1, fetcher=fetcher)
+        for path in ("/.env", "/.git/config", "/backup/"):
+            self.assertNotIn(path, result.paths)
+        self.assertIn("/api/health", result.paths)
+        self.assertIn("soft-404 fallback", result.fingerprints)
+        self.assertEqual(1, result.probe_spend.get("quality"))
+        self.assertEqual(len(result.requests) - 1, sum(result.probe_spend.values()))
+
+
+class ProbeAccountingTests(unittest.TestCase):
+    """The probe list is two named groups, and what it costs is visible.
+
+    The crawl and the agent loop share one request budget (docs/security-boundary.md),
+    so exposure probes cannot be exempted from the cap — making room for them means
+    spending fewer requests elsewhere. The list was trimmed for that reason, and the
+    per-group spend is recorded so the split is not just a comment.
+    """
+
+    def _scope(self) -> SurfaceScope:
+        return SurfaceScope("fixture", "written authorization", allowed_domains=["example.com"])
+
+    def test_the_probe_list_is_two_groups_without_duplicates(self) -> None:
+        from agents.surface_discovery import EXPOSURE_PATHS, FRAMEWORK_PATHS, SEED_PATHS
+
+        self.assertEqual(len(SEED_PATHS), len(set(SEED_PATHS)), "duplicate probe path")
+        self.assertLessEqual(len(SEED_PATHS), 16, "probe list grew back; it is a fixed tax per target")
+        for path in EXPOSURE_PATHS + FRAMEWORK_PATHS:
+            self.assertIn(path, SEED_PATHS)
+        # Exposure probes are the budget priority, so a truncated crawl still sends them.
+        self.assertEqual(SEED_PATHS[: len(EXPOSURE_PATHS)], EXPOSURE_PATHS)
+        for high_risk in ("/actuator/health", "/druid", "/nacos", "/api/workflow/search"):
+            self.assertIn(high_risk, SEED_PATHS)
+
+    def test_the_near_duplicate_variants_stay_dropped(self) -> None:
+        from agents.surface_discovery import SEED_PATHS
+
+        for dropped in ("/graphiql", "/webpack-manifest.json", "/build/asset-manifest.json",
+                        "/static/js/manifest.json", "/swagger/v1/swagger.json",
+                        "/api-docs", "/api-docs.json", "/v2/api-docs", "/openapi.yaml"):
+            with self.subTest(dropped=dropped):
+                self.assertNotIn(dropped, SEED_PATHS)
+
+    def test_probe_spend_is_booked_per_group(self) -> None:
+        from agents.surface_discovery import EXPOSURE_PATHS, SEED_PATHS, surface_to_dict
+
+        index = "<html><body>welcome</body></html>"
+
+        def fetcher(url: str, **kwargs):
+            del kwargs
+            if url == "https://example.com/":
+                return 200, index, {"content-type": "text/html"}
+            return 404, "", {"content-type": "text/plain"}
+
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=1, fetcher=fetcher)
+        self.assertEqual(len(EXPOSURE_PATHS), result.probe_spend.get("exposure"))
+        self.assertIn("framework", result.probe_spend)
+        self.assertIn("robots", result.probe_spend)
+        self.assertEqual(len(SEED_PATHS), sum(result.probe_spend.values()),
+                         "every probe should be booked into exactly one group")
+        self.assertEqual(dict(sorted(result.probe_spend.items())),
+                         surface_to_dict(result)["probe_spend"])
+
+    def test_probe_spend_counts_transient_retries_as_requests(self) -> None:
+        from agents.surface_discovery import SEED_PATHS
+
+        index = "<html><body>welcome</body></html>"
+        attempts = {"https://example.com/.env": 0}
+
+        def fetcher(url: str, **kwargs):
+            del kwargs
+            if url == "https://example.com/":
+                return 200, index, {"content-type": "text/html"}
+            if url == "https://example.com/.env" and attempts[url] == 0:
+                attempts[url] += 1
+                return 0, "", {}
+            return 404, "", {"content-type": "text/plain"}
+
+        result = discover_surface(self._scope(), "https://example.com", max_scripts=1,
+                                   fetcher=fetcher)
+        # /.env made one failed attempt and one retry; all other probes made one.
+        self.assertEqual(len(SEED_PATHS) + 1, sum(result.probe_spend.values()))
+        self.assertEqual(len(result.requests), sum(result.probe_spend.values()) + 1)
 
 
 if __name__ == "__main__":

@@ -32,13 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--blackboard", required=True, type=Path,
                         help="Path to src-blackboard.json (created by src_autopilot)")
     parser.add_argument("--max-cycles", type=int, default=20,
-                        help="Maximum reason→explore cycles (default: 20)")
+                        help="Maximum Planner→Worker cycles (default: 20)")
     parser.add_argument("--max-explore", type=int, default=3,
                         help="Maximum intents to explore per cycle (default: 3)")
     parser.add_argument("--reasoner-prefer", type=str, default="deepseek",
-                        help="Preferred LLM provider for Reasoner (default: deepseek)")
+                        help="Preferred LLM provider for Planner (default: deepseek)")
     parser.add_argument("--explorer-prefer", type=str, default="",
-                        help="Preferred LLM provider for Explorer (default: any)")
+                        help="Preferred LLM provider for Worker (default: any)")
     parser.add_argument("--worker-id", type=str, default="",
                         help="Worker ID for blackboard claims")
     parser.add_argument("--timeout", type=float, default=60.0,

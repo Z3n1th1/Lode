@@ -9,6 +9,7 @@ guarded — it must never fail a job.
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import os
 import secrets
@@ -44,6 +45,8 @@ def get_log(state_dir: Path | str, session_id: str) -> EventLog:
 
 # -- job handlers ------------------------------------------------------------
 def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: str = "",
+                    reasoner_engine: str = "provider", explorer_engine: str = "provider",
+                    hunter_engine: str = "",
                     authorization_id: str = "", authorization_digest: str = "") -> Dict[str, Any]:
     """The persisted authorisation record for one run (``SrcRunScope/v1``).
 
@@ -73,6 +76,9 @@ def _scope_document(scope: Any, *, run_id: str, reasoner: str = "", explorer: st
         "requests_per_second": round(float(getattr(scope, "requests_per_second", 0.0) or 0.0), 6),
         "reasoner_prefer": reasoner,
         "explorer_prefer": explorer,
+        "reasoner_engine": reasoner_engine,
+        "explorer_engine": explorer_engine,
+        "hunter_engine": hunter_engine or reasoner_engine,
         "created_at": time.time(),
     }
 
@@ -88,7 +94,6 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     """
     from agents.src_agent import run_src_agent
     from agents.src_autopilot import SrcAutopilot
-    from core import skills
 
     state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
     out_dir = state_dir / "src-agent-runs" / run_id
@@ -96,9 +101,20 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     bb_path = out_dir / "src-blackboard.json"
     reasoner = (job.payload.get("reasoner_prefer") or "").strip() or os.environ.get("SRC_REASONER_PREFER", "").strip()
     explorer = (job.payload.get("explorer_prefer") or "").strip() or os.environ.get("SRC_EXPLORER_PREFER", "").strip()
+    hunter_engine = (job.payload.get("hunter_engine") or "").strip() or os.environ.get("LODE_HUNTER_ENGINE", "").strip()
+    reasoner_engine = ((job.payload.get("reasoner_engine") or "").strip()
+                       or os.environ.get("LODE_REASONER_ENGINE", "").strip()
+                       or "provider")
+    explorer_engine = ((job.payload.get("explorer_engine") or "").strip()
+                       or os.environ.get("LODE_EXPLORER_ENGINE", "").strip()
+                       or hunter_engine
+                       or "provider")
 
     try:
         scope_doc = _scope_document(scope, run_id=run_id, reasoner=reasoner, explorer=explorer,
+                                    reasoner_engine=reasoner_engine,
+                                    explorer_engine=explorer_engine,
+                                    hunter_engine=hunter_engine,
                                     authorization_id=authorization_id,
                                     authorization_digest=authorization_digest)
         staged = out_dir / ".scope.json.tmp"
@@ -108,8 +124,27 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
         pass
 
     ctx.emit("subtask_progress", phase="autopilot")
+    try:
+        max_scripts = int(job.payload.get("max_scripts") or 100)
+    except (TypeError, ValueError):
+        max_scripts = 100
+    max_scripts = max(1, min(max_scripts, 100))
+    try:
+        max_candidates = int(job.payload.get("max_candidates") or 200)
+    except (TypeError, ValueError):
+        max_candidates = 200
+    max_candidates = max(1, min(max_candidates, 200))
+    extra_seeds = _arl_extra_seeds(job.payload)
+    discover_fn = None
+    if extra_seeds:
+        from agents.surface_discovery import discover_surface as _discover_surface
+
+        def discover_fn(scope, target, **kwargs):  # type: ignore[no-redef]
+            return _discover_surface(scope, target, extra_seeds=extra_seeds, **kwargs)
     autopilot = SrcAutopilot(scope, out_dir / "autopilot-state.json", out_dir,
-                             max_rounds=3, max_candidates=100, blackboard_path=bb_path,
+                             max_rounds=3, max_candidates=max_candidates,
+                             max_scripts=max_scripts, blackboard_path=bb_path,
+                             discover_fn=discover_fn,
                              request_budget=ctx.budget)
     autopilot.run_round([target_url])
     if ctx.stopped():
@@ -118,16 +153,19 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
     ctx.emit("subtask_progress", phase="reason_explore")
     # 猎场也要能拿到打法:开局按操作员那句话先激活一轮(和对话轮同一套选择逻辑),
     # 之后由循环自己按信号/按需继续激活。以前这条路上一点知识都不进来。
-    seed = skills.select_modules(str(job.payload.get("instruction") or job.payload.get("title") or ""),
-                                 pack="pentest")
+    instruction = str(job.payload.get("instruction") or job.payload.get("title") or "")
+    seed = _knowledge_seed(instruction, job.payload, scope)
     summary = run_src_agent(
         bb_path, scope,
         max_cycles=int(job.payload.get("max_cycles") or 20),
         knowledge_seed=seed,
         max_explore_per_cycle=int(job.payload.get("max_explore") or 3),
         reasoner_prefer=reasoner, explorer_prefer=explorer,
+        hunter_engine=hunter_engine,
+        reasoner_engine=reasoner_engine, explorer_engine=explorer_engine,
         worker_id=f"console-{run_id}",
         request_budget=ctx.budget,
+        timeout=180.0,
     )
     findings = 0
     if isinstance(summary, dict):
@@ -136,6 +174,61 @@ def _run_scope(job: JobRecord, ctx: JobContext, scope: Any, *, run_id: str, targ
              requests_used=(summary or {}).get("requests_used", 0),
              request_budget=(summary or {}).get("request_budget", 0))
     return {"summary_ref": str(bb_path), "progress": {"phase": "done", "findings": findings}}
+
+
+def _option_enabled(confirmed: Dict[str, Any], key: str) -> bool:
+    """Whether a gate option was on in the confirmation the operator signed.
+
+    The receipt carries the options object (not just its digest) so a later
+    handler can honour a switch without re-hashing. Missing or malformed groups
+    are off — a switch that did not survive confirm must not turn work on.
+    """
+    options = confirmed.get("options")
+    if not isinstance(options, dict):
+        return False
+    group = options.get(key)
+    if isinstance(group, dict):
+        return group.get("enabled") is True
+    return False
+
+
+def _arl_extra_seeds(payload: Dict[str, Any]) -> tuple[str, ...]:
+    """Add safe fingerprint paths only when the confirmed run asked for them."""
+    if not (payload.get("arl_next") or payload.get("fingerprint_precise")):
+        return ()
+    from intel.fingerprint import seed_paths
+    return seed_paths()
+
+
+def _knowledge_seed(instruction: str, payload: Dict[str, Any], scope: Any) -> list[str]:
+    """First-turn playbooks: evidence first, then requested cards, then the floor.
+
+    Activation is capped at four cards (``KNOWLEDGE_MAX_ACTIVE``). Specific
+    analogical cards have to beat the generic recon floor or they never load.
+    """
+    from core import skills
+
+    floor = list(skills.select_modules(instruction, pack="pentest"))
+    specific: list[str] = []
+    if payload.get("arl_next"):
+        specific.append("arl-recon")
+    lowered = instruction.lower()
+    if any(token in instruction for token in ("工作流", "沙箱", "sitecustomize")) or "vm2" in lowered:
+        specific.append("sandbox-escape-test")
+    if any(token in instruction for token in ("案例", "对照", "以前")):
+        specific.append("case-index")
+    objectives = {str(item).strip().lower() for item in (getattr(scope, "priority_objectives", ()) or ())}
+    if objectives & {"critical", "high", "rce", "orphan_origin", "management"}:
+        specific.append("orphan-origin-test")
+    ordered: list[str] = []
+    for name in floor:
+        if name == "evidence":
+            ordered.append(name)
+            break
+    for name in specific + floor:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
 
 
 DEFAULT_SURFACE_DELAY = 0.5
@@ -254,6 +347,73 @@ def _handler_src_loop(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 
 
 TARGET_RUN_KIND = "target_run"
+FINDING_RETEST_KIND = "finding_retest"
+
+
+def _handler_finding_retest(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
+    """Replay one bounded read against the original target through Lode gates.
+
+    Automatic retests never produce a ``fixed`` verdict. They can record a
+    reproduction when the original status is available; otherwise the result is
+    inconclusive and a human can add the three evidence files from the panel.
+    """
+    from core.finding_workflow import FindingRetestStore
+    from agents.src_agent import _fetch_for_analysis, record_http_action
+
+    state_dir = Path(ctx.job.payload.get("_state_dir") or ".")
+    retest_id = str(ctx.job.payload.get("retest_id") or "")
+    store = FindingRetestStore(state_dir / "finding-retests.jsonl")
+    store.set_status(retest_id, "running")
+    target = str(ctx.job.payload.get("request_url") or "").strip()
+    if not target:
+        raise ValueError("original_request_url_missing")
+    method = str(ctx.job.payload.get("method") or "GET").upper()
+    body = str(ctx.job.payload.get("body") or "")
+    content_type = str(ctx.job.payload.get("content_type") or "")
+    try:
+        from agents.surface_discovery import SurfaceScope
+        scope_doc = ctx.job.payload.get("scope_document")
+        if not isinstance(scope_doc, dict):
+            raise ValueError("original_scope_missing")
+        scope = SurfaceScope.from_mapping(scope_doc)
+        scope.require_authorization()
+        # A read-proven POST can be admitted by action_admission; the scope still
+        # has to be narrow and the body is enabled only for this explicit replay.
+        if method in {"POST", "OPTIONS"}:
+            scope = replace(scope, allowed_methods=("GET", "HEAD", "OPTIONS", "POST"), allow_request_body=True)
+        result = _fetch_for_analysis(target, scope, method=method, body=body,
+                                     content_type=content_type, budget=ctx.budget)
+        status = int(result.get("status") or 0)
+        run_dir = state_dir / "finding-retest-runs" / retest_id
+        audit_marker = run_dir / "src-blackboard.json"
+        record_http_action(audit_marker, url=target, body=body, content_type=content_type,
+                           result=result, reason="finding_retest", kind="finding_retest")
+        original_status = ctx.job.payload.get("original_status")
+        expected_hash = str(ctx.job.payload.get("expected_sha256_12") or "")
+        response_hash = hashlib.sha256(str(result.get("body") or "").encode("utf-8", "replace")).hexdigest()[:12]
+        markers = [str(value) for value in (ctx.job.payload.get("response_markers") or []) if str(value)]
+        oracle_match = (expected_hash and response_hash == expected_hash) or (markers and any(marker in str(result.get("body") or "") for marker in markers))
+        evidence = (f"自动复测 {method} {target}\n"
+                    f"status={status}; error={str(result.get('error') or '')[:300]}\n"
+                    f"response_sha256={response_hash}; oracle_match={bool(oracle_match)}\n"
+                    "自动复测不会声明 fixed；需要原始、当前和正常对照三方证据时由人工记录。")
+        try:
+            status_match = original_status not in (None, "") and status == int(original_status)
+        except (TypeError, ValueError):
+            status_match = False
+        verdict = "reproduced" if status_match and status != 0 and oracle_match else "inconclusive"
+        summary = ("观察到与原始状态和保存的响应 oracle 一致的结果，仍可复现。"
+                   if verdict == "reproduced" else
+                   "自动复测未达到可区分的证据门槛；一次不匹配不能单独证明已修复。")
+        store.record_result(retest_id, verdict=verdict, summary=summary, evidence=evidence, source="automatic")
+        ctx.emit("assistant_message", text=f"复测 {retest_id}：{verdict}。自动复测不会判定已修复。")
+        return {"summary_ref": str(state_dir / "finding-retests.jsonl"), "progress": {"phase": "done", "verdict": verdict}}
+    except Exception as exc:
+        try:
+            store.set_status(retest_id, "failed", error=f"{type(exc).__name__}: {str(exc)[:500]}")
+        except Exception:
+            pass
+        raise
 
 
 def _scope_from_confirmed_card(card: Dict[str, Any], *, target_id: str, run_id: str,
@@ -434,6 +594,8 @@ def start_target_run(
             # The conversation card shows the operator's own words, so the run is
             # identifiable without opening the job record.
             "title": instruction[:120],
+            "arl_next": _option_enabled(confirmed, "arl_next"),
+            "fingerprint_precise": _option_enabled(confirmed, "fingerprint"),
         },
     )
     get_runner(state_dir).submit(job)
@@ -506,6 +668,11 @@ def start_engagement_run(state_dir: Path | str, *, confirmed: Dict[str, Any],
                 "engagement": engagement,
                 "instruction": instruction,
                 "title": instruction[:120] or host,
+                "max_scripts": 100,
+                "max_candidates": 200,
+                "max_cycles": 20,
+                "max_explore": 4,
+                "max_requests": 120,
             },
         )
         jobs.append(job)
@@ -776,7 +943,8 @@ def _handler_chat_turn(job: JobRecord, ctx: JobContext) -> Dict[str, Any]:
 
 HANDLERS = {"src_loop": _handler_src_loop, "surface_scan": _handler_surface_scan,
             "chat_turn": _handler_chat_turn, TARGET_RUN_KIND: _handler_target_run,
-            ENGAGEMENT_HOST_RUN_KIND: _handler_engagement_host_run}
+            ENGAGEMENT_HOST_RUN_KIND: _handler_engagement_host_run,
+            FINDING_RETEST_KIND: _handler_finding_retest}
 
 
 # -- report back into the conversation ---------------------------------------

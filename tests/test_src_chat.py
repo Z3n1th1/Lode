@@ -164,6 +164,9 @@ def test_read_knowledge_unknown_name_returns_the_catalogue() -> None:
     assert got["error"] == "not found"
     assert "mobile" in got["available"]
     assert "idor-test" in got["available"]
+    assert "case-index" in got["available"]
+    assert "arl-recon" in got["available"]
+    assert "sandbox-escape-test" in got["available"]
 
 
 def test_read_knowledge_refuses_paths() -> None:

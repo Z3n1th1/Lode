@@ -1,5 +1,5 @@
 [Unit]
-Description=Run SignalHarbor every 30 minutes
+Description=Run Pulse every 30 minutes
 
 [Timer]
 OnBootSec=5min

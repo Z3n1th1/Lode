@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
 
 import {
+  ENGINE_CHOICES,
   loadLlmSettings,
   saveLlmSettings,
   testLlmProvider,
@@ -21,11 +22,36 @@ const TIER_LABEL: Record<string, string> = {
   explorer: '探索档'
 }
 
+const ENGINE_LABEL: Record<string, string> = {
+  provider: 'HTTP 上游',
+  pi: 'Pi CLI',
+  grok: 'Grok CLI',
+  codex: 'Codex CLI',
+  claude: 'Claude CLI'
+}
+
+const ENGINE_ROLE_META: { key: string; label: string; hint: string }[] = [
+  { key: 'hunter', label: '主力 Worker', hint: '认领 intent、取证的主力。换 Grok 订阅或 ChatGPT（HTTP 上游）只改这一项；未单独指定时，执行档跟这项。' },
+  { key: 'reasoner', label: '规划档 Planner', hint: '默认便宜 HTTP 上游。DeepSeek 用尽时改成 Grok CLI，否则 Planner 会打已没额度的 HTTP。' },
+  { key: 'explorer', label: '执行档 Worker', hint: '默认跟随主力。可单独覆盖。' },
+  { key: 'verifier', label: '复核档 Review', hint: '高危发现的独立第二意见。只用 Grok 时也可以和主力相同。' },
+  { key: 'specialist', label: '源码专家', hint: '仓库结构、跨文件调用链。只用 Grok 时改成 Grok CLI。' }
+]
+
+const DEFAULT_ENGINES: Record<string, string> = {
+  hunter: 'provider',
+  reasoner: 'provider',
+  explorer: 'provider',
+  verifier: 'grok',
+  specialist: 'codex'
+}
+
 type Notice = { tone: 'ok' | 'danger'; text: string } | null
 
 export default function SettingsView() {
   const [providers, setProviders] = useState<LlmProviderInput[]>([])
   const [tiers, setTiers] = useState<Record<string, string>>({})
+  const [engines, setEngines] = useState<Record<string, string>>(DEFAULT_ENGINES)
   const [settingsPath, setSettingsPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<Notice>(null)
@@ -44,6 +70,7 @@ export default function SettingsView() {
           }))
         )
         setTiers(view.tiers ?? {})
+        setEngines({ ...DEFAULT_ENGINES, ...(view.engines ?? {}) })
         setSettingsPath(view.settings_path ?? '')
       } catch {
         setNotice({ tone: 'danger', text: '读取模型设置失败' })
@@ -61,7 +88,7 @@ export default function SettingsView() {
     setBusy(true)
     setNotice(null)
     try {
-      const view = await saveLlmSettings(providers, tiers)
+      const view = await saveLlmSettings(providers, tiers, engines)
       setProviders(
         view.providers.map((item) => ({
           name: item.name,
@@ -71,6 +98,7 @@ export default function SettingsView() {
         }))
       )
       setTiers(view.tiers ?? {})
+      setEngines({ ...DEFAULT_ENGINES, ...(view.engines ?? {}) })
       setNotice({ tone: 'ok', text: '已保存' })
     } catch (error) {
       setNotice({ tone: 'danger', text: `保存失败:${(error as Error).message}` })
@@ -215,6 +243,56 @@ export default function SettingsView() {
                   <MenuItem selected={!tiers[tier]} onClick={() => setTiers((current) => ({ ...current, [tier]: '' }))}>
                     未指定
                   </MenuItem>
+                </PopoverContent>
+              </Popover>
+            </Field>
+          ))}
+        </div>
+
+        <h2 className="border-y border-line bg-raised/60 px-4 py-1.5 font-mono text-2xs tracking-wide text-fg-3">
+          Planner / Worker / Review
+        </h2>
+        <p className="px-4 pt-3 font-mono text-2xs text-fg-4">
+          Planner 出 intent；Worker 认领一条去取证；Review 独立证伪。闸门（scope / 准入 / 预算）是硬规则。CLI 不带 bash / 写盘 / 自己的网络。
+        </p>
+        <div className="grid gap-3 px-4 py-4 md:grid-cols-2">
+          {ENGINE_ROLE_META.map((meta) => (
+            <Field key={meta.key} label={meta.label} hint={meta.hint}>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex h-9 w-full items-center gap-2 rounded-md border border-line px-2.5 text-left font-mono text-xs text-fg-2 transition-colors hover:border-line-strong"
+                  >
+                    {ENGINE_LABEL[engines[meta.key] || DEFAULT_ENGINES[meta.key] || 'provider']
+                      || engines[meta.key]
+                      || 'HTTP 上游'}
+                    <span className="flex-1" />
+                    <Badge tone="neutral">{engines[meta.key] || DEFAULT_ENGINES[meta.key] || 'provider'}</Badge>
+                    <ChevronDown size={13} className="shrink-0 text-fg-4" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[var(--radix-popover-trigger-width)]">
+                  {ENGINE_CHOICES.map((choice) => (
+                    <MenuItem
+                      key={choice}
+                      selected={(engines[meta.key] || DEFAULT_ENGINES[meta.key] || 'provider') === choice}
+                      onClick={() =>
+                        setEngines((current) => {
+                          const next = { ...current, [meta.key]: choice }
+                          if (
+                            meta.key === 'hunter'
+                            && (current.explorer === current.hunter || !current.explorer)
+                          ) {
+                            next.explorer = choice
+                          }
+                          return next
+                        })
+                      }
+                    >
+                      {ENGINE_LABEL[choice]}
+                    </MenuItem>
+                  ))}
                 </PopoverContent>
               </Popover>
             </Field>

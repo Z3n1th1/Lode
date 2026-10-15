@@ -1,4 +1,6 @@
-> 进站勾完标准见 `dig-scope` §4.2.1：能看出条数/内容变化的口，每个过滤参都测；只回「请登录」整段 N/A。按栈选探针（JSON/Mongo 操作符、搜索框 ES、Java HQL/SpEL、有模板 SSTI；SQL 面仍走引号/布尔/延时）。405 后换位置不只有换编码。
+> **SRC 红线：** 注入只证明存在。布尔/报错/一次短 SLEEP 都可以发；禁止对业务库增删改、禁止 dump 真实用户行、禁止 `BENCHMARK`、不用 sqlmap `--os-shell`、不反弹 shell。真实行不超过5条。
+>
+> 进站勾完标准见 `dig-scope` §4.2.1：能看出条数/内容变化的口，每个过滤参都测；只回「请登录」整段 N/A。按栈选探针（JSON/Mongo 操作符、搜索框 ES、Java HQL/SpEL、有模板 SSTI；SQL 面走引号/布尔/报错，不走延时）。405 后换位置不只有换编码。
 > 短表「列表筛选项 OR + total」「邮件订阅 iframe 同目录 list」用标题搜。WooYun 统计 / sqlmap --os-shell / 反弹 shell / 英文附件已砍；现场按栈自己变，不靠教材。
 
 # 注入类漏洞测试手册（SQL注入 / 命令注入 / SSTI）
@@ -18,7 +20,7 @@
 5. **只约束本枪（OR 恒真打 ES/流水全库）：** 同一 payload 不连打/重放，pageSize 不拉满，不点下一页/导出，本枪不用 sqlmap `--dump` / `--risk=3`，不打到删除/更新口。打挂集群不算证明。  
 6. 模糊搜索把 `or` 当关键字、或涨出来全是本企业本职可读 → 假点，不报。ES 只吃 Query DSL、这段 SQL 当普通字符串 → 换 DSL/`$where`，别死磕。
 
-这是开场，不是只准打这一条，也**不是**禁止所有注入抽数。UNION / 延时 / 报错 / WAF 编码 / 其它注入口现场按栈自己变；延时比 OR 恒真更安全时优先延时。
+这是开场，不是只准打这一条。UNION / 报错 / 布尔 / 一次短延时 / WAF 编码现场按栈自己变。禁止对业务库增删改与 sqlmap dump；真实行不超过5条。
 
 ### 邮件订阅 iframe 同目录 list（短表有指针）
 
@@ -36,7 +38,7 @@
 
 ### 快速检测
 
-单引号 / 布尔假真 / 延时。405 后换 query / json / header / path。本枪 OR+total **不用** sqlmap `--dump` / `--os-shell`。
+单引号 / 布尔假真 / 报错 / 一次短 SLEEP。405 后换 query / json / header / path。本枪 OR+total **不用** sqlmap `--dump` / `--os-shell`，不抽真实流水。
 
 ### JSON / Mongo 操作符（按栈，不是每个 path 喷引号）
 
@@ -44,7 +46,7 @@
 
 ## 命令注入
 
-常见口：filename / ip / ping / 转换 / 诊断页。探针 `;id` / `|id` / `$(id)` / 延时 `sleep 5`。证伪即可，不要本机反弹 shell 当教材。
+常见口：filename / ip / ping / 转换 / 诊断页。存在性探针要发：`;id` / `|id` / `$(id)` / `whoami` / `echo MARKER` / `time`。不反弹 shell、不 webshell、不 `rm -rf`。
 
 ## SSTI（服务端模板注入）
 

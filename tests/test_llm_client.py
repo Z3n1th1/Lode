@@ -213,6 +213,25 @@ class RunToolLoopTests(_Base):
         # last call (the summary) must not advertise tools
         self.assertIsNone(seen[-1])
 
+    def test_stop_if_ends_after_terminal_tool_without_an_extra_completion(self) -> None:
+        calls = {"complete": 0}
+
+        def complete(messages, *, tools=None, timeout=90.0):  # noqa: ANN001
+            calls["complete"] += 1
+            return {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "v", "type": "function", "arguments": "{}",
+                 "function": {"name": "submit_verdict", "arguments": "{}"}}
+            ]}
+
+        result = llm_client.run_tool_loop(
+            [{"role": "user", "content": "hi"}], tools=[{"x": 1}],
+            dispatch=lambda n, a: "recorded", complete_fn=complete,
+            stop_if=lambda name, args, output: name == "submit_verdict",
+        )
+        self.assertTrue(result["stopped"])
+        self.assertEqual(1, calls["complete"])
+        self.assertEqual(1, result["rounds"])
+
     def test_failure_returns_error_with_empty_text(self) -> None:
         from unittest.mock import patch as _patch
 

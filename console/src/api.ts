@@ -53,7 +53,79 @@ export async function logout(): Promise<void> {
 }
 
 // ---- 只读业务面板(补回 py 仪表盘的数据) ----
-export interface FindingRow { task: string; rule: string; severity: string; title: string; target?: string; ts?: number }
+export interface FindingRetestSummary {
+  status: string
+  verdict: '' | 'reproduced' | 'fixed' | 'inconclusive' | string
+  retest_id?: string
+  human_review_required?: boolean
+}
+
+export interface FindingRow {
+  task: string
+  rule: string
+  severity: string
+  title: string
+  target?: string
+  ts?: number
+  finding_id?: string
+  report_available?: boolean
+  retest?: FindingRetestSummary
+}
+
+export interface RetestCheck {
+  reference: string
+  outcome: 'reproduced' | 'not_reproduced' | 'passed' | string
+}
+
+export interface FindingRetest {
+  retest_id: string
+  finding_id: string
+  status: 'recorded' | 'pending_review' | 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | string
+  verdict: '' | 'reproduced' | 'fixed' | 'inconclusive' | string
+  summary: string
+  evidence: string
+  notes: string
+  session_id: string
+  job_id: string
+  created_at: number
+  finished_at?: number | null
+  source: 'manual' | 'automatic' | string
+  review_reason?: string
+  human_review_required?: boolean
+  checks?: {
+    original?: RetestCheck
+    current?: RetestCheck
+    control?: RetestCheck
+  }
+}
+
+export interface FindingDetail {
+  finding: FindingRow & { summary?: string; evidence?: string }
+  summary?: string
+  evidence?: string
+  report: string
+  report_template: string
+  retests: FindingRetest[]
+  auto_retest_available: boolean
+  auto_retest_reason: string
+  evidence_digest: string
+}
+
+export interface FindingRetestCreateResult {
+  created: boolean
+  enqueued: boolean
+  retest: FindingRetest
+}
+
+export interface FindingRetestBatchResult {
+  results: Array<{
+    finding_id: string
+    created: boolean
+    enqueued: boolean
+    retest?: FindingRetest
+    error?: string
+  }>
+}
 export interface ProfileRow {
   id: string; label: string; aliases: string[]
   default_goal: boolean; auto_continue: boolean; broadcast_level: string; stop_conditions: string[]
@@ -98,13 +170,66 @@ export interface SrcAutopilotView {
   run: { run_id?: string; status?: string; round?: number; max_rounds?: number; stop_reason?: string; candidate_count?: number; no_new_rounds?: number; updated_at?: number }
   candidates: SrcCandidate[]; intents: SrcIntent[]; claims: SrcClaim[]; dead_ends: SrcDeadEnd[]; hints: SrcHint[]
   workmem?: SrcWorkmem; timeline?: SrcTimelineItem[]
+  /** 这次投影对应的对话会话。空 = 全局单文件黑板。 */
+  session_id?: string
+  /** 合并进来的主机名(engagement 一台主机一块黑板)。 */
+  hosts?: string[]
 }
 
-export async function loadSrcAutopilot(): Promise<SrcAutopilotView> {
-  return (await (await request('/api/v1/src-autopilot', { cache: 'no-store' })).json()) as SrcAutopilotView
+export async function loadSrcAutopilot(sessionId?: string): Promise<SrcAutopilotView> {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  return (await (await request(`/api/v1/src-autopilot${query}`, { cache: 'no-store' })).json()) as SrcAutopilotView
 }
 export async function loadFindings(): Promise<FindingRow[]> {
   return (await (await request('/api/v1/findings', { cache: 'no-store' })).json()) as FindingRow[]
+}
+
+export async function loadFindingDetail(findingId: string, signal?: AbortSignal): Promise<FindingDetail> {
+  return (await (await request(`/api/v1/findings/${encodeURIComponent(findingId)}`, { cache: 'no-store', signal })).json()) as FindingDetail
+}
+
+export async function createFindingRetest(
+  findingId: string,
+  payload: { notes: string; mode: 'automatic' | 'manual' }
+): Promise<FindingRetestCreateResult> {
+  return (await (await request(`/api/v1/findings/${encodeURIComponent(findingId)}/retests`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })).json()) as FindingRetestCreateResult
+}
+
+export async function recordFindingRetestResult(
+  findingId: string,
+  retestId: string,
+  payload: {
+    verdict: 'reproduced' | 'fixed' | 'inconclusive'
+    summary: string
+    evidence: string
+    checks?: { original?: RetestCheck; current?: RetestCheck; control?: RetestCheck }
+  }
+): Promise<{ retest: FindingRetest }> {
+  return (await (await request(`/api/v1/findings/${encodeURIComponent(findingId)}/retests/${encodeURIComponent(retestId)}/result`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })).json()) as { retest: FindingRetest }
+}
+
+export async function batchFindingRetests(findingIds: string[], notes: string): Promise<FindingRetestBatchResult> {
+  return (await (await request('/api/v1/findings/retests/batch', {
+    method: 'POST',
+    body: JSON.stringify({ finding_ids: findingIds.slice(0, 20), notes })
+  })).json()) as FindingRetestBatchResult
+}
+
+export async function saveFindingReport(
+  findingId: string,
+  report: string,
+  expectedDigest: string
+): Promise<{ saved: boolean; report: string; evidence_digest: string }> {
+  return (await (await request(`/api/v1/findings/${encodeURIComponent(findingId)}/report`, {
+    method: 'POST',
+    body: JSON.stringify({ report, expected_digest: expectedDigest })
+  })).json()) as { saved: boolean; report: string; evidence_digest: string }
 }
 export async function loadSystem(): Promise<SystemInfo> {
   return (await (await request('/api/v1/system', { cache: 'no-store' })).json()) as SystemInfo
@@ -132,17 +257,27 @@ export interface LlmProviderInput {
   api_key?: string
   clear_key?: boolean
 }
+/** Role engines: hunter=主力 Worker, reasoner=Planner, explorer=Worker (follows hunter when omitted). */
+export const ENGINE_CHOICES = ['provider', 'pi', 'grok', 'codex', 'claude'] as const
+export type EngineChoice = (typeof ENGINE_CHOICES)[number]
+
 export interface LlmSettingsView {
   schema: string
   updated_at: number
   providers: LlmProviderView[]
   tiers: Record<string, string>
+  engines: Record<string, string>
   settings_path?: string
   effective?: {
     providers_env_override: boolean
     legacy_env_override: boolean
     reasoner_prefer: string
     explorer_prefer: string
+    hunter_engine: string
+    reasoner_engine: string
+    explorer_engine: string
+    verifier_engine: string
+    specialist_engine: string
   }
 }
 export interface LlmTestResult {
@@ -158,11 +293,12 @@ export async function loadLlmSettings(): Promise<LlmSettingsView> {
 }
 export async function saveLlmSettings(
   providers: LlmProviderInput[],
-  tiers: Record<string, string>
+  tiers: Record<string, string>,
+  engines: Record<string, string> = {}
 ): Promise<LlmSettingsView & { ok: boolean; applied_env?: string[] }> {
   return (await (await request('/api/v1/llm/settings', {
     method: 'PUT',
-    body: JSON.stringify({ providers, tiers })
+    body: JSON.stringify({ providers, tiers, engines })
   })).json())
 }
 export async function testLlmProvider(payload: { name?: string; provider?: LlmProviderInput }): Promise<LlmTestResult> {
@@ -183,6 +319,18 @@ export interface ProjectCard {
   project_id: string; target: string; profiles: string[]
   session_count: number; task_count: number; finding_count: number; verified_finding_count: number
   status: string; last_activity: number
+  /** 正在跑的那条 task 的 id;没在跑就是空串。 */
+  running_task_id: string
+  /** 一次批量里的位置(137/325)。只有这条运行登记过才有值,否则是 0。 */
+  batch_index: number; batch_size: number
+  /** 最近一次带面结果的运行留下的计数。has_surface=false 表示这条路不产生面计数。 */
+  surface_paths: number; surface_api: number; surface_scripts: number; http_status: number
+  has_surface: boolean
+}
+/** 全局在跑的那一台。翻到第几页都该看得见,所以它不随分页变化。 */
+export interface RunningProject {
+  project_id: string; target: string; task_id: string
+  batch_index: number; batch_size: number
 }
 export interface SessionTask { task_id: string; status: string; run_id: string }
 export interface SessionCard {
@@ -197,9 +345,12 @@ export interface TrajectoryEvent { seq: number; ts: number; source: string; kind
 /** 项目列表是分页的:total 是全部项目数,不是本页数量。 */
 export interface ProjectPage {
   projects: ProjectCard[]; total: number; offset: number; limit: number
+  running: RunningProject | null
 }
-export const PROJECT_PAGE_SIZE = 20
-export async function loadProjects(offset = 0, limit = PROJECT_PAGE_SIZE): Promise<ProjectPage> {
+/** 每页条数可选项。上限受后端 MAX_PROJECT_PAGE(200)约束。 */
+export const PROJECT_PAGE_SIZES = [20, 50, 100] as const
+export const PROJECT_PAGE_SIZE = PROJECT_PAGE_SIZES[0]
+export async function loadProjects(offset: number = 0, limit: number = PROJECT_PAGE_SIZE): Promise<ProjectPage> {
   const q = `?offset=${offset}&limit=${limit}`
   return (await (await request(`/api/v1/projects${q}`, { cache: 'no-store' })).json()) as ProjectPage
 }
@@ -223,7 +374,8 @@ export async function loadSessionGuidance(id: string): Promise<SessionGuidanceRo
 // 走的是 core.intake_state 那套门:提交只铸一个 digest 绑定的预览(什么都不执行),
 // 确认时必须回显 intake_id + options_digest,门核对上了才落不可变的 TargetCard。
 export interface ProjectIntakeToggles {
-  scan_enabled?: boolean; fingerprint_precise?: boolean; nuclei?: boolean; tscan?: boolean
+  scan_enabled?: boolean; fingerprint_precise?: boolean; arl_next?: boolean
+  nuclei?: boolean; tscan?: boolean
   asset_inventory?: boolean; subdomain_enum?: boolean; intel?: boolean; poc_research?: boolean
   proxy_route?: boolean; network_gate?: boolean; edge_human_gate?: boolean
 }

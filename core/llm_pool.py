@@ -6,8 +6,8 @@ provider pool, tier routing and failover used by the SRC agent and (through
 
 * providers come from ``LLM_PROVIDERS="name|base_url|api_key|model,..."`` or the
   legacy single-key trio ``LLM_API_KEY``/``LLM_BASE_URL``/``LLM_MODEL``;
-* ``prefer`` / ``only`` implement the tier routing (smart Reasoner vs cheap
-  Explorer) that :class:`agents.src_agent.AgentConfig` has always passed down;
+* ``prefer`` / ``only`` implement the tier routing (Planner vs Worker provider
+  names) that :class:`agents.src_agent.AgentConfig` has always passed down;
 * providers are tried in order with endpoint-path fallback, so one dead provider
   fails over to the next without killing the run;
 * the runtime "active provider" file stays compatible with what the Console

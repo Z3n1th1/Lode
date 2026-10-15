@@ -4,6 +4,7 @@ import { create } from 'zustand'
 
 import {
   ApiError,
+  PROJECT_PAGE_SIZES,
   PROJECT_PAGE_SIZE,
   confirmProjectIntake,
   confirmScopeIntake,
@@ -33,6 +34,7 @@ import {
   type ProjectCard,
   type ProjectDetail,
   type ProjectResults,
+  type RunningProject,
   type SessionGuidanceRow,
   type ScopeIntakeConfirmResult,
   type SrcAutopilotView,
@@ -52,7 +54,9 @@ const EMPTY_AUTOPILOT: SrcAutopilotView = {
   intents: [],
   claims: [],
   dead_ends: [],
-  hints: []
+  hints: [],
+  session_id: '',
+  hosts: []
 }
 
 /** 读提交队列。空队列有两种意思——真的没有待确认,还是台账文件/锁读不到——
@@ -153,6 +157,7 @@ function scopeErrorText(error: unknown): string {
 export interface IntakeToggles {
   scan_enabled: boolean
   fingerprint_precise: boolean
+  arl_next: boolean
   nuclei: boolean
   tscan: boolean
   asset_inventory: boolean
@@ -167,6 +172,7 @@ export interface IntakeToggles {
 const DEFAULT_TOGGLES: IntakeToggles = {
   scan_enabled: true,
   fingerprint_precise: true,
+  arl_next: false,
   nuclei: false,
   tscan: false,
   asset_inventory: true,
@@ -209,12 +215,18 @@ interface PanelState {
   loading: boolean
   srcAutopilot: SrcAutopilotView
   findings: FindingRow[]
+  findingsError: string
   system: SystemInfo | null
   models: ModelPool | null
   projects: ProjectCard[]
   /** 全部项目数(不只是本页)。列表分页之后,这两个数是两件事。 */
   projectTotal: number
-  /** "加载更多"失败的原因。空着 = 没出过错。 */
+  /** 当前页的起点与每页条数。翻页只动 offset,不再从 0 重拉整个列表。 */
+  projectOffset: number
+  projectPageSize: number
+  /** 全局在跑的那一台。不随分页变化,所以单独一格,翻到哪页都看得见。 */
+  projectRunning: RunningProject | null
+  /** 取页失败的原因。空着 = 没出过错。 */
   projectsMoreError: string
   projectDetail: ProjectDetail | null
   selectedProjectId: string
@@ -252,8 +264,8 @@ interface PanelState {
   modal: ModalState
 
   load: (route: Route) => Promise<void>
-  /** 再取一页项目追到列表尾部。已经取到底就是空操作。 */
-  loadMoreProjects: () => Promise<void>
+  /** 跳到指定页。offset/size 最终以服务端返回的为准(越界由服务端夹取)。 */
+  setProjectPage: (offset: number, size?: number) => Promise<void>
   selectProject: (id: string) => void
   selectSession: (id: string) => Promise<void>
   submitGuidance: () => Promise<void>
@@ -278,14 +290,20 @@ interface PanelState {
   clearGuidance: () => void
 }
 
+let findingsLoading = false
+
 export const usePanels = create<PanelState>()((set, get) => ({
   loading: false,
   srcAutopilot: EMPTY_AUTOPILOT,
   findings: [],
+  findingsError: '',
   system: null,
   models: null,
   projects: [],
   projectTotal: 0,
+  projectOffset: 0,
+  projectPageSize: PROJECT_PAGE_SIZE,
+  projectRunning: null,
   projectsMoreError: '',
   projectDetail: null,
   selectedProjectId: '',
@@ -316,53 +334,73 @@ export const usePanels = create<PanelState>()((set, get) => ({
   modal: CLOSED_MODAL,
 
   async load(route) {
+    if (route === 'findings' && findingsLoading) return
+    if (route === 'findings') findingsLoading = true
     set({ loading: true })
     try {
       if (route === 'health') {
         const [system, models] = await Promise.all([loadSystem(), loadModelPool()])
         set({ system, models })
       } else if (route === 'findings') {
-        set({ findings: await loadFindings() })
+        set({ findings: await loadFindings(), findingsError: '' })
       } else if (route === 'projects') {
-        // 后台轮询也走这条。按已经展开的条数去取,否则刚点开的"更多"会在下一次
-        // 轮询时缩回去 —— 列表在脚底下塌掉比不加载更难受。服务端单次最多给
-        // MAX_PROJECT_PAGE(200)条,展开得比这更多时会回落到 200;页头会写
-        // "200 / 252",按钮也还在,所以那是看得见、点得回来的,不是静默截断。
-        const want = Math.max(PROJECT_PAGE_SIZE, get().projects.length)
+        // 后台轮询也走这条。只取**当前页**。以前是按已展开的条数从 0 重拉一遍
+        // (为了不让"加载更多"的结果缩回去),改成真翻页后那套既没用又害事 ——
+        // 它每 20s 把视图从第 9 页拽回第一页,翻页根本用不成。
         const [page, queue] = await Promise.all([
-          loadProjects(0, want),
+          loadProjects(get().projectOffset, get().projectPageSize),
           readIntakeQueue(get().intakes, get().intakeQueueStatus)
         ])
-        set({ projects: page.projects, projectTotal: page.total, projectsMoreError: '', ...queue })
+        set({
+          projects: page.projects,
+          projectTotal: page.total,
+          // offset/limit 以服务端为准:它会把越界值夹回来,自己再算一遍只会跟它对不上。
+          projectOffset: page.offset,
+          projectPageSize: page.limit,
+          projectRunning: page.running,
+          projectsMoreError: '',
+          ...queue
+        })
       } else if (route === 'settings') {
         const profiles = await loadProfiles().catch(() => [])
         set({
           profileOptions: profiles.map((p) => ({ label: `${p.id} · ${p.label}`, value: p.id }))
         })
       } else if (route === 'blackboard') {
-        set({ srcAutopilot: await loadSrcAutopilot().catch(() => EMPTY_AUTOPILOT) })
+        const sessionId = useChat.getState().sessionId
+        set({ srcAutopilot: await loadSrcAutopilot(sessionId).catch(() => EMPTY_AUTOPILOT) })
       }
-    } catch {
+    } catch (error) {
+      if (route === 'findings') set({ findingsError: error instanceof Error ? error.message : '加载失败' })
       /* 单个页面读失败不打断整体;20s 轮询会重试 */
     } finally {
+      if (route === 'findings') findingsLoading = false
       set({ loading: false })
     }
   },
 
-  async loadMoreProjects() {
-    const { projects, projectTotal } = get()
-    if (projects.length >= projectTotal) return
+  async setProjectPage(offset, size) {
+    const current = get()
+    const nextSize = size ?? current.projectPageSize
+    const wantSize = (PROJECT_PAGE_SIZES as readonly number[]).includes(nextSize)
+      ? nextSize
+      : current.projectPageSize
+    // 换每页条数等于换一套分页,offset 必须归 0 —— 留着旧 offset 会停在一个
+    // 按新页宽算毫无意义的位置上。
+    const wantOffset = wantSize !== current.projectPageSize ? 0 : Math.max(0, offset)
     try {
-      const page = await loadProjects(projects.length, PROJECT_PAGE_SIZE)
-      // 按 project_id 去重:列表按最近活动排序,翻页期间头部插进新项目会让
-      // 这一页的头几条和上一页的尾几条重叠,直接 concat 会渲染出重复行。
-      const seen = new Set(projects.map((p) => p.project_id))
+      const page = await loadProjects(wantOffset, wantSize)
       set({
-        projects: projects.concat(page.projects.filter((p) => !seen.has(p.project_id))),
+        projects: page.projects,
         projectTotal: page.total,
+        projectOffset: page.offset,
+        projectPageSize: page.limit,
+        projectRunning: page.running,
         projectsMoreError: ''
       })
     } catch (error) {
+      // 翻页失败保留原来那一页。清空列表会让人以为"什么都没了",而实际上只是
+      // 这一发请求没回来 —— 下一轮 20s 轮询会自己纠正。
       set({ projectsMoreError: error instanceof ApiError ? error.message : '加载失败' })
     }
   },
@@ -644,7 +682,7 @@ export const usePanels = create<PanelState>()((set, get) => ({
   },
 
   async openIntakeRun() {
-    const run = get().intakeResult?.run
+    const run = get().intakeResult?.run || get().scopeResult?.run
     if (!run) {
       // 以前这里静默 return:按下去什么都不发生,操作者只能反复按。没起运行是
       // 有原因的(门确认了、卡落盘了,但服务端没起 run),就该把原因说出来。

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.src_blackboard import SrcBlackboard
 
@@ -365,10 +370,12 @@ class SrcBlackboardDagClaimTests(unittest.TestCase):
             "https://x.com/graphql": ["graphql"],
             "https://x.com/redirect?next=[value]": ["ssrf"],
             "https://x.com/download?file=[value]": ["path_traversal"],
-            "https://x.com/search?q=[value]": ["injection"],
+            "https://x.com/search?q=[value]": ["injection", "xss"],
             # 没有信号就是空:静态资源上给一条假设,比不给更糟。
             "https://x.com/static/app.js": [],
             "https://x.com/health": [],
+            "https://x.com/api/workflow/search": ["rce"],
+            "https://x.com/actuator/health": ["rce", "authz_boundary"],
             # "含数字"不是"是 id":2fa 是路径名的一部分,不是对象引用。
             "https://x.com/v1/2fa": [],
         }

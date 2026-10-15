@@ -1,6 +1,6 @@
 # SRC 自动化使用说明
 
-`src_autopilot.py` 是一个有界的 SRC surface 分诊器，不是自动利用器。它只在书面授权 scope 内复用 `surface_discovery` 的低频 GET 结果，生成去重、排序、脱敏的候选队列，并把候选同步到本地黑板。
+`src_autopilot.py` 是一个有界的 SRC surface 分诊器，不是自动利用器。它只在书面授权 scope 内复用 `surface_discovery` 的低频 GET 结果，生成去重、排序、脱敏的候选队列，并把候选同步到本地黑板。探测遇到自定义 200 错误页或 SPA fallback 时，会在同一 scope、速率和请求预算下惰性请求一次随机不存在路径建立响应基线；与基线一致的响应只记录为 `soft-404 fallback`，不会进入路径候选。
 
 ## 首轮
 
@@ -62,7 +62,7 @@ if claimed:
 
 ## LLM 驱动的 SRC Agent
 
-`src_autopilot.py` 只做候选分诊；真正“自动挖洞”的引擎是 `agents/src_agent.py` 里的 `SrcAgentLoop`，采用 Cairn 式三阶段循环 + 成本分层：**廉价 Reasoner 选意图，任意 provider 做 Explorer**。
+`src_autopilot.py` 只做候选分诊；真正“自动挖洞”的引擎是 `agents/src_agent.py` 里的 `SrcAgentLoop`，按 Muteki 式蜂群拆：**廉价 Planner 出互不重叠的 intent，主力 Worker 认领一条取证，独立 Review 证伪高危**。闸门（scope / 准入 / 预算）是硬规则。
 
 ```powershell
 $env:LLM_API_KEY = "sk-your-deepseek-key"
@@ -76,9 +76,9 @@ python src_agent.py --scope scope.json --blackboard .\out\src-blackboard.json --
 
 每一轮循环:
 
-1. **Reason** —— 读取黑板全量快照,选出 `queued` intent,并生成漏洞假设;提示词明确“候选未经验证,不得重复建议死路”。
-2. **Explore** —— `claim` 一个 intent，对目标做 scope 校验后的请求（默认 GET/HEAD；探测档见下），把响应消毒(剥离 cookie/auth,body 截断)后交给 LLM 分析,产出 `fact` / `dead_end` / `hint` 写回黑板。
-3. 黑板更新后进入下一轮,直到没有可挖 intent 或触达 `--max-cycles` 硬上限。
+1. **Planner** —— 读取黑板全量快照,选出互不重叠的 `queued` intent,并生成漏洞假设;提示词明确“候选未经验证,hint 不是事实,不得重复建议死路”。
+2. **Worker** —— `claim` 一个 intent，对目标做 scope 校验后的请求（默认 GET/HEAD；探测档见下），把响应消毒(剥离 cookie/auth,body 截断)后交给 LLM 分析,产出 `fact` / `dead_end` / `hint` 写回黑板。
+3. **Review** —— 高危发现走独立第二意见。黑板更新后进入下一轮,直到没有可挖 intent 或触达 `--max-cycles` 硬上限。
 
 **清单不是在第 1 圈冻结的。** Explorer 在响应里看见、而候选清单里没有的路由
 (`Location` 头、错误体里的路径、`Allow:` 头、403/401 说明"端点存在")可以写进

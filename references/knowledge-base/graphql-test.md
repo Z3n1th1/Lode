@@ -273,6 +273,11 @@ query {
 
 ---
 
+## 六、嵌套查询 DoS —— 禁止实发
+
+ByteSRC / JSRC / TSRC 均禁止 DoS 与高并发压测。下面的嵌套/循环查询是反面教材，
+不要对授权目标发出去。证明 GraphQL 面用 `__typename` / 单层字段即可。
+
 ## 六、嵌套查询 DoS
 
 ```graphql

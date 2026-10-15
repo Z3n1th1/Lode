@@ -152,7 +152,7 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                         "options": {
                             "asset_inventory": {"enabled": False, "mode": "not_requested"},
                             "fingerprint": {"enabled": False, "mode": "not_requested"},
-                            "arl_next": {"enabled": False, "mode": "not_available"},
+                            "arl_next": {"enabled": False, "mode": "fingerprint_import"},
                             "intelligence": {"enabled": False, "mode": "metadata_only"},
                             "poc_research": {"enabled": False, "mode": "metadata_only"},
                             "proxy_route": {"enabled": False, "profile": ""},
@@ -239,6 +239,35 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
             for relative, content in before.items():
                 self.assertEqual(content, (state_dir / relative).read_bytes())
 
+    def test_projects_do_not_drop_goals_before_pagination(self) -> None:
+        from console.projections import ReadOnlyControlPlane
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            goals = [
+                {
+                    "event": "created",
+                    "goal": {
+                        "goal_id": f"G-{index:03d}",
+                        "target": f"https://goal-{index:03d}.example.test",
+                        "profile_name": "standard-pentest",
+                        "created_at": 1_000.0 + index,
+                        "endpoints_total": 1,
+                        "timebox_seconds": 7_200,
+                    },
+                }
+                for index in range(25)
+            ]
+            write_jsonl(state_dir / "goals.jsonl", goals)
+            (state_dir / "goals.jsonl.lock").write_bytes(b"\0")
+
+            page = ReadOnlyControlPlane(state_dir, now_fn=lambda: 1_100.0).projects(
+                offset=0, limit=100
+            )
+
+            self.assertEqual(25, page["total"])
+            self.assertEqual(25, len(page["projects"]))
+
     def test_dashboard_requires_a_login_session(self) -> None:
         from console.app import create_app
 
@@ -303,6 +332,106 @@ class ReadOnlyControlPlaneTests(unittest.TestCase):
                 self.assertNotIn("token=value", json.dumps(body))
                 dashboard = client.get("/api/v1/dashboard").json()
                 self.assertTrue(dashboard["src_autopilot"]["available"])
+
+    def test_src_autopilot_projects_engagement_host_boards_when_global_file_is_absent(self) -> None:
+        from core.src_blackboard import SrcBlackboard
+        from console.app import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            session_id = "src-hostboard01"
+            run_id = "SL-test-host-1"
+            bb_path = state_dir / "src-agent-runs" / run_id / "src-blackboard.json"
+            board = SrcBlackboard(bb_path)
+            board.sync_candidates([{
+                "candidate_id": "SC-SHOP",
+                "url": "https://shop-tp.example/api/order/list",
+                "priority": 80,
+                "sources": ["js"],
+                "next_phase": "C-human-gated-verification",
+            }], run_id=run_id)
+            board.add_hint("I-order", "订单主键可枚举", source="src_agent_explorer")
+            board.add_hint("I-api", "ticketApiHost + 48 /api/order/*", source="src_agent_explorer")
+
+            job_dir = state_dir / "jobs"
+            job_dir.mkdir(parents=True)
+            (job_dir / "J-test-shop.json").write_text(json.dumps({
+                "job_id": "J-test-shop",
+                "session_id": session_id,
+                "kind": "engagement_host_run",
+                "target": "https://shop-tp.example/",
+                "status": "completed",
+                "created_at": 10,
+                "finished_at": 20,
+                "summary_ref": str(bb_path),
+                "payload": {"host": "shop-tp.example", "run_id": run_id},
+                "schema": "LodeJob/v1",
+            }), encoding="utf-8")
+
+            app = create_app(
+                state_dir=state_dir,
+                password="strong-local-password",
+                session_secret="session-secret-for-test-0123456789",
+            )
+            with TestClient(app) as client:
+                client.post("/api/v1/session", json={"password": "strong-local-password"})
+                body = client.get("/api/v1/src-autopilot").json()
+                self.assertEqual(200, client.get("/api/v1/src-autopilot").status_code)
+                self.assertTrue(body["available"])
+                self.assertEqual(session_id, body["session_id"])
+                self.assertEqual(["shop-tp.example"], body["hosts"])
+                self.assertEqual(2, len(body["hints"]))
+                texts = " ".join(row["hint"] for row in body["hints"])
+                self.assertIn("订单主键可枚举", texts)
+                self.assertIn("ticketApiHost", texts)
+                pinned = client.get(f"/api/v1/src-autopilot?session_id={session_id}").json()
+                self.assertEqual(session_id, pinned["session_id"])
+                self.assertTrue(pinned["available"])
+
+    def test_src_autopilot_merges_hints_from_two_host_runs(self) -> None:
+        from core.src_blackboard import SrcBlackboard
+        from console.app import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            session_id = "src-twoboards01"
+            job_dir = state_dir / "jobs"
+            job_dir.mkdir(parents=True)
+            for host, hint in (("shop-tp.example", "订单主键可枚举"), ("ebooking.example", "停在商家后台门户")):
+                run_id = f"SL-{host.split('.')[0]}"
+                bb_path = state_dir / "src-agent-runs" / run_id / "src-blackboard.json"
+                board = SrcBlackboard(bb_path)
+                board.add_hint(f"I-{host}", hint, source="src_agent_explorer")
+                (job_dir / f"J-{run_id}.json").write_text(json.dumps({
+                    "job_id": f"J-{run_id}",
+                    "session_id": session_id,
+                    "kind": "engagement_host_run",
+                    "target": f"https://{host}/",
+                    "status": "completed",
+                    "created_at": 10,
+                    "finished_at": 20,
+                    "summary_ref": str(bb_path),
+                    "payload": {"host": host, "run_id": run_id},
+                    "schema": "LodeJob/v1",
+                }), encoding="utf-8")
+
+            app = create_app(
+                state_dir=state_dir,
+                password="strong-local-password",
+                session_secret="session-secret-for-test-0123456789",
+            )
+            with TestClient(app) as client:
+                client.post("/api/v1/session", json={"password": "strong-local-password"})
+                body = client.get("/api/v1/src-autopilot").json()
+                self.assertTrue(body["available"])
+                self.assertEqual(session_id, body["session_id"])
+                self.assertEqual({"shop-tp.example", "ebooking.example"}, set(body["hosts"]))
+                texts = " ".join(row["hint"] for row in body["hints"])
+                self.assertIn("订单主键可枚举", texts)
+                self.assertIn("停在商家后台门户", texts)
+                sources = [row["source"] for row in body["hints"]]
+                self.assertTrue(any("shop-tp.example" in src for src in sources))
+                self.assertTrue(any("ebooking.example" in src for src in sources))
 
     def test_login_supports_a_unicode_password(self) -> None:
         from console.app import create_app

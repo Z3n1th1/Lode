@@ -1,0 +1,17 @@
+{
+  "_comment": "Scope for the deep range — self-owned, loopback only, deliberately narrow and chain-gated. CLI path (`lode.py auto --scope <this> --from-scope`), since the Console refuses 127.0.0.1 by design.",
+  "program": "lode-deep-range",
+  "authorization": "Self-owned local test range (ranges/deep-range). Loopback only, deliberately vulnerable by design, no third-party asset is in scope.",
+  "allowed_domains": [],
+  "allowed_hosts": [],
+  "allowed_ips": ["127.0.0.1"],
+  "allowed_methods": ["GET", "HEAD"],
+  "allow_request_body": false,
+  "seed_urls": ["http://127.0.0.1:8792/"],
+  "rate_limit": {
+    "timeout_seconds": 8,
+    "requests_per_second": 3
+  },
+  "max_items": 200,
+  "max_fanout": 1
+}

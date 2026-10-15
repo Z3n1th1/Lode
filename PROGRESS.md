@@ -1,7 +1,7 @@
 # Lode 当前进度
 
-更新时间：2026-09-21（最近一次改动：授权文档入口链 + 多并发收尾，并在真实程序上把授权文档
-入口链跑通一遍——见「已知限制 1」。旧版停留在 2026-09-13，
+更新时间：2026-10-11（最近一次改动：CLI 推理后端接线 + 京东双十一精确主机 scope，
+并同步测试基线。旧版停留在 2026-09-13，
 旧版提到的 `/dsh`、`/arl`、intel 路由、17 面板抽屉、`pentest-agent/` 目录都已不存在。）
 
 这份文件是下一次接手的起点。**以代码和测试为准**，本文件的数字若与代码冲突，以代码为准。
@@ -132,11 +132,14 @@ HTTP 面的全集冻结在 `tests/test_route_contract.py`（**那个文件是唯
    那会破坏重启安全）。`authz_boundary` 这类假设今天无法验证：没有 header/凭据通道。
 5. **engine seam。** `core/governed_request.py` **还不存在**。治理现在重复在
    `agents/surface_discovery.py` 和 `agents/src_agent.py` 两处，`intel/network.py` 是第二条
-   无治理的出站。想接 codex/cc/pi 之前先把这条收成单一收口。
+   无治理的出站。Pi/Grok/Codex/Claude 已作为**可选文本推理后端**接上
+   （`core/cli_engines.py`，设置页「推理后端」；CLI `--reasoner-engine` /
+   `--explorer-engine`）。它们只返回文本，HTTP / scope / 预算 / 审计仍由 Lode 执行。
+   不要把 CLI 的 shell/network 工具环放进 SRC worker。出站治理收口还没做。
 
-明确**不做**：header/cookie 通道、逐主机速率覆盖、真正把 Pi/CC/Codex 接上、跨 run 的全局
-请求计数（现在每轮一份，`max_fanout × 60` 仍是扇出后的总量；要按 engagement 全局计数得在
-`FileTokenBucket` 旁边加一个文件计数器）。
+明确**不做**：header/cookie 通道、逐主机速率覆盖、把 CLI 的 shell/network 能力交给挖洞
+worker、跨 run 的全局请求计数（现在每轮一份，`max_fanout × 60` 仍是扇出后的总量；要按
+engagement 全局计数得在 `FileTokenBucket` 旁边加一个文件计数器）。
 
 **写操作的边界已经落在代码里**（不是文档里的约定）：`core.action_admission` 是唯一的准入判定，
 `DELETE` 不是合法取值，`PUT`/`PATCH` 恒拒，`POST` 需要正面读证明，改状态形状的 URL 对任何方法
@@ -206,10 +209,10 @@ D:\Environment\Python\miniforge\envs\py310\python.exe -m pytest -q
 cd console; npm run typecheck; npm run test; npm run build
 ```
 
-当前基线（2026-09-23 实测）：
+当前基线（2026-10-11 本机复测）：
 
-- Python **770 passed, 7 skipped**（`py310`，约 35s）
-- 前端 **54 passed**（vitest，4 个文件），`tsc --noEmit` 干净
+- Python **823 passed, 7 skipped**（`py310`，约 85s）
+- 前端 **61 passed**（vitest，5 个文件），`tsc --noEmit` 与生产构建均通过
 
 （2026-09-13 那版写的是 354 / 33 且前端工具写成 `vue-tsc`——控制台早已迁到 React + TS，
 `typecheck` 跑的是 `tsc --noEmit`，别再去找 vue-tsc。）

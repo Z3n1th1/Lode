@@ -38,8 +38,11 @@ DOMAIN_RE = re.compile(
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?:/[^\s\"'<>）)】\]]*)?")
 
 SCOPE_SUFFIX = (
-    "【范围约束】仅对上述目标做被动侦察与只读低频验证；"
-    "禁止主动攻击、爆破、批量 fuzz、任何状态变更/写操作；"
+    "【范围约束】仅对上述目标做授权安全测试；"
+    "存在性探针（布尔/报错/短延时注入、换 id、XSS 对照、id/whoami/echo/time、LFI /etc/passwd、"
+    "SSRF 打 metadata/127.0.0.1/内网一口）要做；查询与新增测试数据可做；"
+    "禁止删除、拖库、改已有数据、爆破、DoS、gopher 后利用、拿钥横移、webshell 与反弹；"
+    "本机 Bash/PowerShell 走命令研判（删除/拖库/修改类命令拦截，不调用 AI）；"
     "超出该目标域名/IP 的资产一律不碰。"
 )
 DEFAULT_STRIX_BIN = "/opt/pentest-agent/venv-strix/bin/strix"

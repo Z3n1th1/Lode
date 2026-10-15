@@ -10,6 +10,7 @@ import {
   ApiError,
   loadChatEvents,
   loadChatModes as apiLoadChatModes,
+  loadSrcAutopilot,
   newChatSession,
   sendChatTurn,
   stopChatTurn,
@@ -276,6 +277,17 @@ export const useChat = create<ChatState>()((set, get) => {
       const remembered = recallSession()
       if (remembered) await get().attach(remembered)
       else await get().newSession()
+      // 记住的会话是空壳、而最近一轮 engagement 已经写完时,跳到那条运行流。
+      // 不然对话页停在「起点」,黑板也因为绑定了空会话而看起来像没跑过。
+      if (get().events.length === 0) {
+        try {
+          const board = await loadSrcAutopilot()
+          const sid = String(board.session_id || '')
+          if (sid && sid !== get().sessionId) await get().attach(sid)
+        } catch {
+          /* 没有可恢复的运行流就算了 */
+        }
+      }
       set({ loading: false })
     },
 

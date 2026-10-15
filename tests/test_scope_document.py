@@ -188,5 +188,52 @@ class FanoutCapTests(unittest.TestCase):
                 self.assertLessEqual(max_fanout_for(_document(max_fanout=raw)), DEFAULT_MAX_FANOUT)
 
 
+JD_DOUBLE11_HOSTS = (
+    "man-ls.jd.com",
+    "performance-manager-kpl-pro.jd.com",
+    "trip.jd.com",
+    "trip-admin.jd.com",
+    "ebooking.jd.com",
+    "shop-tp.jd.com",
+    "dgm.jd.com",
+    "doctor.jd.com",
+    "wl.jdl.com",
+)
+
+
+class JdDouble11ScopeTests(unittest.TestCase):
+    """The Double-11 domestic-business scope is exact hosts, GET/HEAD, no expansion."""
+
+    def _document(self) -> dict:
+        path = _ROOT / "scope-jd-double11.json"
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "program": "JSRC 双十一国内业务专项 2026",
+            "authorization": "JSRC 双十一国内业务专项, exact hosts only",
+            "allowed_domains": [],
+            "allowed_hosts": list(JD_DOUBLE11_HOSTS),
+            "allowed_methods": ["GET", "HEAD"],
+            "allow_request_body": False,
+            "seed_urls": [f"https://{host}/" for host in JD_DOUBLE11_HOSTS],
+            "max_fanout": 9,
+        }
+
+    def test_nine_exact_hosts_and_no_domain_expansion(self) -> None:
+        parsed = parse_scope_document(self._document())
+        self.assertEqual(JD_DOUBLE11_HOSTS, parsed.hosts)
+        self.assertEqual((), parsed.scope.allowed_domains)
+        self.assertEqual(("GET", "HEAD"), parsed.scope.allowed_methods)
+        self.assertFalse(parsed.scope.allow_request_body)
+        self.assertEqual(9, parsed.max_fanout)
+        self.assertFalse(parsed.rejected)
+
+    def test_a_sibling_host_is_out_of_scope(self) -> None:
+        parsed = parse_scope_document(self._document())
+        allowed, reason = parsed.scope.check_url("https://www.jd.com/")
+        self.assertFalse(allowed)
+        self.assertEqual("host_not_in_scope", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

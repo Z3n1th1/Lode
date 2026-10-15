@@ -120,9 +120,17 @@ _QUERY_TOKENS = frozenset({
     "name", "lang", "language", "type", "format", "select", "where", "cmd", "exec",
     "sql", "limit", "offset",
 })
+_XSS_TOKENS = frozenset({
+    "q", "query", "search", "keyword", "kw", "name", "comment", "message",
+    "content", "html", "callback", "jsonp", "title", "desc", "description",
+})
 _BOUNDARY_SEGMENTS = frozenset({
     "admin", "administrator", "manage", "management", "internal", "private", "export",
     "backoffice", "superuser", "actuator", "debug", "config", "console", "portal",
+})
+_RCE_SEGMENTS = frozenset({
+    "workflow", "conductor", "xxl", "actuator", "druid", "nacos",
+    "heapdump", "jolokia", "runtime",
 })
 
 
@@ -149,11 +157,13 @@ def hypotheses(url: str) -> List[str]:
     )
     found: List[str] = []
     for name, hit in (
+        ("rce", bool(segment_set & _RCE_SEGMENTS)),
         ("graphql", "graphql" in segment_set or "gql" in segment_set or "graphql" in tokens),
         ("idor", has_variable or bool(tokens & _ID_TOKENS)),
         ("ssrf", bool(tokens & _URL_TOKENS)),
         ("path_traversal", bool(tokens & _FILE_TOKENS)),
         ("injection", bool(tokens & _QUERY_TOKENS)),
+        ("xss", bool(tokens & _XSS_TOKENS)),
         ("authz_boundary", bool(segment_set & _BOUNDARY_SEGMENTS)),
     ):
         if hit:
@@ -178,6 +188,7 @@ def _safe_text(value: Any, limit: int) -> str:
 # caller (the gate, which knows what the authorisation document declared).
 _STATE_CHANGING_WORDS = frozenset({
     "delete", "remove", "destroy", "purge", "erase", "clear", "drop", "wipe",
+    "truncate", "recycle", "trash", "unlink",
     "update", "edit", "modify", "reset", "cancel", "disable", "revoke",
     "logout", "signout", "unsubscribe", "send", "resend", "sms", "email",
     "pay", "payment", "refund", "transfer", "purchase", "checkout",
@@ -230,6 +241,11 @@ def state_changing_reason(value: str) -> str:
             return "unknown_operation_selector"
     words = _CAMEL_BOUNDARY.sub(" ", decoded).lower()
     tokens = set(re.findall(r"[a-z]+", words))
+    # Short aliases only count as complete path segments; ``?q=rm -rf`` must
+    # retain its hazardous-payload reason instead of being treated as an endpoint.
+    path = words.partition("?")[0]
+    if any(segment in {"del", "rm"} for segment in re.split(r"[/;._-]+", path)):
+        return "state_changing_url"
     if tokens & _STATE_CHANGING_WORDS or any(word in words for word in _STATE_CHANGING_CJK):
         return "state_changing_url"
     return ""
@@ -357,6 +373,10 @@ class SrcBlackboard:
                 # 形状给的检查方向(0–3 条)。确定性纯函数,同一个 url 永远同一组 ——
                 # 所以这里自己算,不读生产者的字段。
                 signals = hypotheses(url)
+                risk_signals = [
+                    _text(item, 40) for item in (candidate.get("risk_signals") or [])[:12]
+                    if _text(item, 40)
+                ]
                 # 形状事实,不是判决:URL 读起来像改状态。闸门拿它决定硬拦还是警告
                 # (取决于文档声明了什么),提示词拿它提醒模型这是次改动。
                 state_changing = state_changing_reason(url) == "state_changing_url"
@@ -370,6 +390,7 @@ class SrcBlackboard:
                         "url": url,
                         "probe_url": probe,
                         "hypotheses": signals,
+                        "risk_signals": risk_signals,
                         "state_changing_endpoint": state_changing,
                         "priority": _priority(candidate.get("priority")),
                         "sources": [_text(item, 40) for item in (candidate.get("sources") or [])[:12]],
@@ -388,6 +409,8 @@ class SrcBlackboard:
                 else:
                     fact["updated_at"] = now
                     fact["run_id"] = _text(run_id, 80)
+                    fact["priority"] = max(_priority(fact.get("priority")), _priority(candidate.get("priority")))
+                    fact["risk_signals"] = sorted(set(fact.get("risk_signals") or ()) | set(risk_signals))[:12]
                 intent_id = "I-" + _digest("src-review", cid)
                 intent = intents.get(intent_id)
                 if intent is None:
@@ -400,6 +423,7 @@ class SrcBlackboard:
                         "probe_url": probe,
                         # 形状给的检查方向;Explorer 的提示词里会带这一节。
                         "hypotheses": signals,
+                        "risk_signals": risk_signals,
                         "state_changing_endpoint": state_changing,
                         "priority": _priority(candidate.get("priority")),
                         "phase": _text(candidate.get("next_phase"), 64) or "A-passive-triage",
@@ -420,6 +444,7 @@ class SrcBlackboard:
                     added_intents += 1
                 else:
                     intent["priority"] = max(_priority(intent.get("priority")), _priority(candidate.get("priority")))
+                    intent["risk_signals"] = sorted(set(intent.get("risk_signals") or ()) | set(risk_signals))[:12]
                     intent["updated_at"] = now
             state["facts"] = list(facts.values())[-MAX_ITEMS:]
             state["intents"] = sorted(intents.values(), key=lambda item: (-int(item.get("priority") or 0), item["intent_id"]))[:MAX_ITEMS]

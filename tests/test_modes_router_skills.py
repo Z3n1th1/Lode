@@ -367,7 +367,9 @@ class ShippedSkillsTests(unittest.TestCase):
     def test_pentest_pack_carries_the_operating_doctrine(self) -> None:
         # SRC_SYSTEM_PROMPT now lives in the pack, not in agents/src_chat.py.
         text = skills.compose_prompt("pentest")
-        for phrase in ("授权安全研究员", "SQLi 识别", "IDOR 识别", "不挖 CORS"):
+        for phrase in ("授权安全研究员", "SQLi 识别", "IDOR 识别", "不挖 CORS",
+                       "真实数据不超过5", "证明存在即可", "命令研判", "XSS 要挖",
+                       "case-index", "arl-recon", "sandbox-escape-test"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 

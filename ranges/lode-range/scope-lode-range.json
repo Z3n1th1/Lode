@@ -1,0 +1,18 @@
+{
+  "_comment": "Scope for the local Lode test range. This is a self-owned fixture on loopback. The Console refuses 127.0.0.1 by design (core/targets.py:84 public_target_reason), so this file is meant for the CLI path — `lode.py auto --scope <this> --from-scope`. The engine's per-request gate is SurfaceScope.check_url, which admits an IP that is listed in allowed_ips and still rejects anything out of scope.",
+  "program": "lode-test-range",
+  "authorization": "Self-owned local test range (ranges/lode-range). Loopback only, deliberately vulnerable by design, no third-party asset is in scope.",
+  "allowed_domains": [],
+  "allowed_hosts": [],
+  "allowed_ips": ["127.0.0.1"],
+  "forbidden_hosts": ["169.254.169.254"],
+  "allowed_methods": ["GET", "HEAD"],
+  "allow_request_body": false,
+  "seed_urls": ["http://127.0.0.1:8791/"],
+  "rate_limit": {
+    "timeout_seconds": 8,
+    "requests_per_second": 3
+  },
+  "max_items": 200,
+  "max_fanout": 1
+}

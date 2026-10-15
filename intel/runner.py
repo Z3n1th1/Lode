@@ -38,6 +38,7 @@ def _score(candidate: AssetCandidate, *, is_new: bool, source_count: int) -> flo
 def _merge(current: AssetCandidate, incoming: AssetCandidate) -> AssetCandidate:
     sources = tuple(dict.fromkeys(current.sources + incoming.sources + (incoming.source,)))
     tags = tuple(dict.fromkeys(current.tags + incoming.tags))
+    evidence_refs = tuple(dict.fromkeys(current.all_evidence_refs + incoming.all_evidence_refs))[:20]
     primary = current if current.confidence >= incoming.confidence else incoming
     return AssetCandidate(
         value=primary.value,
@@ -48,6 +49,7 @@ def _merge(current: AssetCandidate, incoming: AssetCandidate) -> AssetCandidate:
         confidence=max(current.confidence, incoming.confidence),
         scope_status="in_scope",
         evidence_ref=primary.evidence_ref or current.evidence_ref or incoming.evidence_ref,
+        evidence_refs=evidence_refs,
         tags=tags,
         title=primary.title or current.title or incoming.title,
         summary=primary.summary or current.summary or incoming.summary,
@@ -64,6 +66,7 @@ def collect(
     store: IntelStore | None = None,
     run_id: str | None = None,
     registry_path: str | Path | None = None,
+    before_persist: Callable[[RunReport], None] | None = None,
 ) -> RunReport:
     """Run passive providers, then enforce scope before persistence and ranking."""
     query.require_authorization()
@@ -124,6 +127,10 @@ def collect(
         duplicate_count=duplicate_count,
         previous_count=len(previous),
     )
+    # Optional durable sinks must stage candidates before history marks them
+    # seen. If staging fails, abort without committing the seen-key history.
+    if before_persist is not None:
+        before_persist(report)
     if store:
         store.write(report)
     if registry_path is not None:
@@ -145,6 +152,7 @@ def run_watch(
     stop_event: threading.Event | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     registry_path: str | Path | None = None,
+    before_persist: Callable[[RunReport], None] | None = None,
     on_report: Callable[[RunReport], None] | None = None,
 ) -> WatchSummary:
     """Run repeated passive collection with one process owning the watch lock.
@@ -204,6 +212,7 @@ def run_watch(
                         max_items=max_items,
                         store=store,
                         registry_path=registry_path,
+                        before_persist=before_persist,
                     )
                     runs_completed += 1
                     last_run_id = report.run_id

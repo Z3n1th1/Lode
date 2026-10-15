@@ -4,6 +4,7 @@
 append-only JSON/JSONL without using managers that could mutate it."""
 
 import hmac
+import hashlib
 import ipaddress
 import json
 import math
@@ -15,7 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -370,7 +371,10 @@ class ReadOnlyControlPlane:
                     "stop_condition": stop_condition,
                 }
             )
-        return sorted(snapshots, key=lambda item: item["created_at"], reverse=True)[:MAX_VISIBLE_ITEMS]
+        # Keep the full projection for aggregation and paginate only at the API
+        # boundary. Truncating here makes old goals disappear from project totals
+        # once a workspace has more than the visible-page size.
+        return sorted(snapshots, key=lambda item: item["created_at"], reverse=True)[:MAX_STATE_EVENTS]
 
     def _project_pending_profiles(self, events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         pending: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -477,6 +481,16 @@ class ReadOnlyControlPlane:
                     "finished_at": 0.0,
                     "run_id": "",
                     "blocked_reason": "",
+                    # 这些是收尾行(cmd_scan/cmd_auto 的 finish_run)才带的量:一个
+                    # target 的"面"有多大、它在一次批量里的位置。``has_surface``
+                    # 单独记,因为 0 也是个真实的答案(扫了,什么都没有)。
+                    "surface_paths": 0,
+                    "surface_api": 0,
+                    "surface_scripts": 0,
+                    "http_status": 0,
+                    "batch_index": 0,
+                    "batch_size": 0,
+                    "has_surface": False,
                 },
             )
             target = _text(event.get("target"))
@@ -503,6 +517,22 @@ class ReadOnlyControlPlane:
             if task["status"] == "blocked":
                 reason = _text(event.get("blocked_reason"), limit=96)
                 task["blocked_reason"] = reason if reason in ALLOWED_BLOCK_REASONS else "tool_runner_blocked"
+            # 收尾行的量。按键存在来判断,不按真值 —— 0 是"扫了但没面",不是"没记"。
+            if any(key in event for key in ("surface_paths", "surface_api",
+                                            "surface_scripts", "http_status")):
+                task["has_surface"] = True
+            if "surface_paths" in event:
+                task["surface_paths"] = max(0, int(_number(event.get("surface_paths"))))
+            if "surface_api" in event:
+                task["surface_api"] = max(0, int(_number(event.get("surface_api"))))
+            if "surface_scripts" in event:
+                task["surface_scripts"] = max(0, int(_number(event.get("surface_scripts"))))
+            if "http_status" in event:
+                task["http_status"] = max(0, int(_number(event.get("http_status"))))
+            if "batch_index" in event:
+                task["batch_index"] = max(0, int(_number(event.get("batch_index"))))
+            if "batch_size" in event:
+                task["batch_size"] = max(0, int(_number(event.get("batch_size"))))
 
         snapshots = []
         for task in tasks.values():
@@ -519,6 +549,13 @@ class ReadOnlyControlPlane:
                     "finished_at": task["finished_at"] or None,
                     "run_id": task["run_id"],
                     "blocked_reason": task["blocked_reason"] or None,
+                    "surface_paths": task["surface_paths"],
+                    "surface_api": task["surface_api"],
+                    "surface_scripts": task["surface_scripts"],
+                    "http_status": task["http_status"],
+                    "batch_index": task["batch_index"],
+                    "batch_size": task["batch_size"],
+                    "has_surface": task["has_surface"],
                 }
             )
         # 这里以前切 MAX_VISIBLE_ITEMS(=20),而那是**显示**用的常量 —— 于是快照在
@@ -612,6 +649,12 @@ class ReadOnlyControlPlane:
 
     def findings(self, limit: int = 200) -> List[Dict[str, Any]]:
         rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        from core.finding_workflow import FindingRetestStore, finding_id_for
+
+        retest_rows = FindingRetestStore(self.state_dir / "finding-retests.jsonl").list()
+        retests_by_finding: Dict[str, List[Dict[str, Any]]] = {}
+        for row in retest_rows:
+            retests_by_finding.setdefault(str(row.get("finding_id") or ""), []).append(row)
         # 热修(来源可读):task → target 映射,每条发现带出目标与 sarif 落盘时间
         targets: Dict[str, str] = {}
         for e in self._read_jsonl_plain(self.state_dir / "strix_tasks.jsonl"):
@@ -629,15 +672,188 @@ class ReadOnlyControlPlane:
                         mtime = None
                     for run in sd.get("runs", []):
                         for res in run.get("results", []):
+                            rule = _text(res.get("ruleId", ""), limit=60)
+                            title = _text((res.get("message", {}) or {}).get("text", ""), limit=160)
+                            target = targets.get(tid, "")
+                            finding_id = finding_id_for(task=str(tid), rule=rule, title=title, target=target)
+                            history = retests_by_finding.get(finding_id, [])
+                            latest = history[0] if history else None
+                            active = next((item for item in history if item.get("status") in {"pending_review", "queued", "running"}), None)
+                            props = (res.get("properties", {}) or {})
+                            summary = _text(props.get("summary") or props.get("description") or (res.get("message", {}) or {}).get("text", ""), limit=2000)
+                            evidence = _text(props.get("evidence") or props.get("evidence_ref") or "", limit=4000)
+                            raw_request = props.get("request") if isinstance(props.get("request"), dict) else {}
+                            report_dir = d / "reports"
+                            report_file = report_dir / f"{finding_id}.md"
+                            report_available = ((not d.is_symlink() and not report_dir.is_symlink() and report_file.is_file())
+                                                or self._has_report(str(tid)))
                             out.append({
+                                "finding_id": finding_id,
                                 "task": tid, "rule": _text(res.get("ruleId", ""), limit=60),
                                 "severity": _text((res.get("properties", {}) or {}).get("severity", "info"), limit=16),
-                                "title": _text((res.get("message", {}) or {}).get("text", ""), limit=160),
-                                "target": targets.get(tid, ""), "ts": mtime})
+                                "title": title,
+                                "target": target, "ts": mtime,
+                                "summary": summary,
+                                "evidence": evidence,
+                                "evidence_refs": props.get("evidence_refs") if isinstance(props.get("evidence_refs"), list) else [],
+                                # Never project request bodies/headers to the UI.
+                                "request_digest": hashlib.sha256(json.dumps(raw_request, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() if raw_request else "",
+                                "report_available": report_available,
+                                "retest": {
+                                    "status": (active or latest or {}).get("status", "none"),
+                                    "verdict": (latest or {}).get("verdict", ""),
+                                    "retest_id": (active or latest or {}).get("retest_id", ""),
+                                    "human_review_required": bool((active or latest or {}).get("human_review_required", False)),
+                                },
+                            })
             except OSError:
                 continue
         out.sort(key=lambda f: rank.get(str(f.get("severity")).lower(), 0), reverse=True)
         return out[:limit]
+
+    def _finding_row(self, finding_id: str) -> Dict[str, Any]:
+        wanted = _text(finding_id, limit=80)
+        return next((item for item in self.findings(limit=MAX_VISIBLE_ITEMS)
+                     if item.get("finding_id") == wanted), {})
+
+    def _raw_finding_request(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        from core.finding_workflow import finding_id_for
+
+        task_id = str(row.get("task") or "")
+        task_dir = self._task_dirs().get(task_id)
+        if task_dir is None:
+            return {}
+        for path in task_dir.glob("strix_runs/*/findings.sarif"):
+            document = self._read_json_file(path) or {}
+            for run in document.get("runs", []):
+                for result in run.get("results", []):
+                    rule = _text(result.get("ruleId", ""), limit=60)
+                    title = _text((result.get("message", {}) or {}).get("text", ""), limit=160)
+                    candidate_id = finding_id_for(task=task_id, rule=rule, title=title,
+                                                  target=str(row.get("target") or ""))
+                    if candidate_id != row.get("finding_id"):
+                        continue
+                    properties = result.get("properties", {})
+                    request = properties.get("request") if isinstance(properties, dict) else None
+                    return dict(request) if isinstance(request, dict) else {}
+        return {}
+
+    @staticmethod
+    def _has_replay_secret(value: Any, *, key: str = "") -> bool:
+        secret_key = re.compile(r"(?i)(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|credential)")
+        secret_value = re.compile(r"(?i)\b(?:bearer\s+[a-z0-9._~+/-]+=*|(?:api[_-]?key|token|password|secret)\s*[:=])")
+        if secret_key.search(key):
+            return True
+        if isinstance(value, Mapping):
+            return any(ReadOnlyControlPlane._has_replay_secret(v, key=str(k)) for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(ReadOnlyControlPlane._has_replay_secret(v) for v in value)
+        return isinstance(value, str) and bool(secret_value.search(value))
+
+    def finding_retest_plan(self, finding_id: str) -> Tuple[Dict[str, Any], str]:
+        """Build one replay request only from a local SARIF request and saved scope."""
+        row = self._finding_row(finding_id)
+        if not row:
+            return {}, "finding_not_found"
+        request = self._raw_finding_request(row)
+        if not request:
+            return {}, "missing_original_request"
+        method = str(request.get("method") or "GET").strip().upper()
+        if method not in {"GET", "HEAD", "OPTIONS", "POST"}:
+            return {}, "method_not_replayable"
+        url = str(request.get("url") or request.get("uri") or "").strip()
+        if not url:
+            return {}, "missing_original_request_url"
+        if not re.match(r"(?i)^https?://", url):
+            target_base = str(row.get("target") or "").strip()
+            if not target_base:
+                return {}, "missing_original_request_origin"
+            url = urljoin(target_base.rstrip("/") + "/", url)
+        try:
+            parsed_request = urlparse(url)
+        except ValueError:
+            return {}, "original_request_url_invalid"
+        if (parsed_request.scheme.lower() not in {"http", "https"} or
+                not parsed_request.hostname or parsed_request.username or parsed_request.password):
+            return {}, "original_request_url_invalid"
+        if self._has_replay_secret(request):
+            return {}, "original_request_may_contain_credentials"
+        if isinstance(request.get("headers"), Mapping) and request.get("headers"):
+            return {}, "original_request_requires_unreplayed_headers"
+        body = request.get("body") or ""
+        if not isinstance(body, str) or len(body.encode("utf-8")) > 64_000:
+            return {}, "original_request_body_invalid"
+        task_dir = self._task_dirs().get(str(row.get("task") or ""))
+        scope_path = task_dir / "scope.json" if task_dir else None
+        if (scope_path is None or task_dir is None or task_dir.is_symlink() or
+                scope_path.is_symlink() or not scope_path.is_file()):
+            return {}, "original_scope_unavailable"
+        scope_doc = self._read_json_file(scope_path)
+        if not isinstance(scope_doc, dict):
+            return {}, "original_scope_unreadable"
+        from agents.surface_discovery import SurfaceScope
+        try:
+            scope = SurfaceScope.from_mapping(scope_doc)
+            scope.require_authorization()
+            allowed, reason = scope.check_url(url)
+        except (TypeError, ValueError):
+            return {}, "original_scope_invalid"
+        if not allowed:
+            return {}, f"request_outside_original_scope:{reason}"
+        if not scope.allows_method(method):
+            return {}, "method_not_in_original_scope"
+        if body and not scope.allow_request_body:
+            return {}, "body_not_in_original_scope"
+        # The automated runner needs a response oracle from the finding record.
+        # An HTTP status alone is not enough to claim that a vulnerability persists.
+        expected = request.get("expected") if isinstance(request.get("expected"), dict) else {}
+        expected_hash = str(expected.get("sha256_12") or request.get("response_sha256_12") or "").strip()
+        markers = expected.get("markers") if isinstance(expected.get("markers"), list) else request.get("response_markers")
+        markers = [str(value)[:200] for value in markers[:10] if isinstance(value, str) and value] if isinstance(markers, list) else []
+        if not expected_hash and not markers:
+            return {}, "missing_original_response_oracle"
+        return {
+            "url": url, "method": method, "body": body,
+            "content_type": str(request.get("content_type") or "")[:120],
+            "expected_status": expected.get("status", request.get("response_status")),
+            "expected_sha256_12": expected_hash,
+            "response_markers": markers,
+            "scope_document": scope_doc,
+            "scope_ref": str(scope_path),
+        }, ""
+
+    def finding_detail(self, finding_id: str) -> Dict[str, Any]:
+        """Return one finding plus report/retest history for the Console panel."""
+        from core.finding_workflow import FindingRetestStore, report_template
+
+        wanted = _text(finding_id, limit=80)
+        row = self._finding_row(wanted)
+        if not row:
+            return {}
+        task_id = str(row.get("task") or "")
+        output_dir = self._task_dirs().get(task_id)
+        report = ""
+        if output_dir:
+            custom = output_dir / "reports" / f"{wanted}.md"
+            try:
+                if (not output_dir.is_symlink() and not custom.parent.is_symlink() and custom.is_file()
+                        and custom.resolve().is_relative_to(output_dir.resolve())):
+                    report = custom.read_text(encoding="utf-8", errors="replace")[:200_000]
+            except OSError:
+                pass
+        retests = FindingRetestStore(self.state_dir / "finding-retests.jsonl").list(wanted)
+        digest_material = json.dumps({key: row.get(key) for key in ("finding_id", "task", "rule", "title", "target", "summary", "evidence", "evidence_refs", "request_digest")}, ensure_ascii=False, sort_keys=True)
+        evidence_digest = hashlib.sha256(digest_material.encode("utf-8")).hexdigest()
+        _plan, plan_reason = self.finding_retest_plan(wanted)
+        return {
+            "finding": row,
+            "report": report,
+            "report_template": report_template(row, retests=retests),
+            "retests": retests,
+            "evidence_digest": evidence_digest,
+            "auto_retest_available": bool(_plan),
+            "auto_retest_reason": ("自动复测会重放已留档的单个请求，沿用原授权 scope，并通过 Lode 操作语义、速率、预算和审计闸门。" if _plan else f"不能自动重放：{plan_reason}。可补充人工复测记录。"),
+        }
 
     def profiles_detail(self) -> List[Dict[str, Any]]:
         """6 档 EngagementProfile 明细(镜像 canonical operation_profile 注册表),给 Profiles 页。"""
@@ -788,7 +1004,7 @@ class ReadOnlyControlPlane:
         d = self._task_dirs().get(task_id)
         if not d:
             return ""
-        for cand in (d / "standard_report_cn.md",) + tuple(d.glob("strix_runs/*/penetration_test_report.md")):
+        for cand in (d / "standard_report_cn.md",) + tuple(d.glob("reports/*.md")) + tuple(d.glob("strix_runs/*/penetration_test_report.md")):
             try:
                 if cand.is_file():
                     return cand.read_text(encoding="utf-8", errors="replace")[:200_000]
@@ -825,15 +1041,24 @@ class ReadOnlyControlPlane:
             pid = self._project_slug(target)
             return proj.setdefault(pid, {
                 "project_id": pid, "target": target, "profiles": set(),
-                "session_count": 0, "task_count": 0, "finding_count": 0,
+                # 会话是**键的集合**,不是计数器:同一个 goal_id 下的多个 task 是
+                # 一个会话,不能数成多个。键的口径和 project_detail() 逐字相同
+                # (goal_id 优先,退回 task_id),列表和详情才不会各说一套。
+                "sessions": set(), "task_count": 0, "finding_count": 0,
                 "verified_finding_count": 0, "running": False, "last_activity": 0.0,
+                "running_task": None, "latest_task": None, "surface_task": None,
             })
+
+        def _newer(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
+            if current is None:
+                return True
+            return float(candidate.get("created_at") or 0.0) >= float(current.get("created_at") or 0.0)
 
         for g in goals:
             p = _ensure(g["target"])
             if g.get("profile_name"):
                 p["profiles"].add(g["profile_name"])
-            p["session_count"] += 1
+            p["sessions"].add(g["goal_id"])
             p["finding_count"] += int(g.get("finding_count") or 0)
             p["verified_finding_count"] += int(g.get("verified_finding_count") or 0)
             p["last_activity"] = max(p["last_activity"], float(g.get("created_at") or 0.0))
@@ -843,20 +1068,42 @@ class ReadOnlyControlPlane:
             p = _ensure(t["target"])
             if t.get("profile_name"):
                 p["profiles"].add(t["profile_name"])
+            p["sessions"].add(t.get("goal_id") or t["task_id"])
             p["task_count"] += 1
             p["last_activity"] = max(p["last_activity"], float(t.get("created_at") or 0.0))
             if t.get("status") in {"reserved", "running", "recovery_pending"}:
                 p["running"] = True
+                if _newer(t, p["running_task"]):
+                    p["running_task"] = t
+            if _newer(t, p["latest_task"]):
+                p["latest_task"] = t
+            # 面计数取"最近一次带面结果的运行"。重扫时 running 行还没有面,所以
+            # 用 surface_task 而不是 latest_task —— 否则一行 running 会把上一趟
+            # 真实的面数擦成 0。
+            if t.get("has_surface") and _newer(t, p["surface_task"]):
+                p["surface_task"] = t
 
         out = []
         for p in proj.values():
+            running_task = p["running_task"]
+            # 位置(137/325)跟着在跑的那条走;没在跑就退回最近一条。
+            position = running_task or p["latest_task"] or {}
+            surface = p["surface_task"] or {}
             out.append({
                 "project_id": p["project_id"], "target": p["target"],
                 "profiles": sorted(p["profiles"])[:6],
-                "session_count": p["session_count"], "task_count": p["task_count"],
+                "session_count": len(p["sessions"]), "task_count": p["task_count"],
                 "finding_count": p["finding_count"], "verified_finding_count": p["verified_finding_count"],
                 "status": "running" if p["running"] else "done",
                 "last_activity": p["last_activity"],
+                "running_task_id": (running_task or {}).get("task_id", ""),
+                "batch_index": max(0, int(position.get("batch_index") or 0)),
+                "batch_size": max(0, int(position.get("batch_size") or 0)),
+                "surface_paths": max(0, int(surface.get("surface_paths") or 0)),
+                "surface_api": max(0, int(surface.get("surface_api") or 0)),
+                "surface_scripts": max(0, int(surface.get("surface_scripts") or 0)),
+                "http_status": max(0, int(surface.get("http_status") or 0)),
+                "has_surface": bool(surface),
             })
         ordered = sorted(out, key=lambda x: x["last_activity"], reverse=True)
         try:
@@ -867,8 +1114,17 @@ class ReadOnlyControlPlane:
             size = max(1, min(int(limit), MAX_PROJECT_PAGE))
         except (TypeError, ValueError):
             size = MAX_VISIBLE_ITEMS
+        # 顶部横幅取全局那一条 running,而不是当前页里的 —— 否则翻到第 9 页时
+        # "正在扫哪台"就消失了,而那跟你在第几页没有任何关系。
+        running = next(
+            ({"project_id": o["project_id"], "target": o["target"],
+              "task_id": o["running_task_id"], "batch_index": o["batch_index"],
+              "batch_size": o["batch_size"]}
+             for o in ordered if o["running_task_id"]),
+            None,
+        )
         return {"projects": ordered[start:start + size], "total": len(ordered),
-                "offset": start, "limit": size}
+                "offset": start, "limit": size, "running": running}
 
     def project_detail(self, project_id: str) -> Dict[str, Any]:
         """会话 = goal_id(有 goal 事件则富元数据;没有则从共享该 goal_id 的 tasks 合成;task 无 goal_id 则退回 task_id)。"""
@@ -1039,49 +1295,212 @@ class ReadOnlyControlPlane:
             "severity": sev, "findings": proj_findings[:200], "reports": reports,
         }
 
-    def src_autopilot(self) -> Dict[str, Any]:
+    def src_autopilot(self, session_id: str = "") -> Dict[str, Any]:
         """Read-only SRC autopilot/blackboard projection for the local UI.
 
         The projection intentionally drops result references and raw evidence;
         it exposes only candidate metadata and lease health.  Paths can be
         overridden for deployments that keep the autopilot output separate
         from the control-plane state directory.
+
+        Engagement host runs write one blackboard per host under
+        ``src-agent-runs/``, not a single global file. A missing
+        ``state_dir/src-blackboard.json`` must still surface those boards —
+        otherwise the 黑板 page says there is no run after every host finished.
         """
         configured = os.environ.get("PA_SRC_BLACKBOARD_PATH", "").strip()
-        candidates = [Path(configured)] if configured else [
+        if configured:
+            return self._src_view_from_files([(Path(configured), "")], session_id=_text(session_id, limit=128))
+
+        wanted = _text(session_id, limit=128)
+        if wanted and SESSION_ID_RE.fullmatch(wanted):
+            sources = self._session_blackboard_sources(wanted)
+            if sources:
+                return self._src_view_from_files(sources, session_id=wanted)
+
+        for path in (
             self.state_dir / "src-blackboard.json",
             self.state_dir / "src-autopilot" / "src-blackboard.json",
-        ]
-        board_path = next((path for path in candidates if path.is_file() and not path.is_symlink()), None)
-        if board_path is None:
-            return {
-                "schema": "SrcAutopilotView/v1",
-                "available": False,
-                "run": {},
-                "candidates": [],
-                "intents": [],
-                "claims": [],
-                "dead_ends": [],
-                "hints": [],
-            }
-        try:
-            board = SrcBlackboard(board_path).snapshot()
-        except (FileNotFoundError, OSError, RuntimeError, TimeoutError):
-            return {
-                "schema": "SrcAutopilotView/v1",
-                "available": False,
-                "error": "blackboard_unavailable",
-                "run": {},
-                "candidates": [],
-                "intents": [],
-                "claims": [],
-                "dead_ends": [],
-                "hints": [],
-            }
+        ):
+            if self._is_board_file(path):
+                return self._src_view_from_files([(path, "")], session_id=wanted)
 
-        run_path = Path(os.environ.get("PA_SRC_AUTOPILOT_STATE", str(board_path.with_name("src-autopilot-state.json"))))
-        run_raw = self._read_json_file(run_path)
-        run = run_raw if isinstance(run_raw, dict) else {}
+        latest = self._latest_session_with_boards()
+        if latest:
+            return self._src_view_from_files(
+                self._session_blackboard_sources(latest), session_id=latest,
+            )
+        return self._empty_src_view()
+
+    def _is_board_file(self, path: Path) -> bool:
+        try:
+            return path.is_file() and not path.is_symlink()
+        except OSError:
+            return False
+
+    def _empty_src_view(self, *, error: str = "", session_id: str = "") -> Dict[str, Any]:
+        view: Dict[str, Any] = {
+            "schema": "SrcAutopilotView/v1",
+            "available": False,
+            "run": {},
+            "candidates": [],
+            "intents": [],
+            "claims": [],
+            "dead_ends": [],
+            "hints": [],
+            "session_id": session_id,
+            "hosts": [],
+        }
+        if error:
+            view["error"] = error
+        return view
+
+    def _session_blackboard_sources(self, session_id: str) -> List[Tuple[Path, str]]:
+        found: List[Tuple[Path, str]] = []
+        seen = set()
+
+        def add(path: Path, host: str) -> None:
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen or not self._is_board_file(path):
+                return
+            seen.add(key)
+            found.append((path, host))
+
+        add(self.state_dir / "src-chat" / session_id / "src-blackboard.json", "")
+        try:
+            from core.job_registry import JobRegistry
+            records = JobRegistry(self.state_dir / "jobs").list(session_id=session_id, limit=0)
+        except (OSError, RuntimeError):
+            return found
+        for record in records:
+            host = _text((record.payload or {}).get("host") or record.target, limit=120)
+            ref = str(record.summary_ref or "").strip()
+            if ref:
+                add(Path(ref), host)
+            run_id = _text((record.payload or {}).get("run_id"), limit=80)
+            if run_id:
+                add(self.state_dir / "src-agent-runs" / run_id / "src-blackboard.json", host)
+        return found
+
+    def _latest_session_with_boards(self) -> str:
+        latest_sid = ""
+        latest_ts = -1.0
+        try:
+            from core.job_registry import JobRegistry
+            records = JobRegistry(self.state_dir / "jobs").list(limit=0)
+        except (OSError, RuntimeError):
+            records = []
+        for record in records:
+            sid = str(record.session_id or "")
+            if not sid or not SESSION_ID_RE.fullmatch(sid):
+                continue
+            run_id = _text((record.payload or {}).get("run_id"), limit=80)
+            ref = str(record.summary_ref or "").strip()
+            board: Optional[Path] = Path(ref) if ref else None
+            if board is None and run_id:
+                board = self.state_dir / "src-agent-runs" / run_id / "src-blackboard.json"
+            if board is None or not self._is_board_file(board):
+                continue
+            ts = float(record.finished_at or record.started_at or record.created_at or 0.0)
+            if ts >= latest_ts:
+                latest_ts = ts
+                latest_sid = sid
+        chat_root = self.state_dir / "src-chat"
+        try:
+            if chat_root.is_dir():
+                for sess_dir in chat_root.iterdir():
+                    if not sess_dir.is_dir() or not SESSION_ID_RE.fullmatch(sess_dir.name):
+                        continue
+                    board = sess_dir / "src-blackboard.json"
+                    if not self._is_board_file(board):
+                        continue
+                    try:
+                        ts = board.stat().st_mtime
+                    except OSError:
+                        ts = 0.0
+                    if ts >= latest_ts:
+                        latest_ts = ts
+                        latest_sid = sess_dir.name
+        except OSError:
+            pass
+        return latest_sid
+
+    def _src_view_from_files(
+        self, sources: List[Tuple[Path, str]], *, session_id: str = "",
+    ) -> Dict[str, Any]:
+        snapshots: List[Tuple[Dict[str, Any], str, Dict[str, Any]]] = []
+        last_error = ""
+        for path, host in sources:
+            if not self._is_board_file(path):
+                continue
+            try:
+                board = SrcBlackboard(path).snapshot()
+            except (FileNotFoundError, OSError, RuntimeError, TimeoutError):
+                last_error = "blackboard_unavailable"
+                continue
+            run_path = Path(os.environ.get(
+                "PA_SRC_AUTOPILOT_STATE", str(path.with_name("src-autopilot-state.json")),
+            ))
+            run_raw = self._read_json_file(run_path)
+            run = run_raw if isinstance(run_raw, dict) else {}
+            snapshots.append((board, host, run))
+        if not snapshots:
+            return self._empty_src_view(error=last_error, session_id=session_id)
+        return self._src_view_from_snapshots(snapshots, session_id=session_id)
+
+    def _src_view_from_snapshots(
+        self,
+        snapshots: List[Tuple[Dict[str, Any], str, Dict[str, Any]]],
+        *,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {
+            "revision": 0, "updated_at": 0, "facts": [], "intents": [],
+            "claims": [], "dead_ends": [], "hints": [], "workmem": {}, "timeline": [],
+        }
+        run: Dict[str, Any] = {}
+        hosts: List[str] = []
+        for board, host, run_doc in snapshots:
+            merged["revision"] = max(int(merged["revision"]), int(_number(board.get("revision"))))
+            merged["updated_at"] = max(
+                float(merged["updated_at"] or 0), float(_number(board.get("updated_at"))),
+            )
+            for key in ("facts", "intents", "claims", "dead_ends", "hints", "timeline"):
+                items = board.get(key) or []
+                if not isinstance(items, list):
+                    continue
+                rows = [item for item in items if isinstance(item, dict)]
+                if key == "hints" and host:
+                    tagged = []
+                    for item in rows:
+                        row = dict(item)
+                        src = _text(row.get("source"), limit=40)
+                        row["source"] = f"{host} · {src}" if src else host
+                        tagged.append(row)
+                    merged[key].extend(tagged)
+                else:
+                    merged[key].extend(rows)
+            wm = board.get("workmem")
+            if isinstance(wm, dict) and (wm.get("goal") or wm.get("focus") or not merged["workmem"]):
+                merged["workmem"] = wm
+            if run_doc:
+                run = run_doc
+            label = host.strip()
+            if label and label not in hosts:
+                hosts.append(label)
+        view = self._src_view_body(merged, run)
+        view["session_id"] = session_id
+        view["hosts"] = hosts
+        if len(hosts) > 1:
+            view["run"]["run_id"] = view["run"].get("run_id") or session_id
+            if not view["run"].get("stop_reason"):
+                view["run"]["stop_reason"] = f"{len(hosts)} 台主机"
+        return view
+
+    def _src_view_body(self, board: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
         facts = {str(item.get("candidate_id")): item for item in board.get("facts", []) if isinstance(item, dict)}
         candidates_view: List[Dict[str, Any]] = []
         for intent in board.get("intents", [])[:MAX_VISIBLE_ITEMS * 5]:
@@ -1099,6 +1518,7 @@ class ReadOnlyControlPlane:
                 "path": _text(urlparse(url).path or "/", limit=220),
                 "priority": max(0, min(100, int(_number(fact.get("priority") or intent.get("priority"))))),
                 "sources": [_text(item, limit=32) for item in (fact.get("sources") or [])[:8]],
+                "risk_signals": [_text(item, limit=40) for item in (fact.get("risk_signals") or intent.get("risk_signals") or [])[:12]],
                 "phase": _text(intent.get("phase"), limit=64),
                 "status": _text(intent.get("status"), limit=24),
                 "requires_human_review": intent.get("requires_human_review") is True,
@@ -1126,18 +1546,22 @@ class ReadOnlyControlPlane:
             "heartbeat_at": _number(item.get("heartbeat_at")),
             "lease_expires_at": _number(item.get("lease_expires_at")),
         } for item in board.get("claims", [])[:MAX_VISIBLE_ITEMS] if isinstance(item, dict)]
+        dead_ends = [item for item in board.get("dead_ends", []) if isinstance(item, dict)]
+        dead_ends.sort(key=lambda item: _number(item.get("created_at")))
         dead_ends_view = [{
             "intent_id": _text(item.get("intent_id"), limit=80),
             "reason": _text(item.get("reason"), limit=120),
             "detail": _text(item.get("detail"), limit=300),
             "created_at": _number(item.get("created_at")),
-        } for item in board.get("dead_ends", [])[-MAX_VISIBLE_ITEMS:] if isinstance(item, dict)]
+        } for item in dead_ends[-MAX_VISIBLE_ITEMS:]]
+        hints = [item for item in board.get("hints", []) if isinstance(item, dict)]
+        hints.sort(key=lambda item: _number(item.get("created_at")))
         hints_view = [{
             "intent_id": _text(item.get("intent_id"), limit=80),
             "hint": _text(item.get("hint"), limit=300),
             "source": _text(item.get("source"), limit=64),
             "created_at": _number(item.get("created_at")),
-        } for item in board.get("hints", [])[-MAX_VISIBLE_ITEMS:] if isinstance(item, dict)]
+        } for item in hints[-MAX_VISIBLE_ITEMS:]]
         wm_raw = board.get("workmem") if isinstance(board.get("workmem"), dict) else {}
         workmem_view = {
             "goal": _text(wm_raw.get("goal"), limit=500),

@@ -21,13 +21,19 @@ from agents.src_agent import (
     SrcAgentLoop,
     AgentConfig,
     EXPLORER_SYSTEM,
+    EXPLORER_USER_TEMPLATE,
     REASONER_SYSTEM,
     HTTP_ACTION_LOG,
     _blackboard_to_context,
+    _default_llm_complete,
     _fetch_for_analysis,
+    _is_terminal_refusal,
     _parse_json_response,
+    _prose_explorer_payload,
+    _coerce_explorer_parsed,
     _sanitize_headers,
     _shape_signals_section,
+    explorer_uses_cli_engine,
     run_src_agent,
 )
 from agents.surface_discovery import SurfaceScope
@@ -216,6 +222,67 @@ class TestFetchForAnalysis(unittest.TestCase):
         scope = _make_scope()
         result = _fetch_for_analysis("https://example.com/api/deleteUser", scope)
         self.assertEqual("state_changing_endpoint", result["error"])
+
+    def test_a_short_sleep_existence_probe_is_fetched(self):
+        """短 SLEEP 是测有无注入，应该发出去。"""
+        scope = _make_scope()
+        def mock_fetch(url, **kw):
+            return 200, "ok", {}
+        result = _fetch_for_analysis(
+            "https://example.com/item?id=1'+AND+SLEEP(5)--", scope, fetcher=mock_fetch)
+        self.assertEqual("", result["error"])
+        self.assertEqual(200, result["status"])
+
+    def test_a_metadata_ssrf_existence_probe_is_fetched(self):
+        """SSRF 存在性要让目标去读 metadata / 回环。"""
+        scope = _make_scope()
+
+        def mock_fetch(url, **kw):
+            return 200, "ami-id", {}
+
+        result = _fetch_for_analysis(
+            "https://example.com/fetch?url=http://169.254.169.254/latest/meta-data/",
+            scope, fetcher=mock_fetch)
+        self.assertEqual("", result["error"])
+        self.assertEqual(200, result["status"])
+
+    def test_a_command_injection_existence_probe_is_fetched(self):
+        """``;id`` / ``whoami`` 是命令注入存在性证明，应该发出去。"""
+        scope = _make_scope()
+
+        def mock_fetch(url, **kw):
+            return 200, "uid=0", {}
+
+        result = _fetch_for_analysis(
+            "https://example.com/run?q=1;id", scope, fetcher=mock_fetch)
+        self.assertEqual("", result["error"])
+        self.assertEqual(200, result["status"])
+        timed = _fetch_for_analysis(
+            "https://example.com/run?q=1;time", scope, fetcher=mock_fetch)
+        self.assertEqual("", timed["error"])
+
+    def test_bytesrc_refuses_command_and_metadata_probes(self):
+        """ByteSRC 红线 2/5：本场不发系统命令、不打 metadata。"""
+        scope = _make_scope(program="bytesrc", authorization="ByteSRC V6 书面授权")
+        cmd = _fetch_for_analysis("https://example.com/run?q=1;id", scope)
+        self.assertEqual("hazardous_payload:system_command", cmd["error"])
+        meta = _fetch_for_analysis(
+            "https://example.com/fetch?url=http://169.254.169.254/latest/meta-data/",
+            scope)
+        self.assertEqual("hazardous_payload:intranet_or_metadata", meta["error"])
+        sleepy = _fetch_for_analysis(
+            "https://example.com/item?id=1'+AND+SLEEP(5)--", scope,
+            fetcher=lambda url, **kw: (200, "ok", {}))
+        self.assertEqual("", sleepy["error"])
+
+    def test_a_destructive_sql_payload_is_refused_on_get(self):
+        """拖库 / DELETE 是终态拒绝，不能重试三次再放弃。INSERT canary 不是这条。"""
+        scope = _make_scope()
+        result = _fetch_for_analysis(
+            "https://example.com/item?q=1'+INTO+OUTFILE+'/tmp/x'", scope)
+        self.assertEqual("hazardous_payload:destructive_sql", result["error"])
+        self.assertEqual(0, result["status"])
+        self.assertTrue(_is_terminal_refusal(result["error"]))
 
     def test_successful_fetch(self):
         scope = _make_scope()
@@ -509,6 +576,20 @@ class TestSrcAgentLoop(unittest.TestCase):
             self.assertEqual(intent["status"], "dead_end")
             self.assertGreaterEqual(len(summary["errors"]), 1)
 
+    def test_explorer_prose_salvage_keeps_analysis(self) -> None:
+        raw = (
+            "Remaining probes are `/favicon.ico`, `/v3/api-docs`, `/druid`, "
+            "`/nacos`, and the login facade. Management paths so far only bounce to SSO."
+        )
+        payload = _prose_explorer_payload(raw)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual("inconclusive", payload["conclusion"])
+        self.assertIn("/nacos", payload["discovered_routes"])
+        self.assertIsNone(_prose_explorer_payload("This is not JSON at all, just random text."))
+        coerced = _coerce_explorer_parsed(None, raw)
+        self.assertEqual(payload, coerced)
+
     def test_stop_is_blocked_while_todos_are_open(self):
         """reasoner says stop, but open workmem todos gate the finish checkpoint."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,7 +731,7 @@ class TestSingleDoctrineCopy(unittest.TestCase):
     没有任何东西会提醒你它们已经不一致了。这组测试就是那个提醒。
     """
 
-    DOCTRINE = ("授权安全研究员", "真价值优先", "不挖 CORS")
+    DOCTRINE = ("授权安全研究员", "真价值优先", "不挖 CORS", "命令研判")
 
     def test_the_pack_is_where_the_doctrine_lives(self):
         from core import skills
@@ -680,7 +761,21 @@ class TestSingleDoctrineCopy(unittest.TestCase):
             loop = SrcAgentLoop(AgentConfig(blackboard_path=bb_path, scope=_make_scope()))
             system = loop._system(REASONER_SYSTEM)
         self.assertIn("授权安全研究员", system)      # 来自技能包
-        self.assertIn("你是 SRC Reasoner", system)   # 角色契约也还在
+        self.assertIn("你是 SRC Planner", system)    # 角色契约也还在
+        self.assertIn("Reasoner", system)            # 测试/self-test 仍靠这个分派 token
+        self.assertNotIn("ByteSRC overlay", system)
+
+    def test_bytesrc_overlay_is_injected_for_byte_engagements(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            SrcBlackboard(bb_path)
+            loop = SrcAgentLoop(AgentConfig(
+                blackboard_path=bb_path,
+                scope=_make_scope(program="bytesrc", authorization="ByteSRC V6"),
+            ))
+            system = loop._system(REASONER_SYSTEM)
+        self.assertIn("ByteSRC overlay", system)
+        self.assertIn("禁止执行系统命令", system)
 
 
 class TestSelfTest(unittest.TestCase):
@@ -825,8 +920,17 @@ class TestSrcAgentDagTimelineRecall(unittest.TestCase):
             self.assertIn("已失效", reasoner_users[0])
 
 
+_ENGINE_ENV_CLEAR = {
+    "LODE_HUNTER_ENGINE": "",
+    "LODE_REASONER_ENGINE": "",
+    "LODE_EXPLORER_ENGINE": "",
+    "LODE_VERIFIER_ENGINE": "",
+    "LODE_SPECIALIST_ENGINE": "",
+}
+
+
 class TestTierRouting(unittest.TestCase):
-    """The provider pool must actually route Reasoner→smart, Explorer→cheap."""
+    """The provider pool must actually route Planner→reasoner prefer, Worker→explorer prefer."""
 
     _POOL = [
         {"name": "cheap", "base_url": "https://cheap.test", "api_key": "k-cheap", "model": "mini"},
@@ -852,17 +956,18 @@ class TestTierRouting(unittest.TestCase):
     def test_reasoner_and_explorer_hit_different_providers(self):
         hits: List[Tuple[str, str]] = []
         pool, pool_patch, post_patch, httpx_patch = self._patched_pool(hits)
-        with pool_patch, post_patch, httpx_patch:
-            with tempfile.TemporaryDirectory() as tmp:
-                cfg = AgentConfig(
-                    blackboard_path=Path(tmp) / "bb.json", scope=_make_scope(),
-                    reasoner_prefer="smart", explorer_prefer="cheap",
-                )
-                agent = SrcAgentLoop(cfg)
-                agent._complete("You are the Reasoner", "u", timeout=1,
-                                prefer=cfg.reasoner_prefer, only=cfg.reasoner_only)
-                agent._complete("You are the Explorer", "u", timeout=1,
-                                prefer=cfg.explorer_prefer, only=cfg.explorer_only)
+        with patch.dict(os.environ, _ENGINE_ENV_CLEAR, clear=False), \
+                pool_patch, post_patch, httpx_patch, \
+                tempfile.TemporaryDirectory() as tmp:
+            cfg = AgentConfig(
+                blackboard_path=Path(tmp) / "bb.json", scope=_make_scope(),
+                reasoner_prefer="smart", explorer_prefer="cheap",
+            )
+            agent = SrcAgentLoop(cfg)
+            agent._complete("You are the Reasoner", "u", timeout=1,
+                            prefer=cfg.reasoner_prefer, only=cfg.reasoner_only)
+            agent._complete("You are the Explorer", "u", timeout=1,
+                            prefer=cfg.explorer_prefer, only=cfg.explorer_only)
 
         self.assertEqual(["smart.test", "cheap.test"], [h[0] for h in hits])
         self.assertEqual(["max", "mini"], [h[1] for h in hits])
@@ -1268,6 +1373,31 @@ class TestHttpActionAudit(unittest.TestCase):
             self.assertEqual("refused:destructive_method_forbidden", actions[0]["decision"])
 
 
+class TestWorkerClassLane(unittest.TestCase):
+    """Planner tags worker_class; Worker prompt names the lane; verifier maps to review."""
+
+    def test_plan_stores_review_lane_and_prompt_names_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            SrcBlackboard(bb_path)
+            loop = SrcAgentLoop(AgentConfig(blackboard_path=bb_path, scope=_make_scope()))
+            planned = loop._plan_exploration(
+                [{"intent_id": "I-1", "hypothesis": "h", "check_description": "c",
+                  "worker_class": "review"}],
+                {},
+            )
+            self.assertEqual([("I-1", "h", "c")], planned)
+            self.assertEqual("review", loop._lane_by_intent["I-1"])
+            loop._plan_exploration(
+                [{"intent_id": "I-2", "hypothesis": "h", "check_description": "c",
+                  "worker_class": "verifier"}],
+                {},
+            )
+            self.assertEqual("review", loop._lane_by_intent["I-2"])
+        self.assertIn("Lane: {worker_class}", EXPLORER_USER_TEMPLATE)
+        self.assertIn("worker_class", REASONER_SYSTEM)
+
+
 class TestCapabilityInPrompt(unittest.TestCase):
     """模型看到的 = 沙箱会执行的,两边同一份来源。
 
@@ -1369,7 +1499,8 @@ class TestLlmBudget(unittest.TestCase):
 
         fake = {"role": "assistant", "content": "",
                 "reasoning_content": "x" * 5000}
-        with patch("core.llm_client.complete_messages", return_value=fake):
+        with patch.dict(os.environ, _ENGINE_ENV_CLEAR, clear=False), \
+                patch("core.llm_client.complete_messages", return_value=fake):
             self.assertIsNone(mod._default_llm_complete("s", "u"))
 
         reason = mod.last_llm_error()
@@ -1540,6 +1671,58 @@ class TestRequestBudget(unittest.TestCase):
         self.assertEqual(MAX_REQUESTS_PER_RUN, summary["request_budget"])
         self.assertGreater(summary["requests_used"], 0)
 
+    def test_the_summary_reports_both_halves_of_the_budget(self):
+        """One budget covers the crawl and the loop, so "60 used" alone cannot say which
+        half ran out — the crawl's share is snapshotted when the loop starts."""
+        from core.rate_limit import RequestBudget
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            iid = bb.snapshot()["intents"][0]["intent_id"]
+            budget = RequestBudget(3)
+            budget.spend()  # what the crawler already spent before the loop existed
+            summary = run_src_agent(bb_path, _make_scope(), max_cycles=2,
+                                    request_budget=budget,
+                                    fetcher=lambda url, **kw: (200, "{}", {}),
+                                    llm_complete_fn=self._reasoner(iid), worker_id="test-w")
+
+        self.assertEqual(1, summary["crawl_requests"])
+        # 1 for the crawl + 1 for the single intent's fetch; the crawl's share is
+        # reported separately rather than folded into the total.
+        self.assertEqual(2, summary["requests_used"])
+        self.assertEqual(3, summary["request_budget"])
+        for key in ("refused_requests", "refused_reasons"):
+            self.assertIn(key, summary)
+
+    def test_a_refusal_is_counted_by_reason(self):
+        """The read-out for "the loop planned something and could not send it".
+
+        Without it, a run that ended request_budget_exhausted with a correct, unspent
+        plan was indistinguishable from one that had nothing left to try — which is
+        exactly how a planned SQL-injection attempt read as run-to-run variance.
+        """
+        from core.rate_limit import RequestBudget
+        from agents.src_agent import AgentConfig, SrcAgentLoop
+
+        refused = {"status": 0, "body": "", "headers": {}, "method": "GET"}
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = SrcAgentLoop(AgentConfig(blackboard_path=Path(tmp) / "bb.json",
+                                            scope=_make_scope(),
+                                            request_budget=RequestBudget(5)))
+            for error in ("request_budget_exhausted", "request_budget_exhausted",
+                          "scope_rejected:host_not_in_scope"):
+                loop._record_http_action("https://example.com/x", "", "",
+                                         dict(refused, error=error),
+                                         "intent fetch", kind="intent_fetch")
+
+        self.assertEqual(2, loop._refusals["request_budget_exhausted"])
+        self.assertEqual(1, loop._refusals["scope_rejected"])
+        self.assertNotIn("host_not_in_scope", loop._refusals,
+                         "grouped by reason prefix, not by the whole message")
+
+
     def test_a_governance_refusal_is_terminal_on_the_first_attempt(self):
         """重试还是同一个结果,所以不该被重排队 —— 那等于白烧 LLM 调用和圈数。"""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1566,6 +1749,307 @@ class TestRequestBudget(unittest.TestCase):
         self.assertEqual("dead_end", intent["status"])
         self.assertLessEqual(intent["attempts"], 1, "治理拒绝最多算一次尝试")
         self.assertIn("refused", timeline)
+
+
+class ShapeBriefModeTests(unittest.TestCase):
+    """How the URL-shape prior reaches the Explorer — the A/B switch.
+
+    Measured 2026-09-25: in `anchor` mode the prior named exactly one direction, and
+    on `?q=` that direction was injection — no reflection probe was sent in 12 requests
+    across two runs, because `xss` is not in the shape vocabulary at all. `off` and
+    `soft` exist to measure whether the prior helps or anchors, so the default has to
+    stay byte-identical to the original behaviour.
+    """
+
+    URL = "http://127.0.0.1:8791/search?q=cap"
+
+    def _render(self, mode: str) -> str:
+        with patch.dict(os.environ, {"LODE_SHAPE_BRIEF": mode}):
+            return _shape_signals_section(["injection"], self.URL)
+
+    def test_anchor_is_the_default_and_the_original_text(self) -> None:
+        from agents.src_agent import configured_shape_brief
+
+        os.environ.pop("LODE_SHAPE_BRIEF", None)
+        self.assertEqual("anchor", configured_shape_brief())
+        self.assertIn("injection", self._render("anchor"))
+        self.assertIn("判断能否注入", self._render("anchor"))
+
+    def test_off_sends_no_prior_at_all(self) -> None:
+        self.assertEqual("", self._render("off"))
+
+    def test_soft_keeps_the_prior_but_denies_it_the_last_word(self) -> None:
+        rendered = self._render("soft")
+        self.assertIn("injection", rendered, "信号本身还在,只是不再是唯一方向")
+        self.assertIn("NOT an exhaustive list", rendered)
+
+    def test_an_unknown_mode_cannot_change_behaviour(self) -> None:
+        """A typo in the env var must not silently switch the prior off."""
+        from agents.src_agent import configured_shape_brief
+
+        with patch.dict(os.environ, {"LODE_SHAPE_BRIEF": "anhor"}):
+            self.assertEqual("anchor", configured_shape_brief())
+        self.assertEqual(self._render("anchor"), self._render("anhor"))
+
+
+class ExplorerToolModeTests(unittest.TestCase):
+    """The `tools` explorer: model drives fetch_url, ends with submit_verdict.
+
+    The reason this exists is measurable: under the JSON explorer *every* call carries
+    the whole round's decision, so a truncated reply is indistinguishable from "the
+    model said nothing" — that is what `unparseable_response` is. Here a cut-off costs
+    one tool round trip, and the verdict is a small separate message.
+
+    Two things must stay true regardless of shape: every fetch goes through the single
+    admission gate, and the verdict has exactly the shape `_process_explorer_result`
+    already consumes.
+    """
+
+    SCOPE_URL = "http://127.0.0.1:8791/search?q=x"
+
+    def _loop(self, tmp, complete_fn, fetcher=None, **cfg):
+        scope = _make_scope(allowed_ips=("127.0.0.1",))
+        return SrcAgentLoop(AgentConfig(
+            blackboard_path=Path(tmp) / "bb.json", scope=scope,
+            explorer_mode="tools", tool_complete_fn=complete_fn,
+            fetcher=fetcher or (lambda url, **kw: (200, "<p>hi</p>", {})), **cfg))
+
+    @staticmethod
+    def _scripted(*calls):
+        """A transport that walks the given tool calls, then stops calling tools."""
+        def complete(messages, *, tools=None, timeout=0.0, prefer="", only=False, **kw):
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done < len(calls):
+                name, args = calls[done]
+                return {"content": "", "tool_calls": [
+                    {"id": f"c{done}", "function": {"name": name,
+                                                     "arguments": json.dumps(args)}}]}
+            return {"content": "done", "tool_calls": []}
+        return complete
+
+    def test_the_default_is_the_json_explorer(self) -> None:
+        from agents.src_agent import configured_explorer_mode
+
+        os.environ.pop("LODE_EXPLORER_MODE", None)
+        os.environ.pop("LODE_EXPLORER_ENGINE", None)
+        os.environ.pop("LODE_HUNTER_ENGINE", None)
+        self.assertEqual("json", configured_explorer_mode())
+        with patch.dict(os.environ, {"LODE_EXPLORER_MODE": "nonsense"}):
+            self.assertEqual("json", configured_explorer_mode(),
+                             "a typo must not silently switch the explorer")
+
+    def test_config_beats_the_env_var(self) -> None:
+        from agents.src_agent import configured_explorer_mode
+
+        with patch.dict(os.environ, {"LODE_EXPLORER_MODE": "tools"}):
+            self.assertEqual("json", configured_explorer_mode(AgentConfig(
+                blackboard_path=Path("x"), scope=_make_scope(), explorer_mode="json")))
+
+    def test_the_verdict_matches_the_shape_the_json_path_produces(self) -> None:
+        scripted = self._scripted(
+            ("submit_verdict", {"conclusion": "confirmed", "analysis": "reflected",
+                                "findings": [{"title": "XSS", "confidence": "high",
+                                              "evidence": "echoed unescaped"}]}))
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, parsed = self._loop(tmp, scripted)._verdict_via_tools("U")
+
+        self.assertIsInstance(raw, str)
+        self.assertEqual("confirmed", parsed["conclusion"])
+        # The downstream filter reads exactly these two keys, so they must survive.
+        self.assertEqual("high", parsed["findings"][0]["confidence"])
+        self.assertTrue(parsed["findings"][0]["evidence"])
+
+    def test_a_tool_fetch_goes_through_the_gate_and_lands_in_the_audit_log(self) -> None:
+        sent: List[str] = []
+
+        def fetcher(url, **kw):
+            sent.append(url)
+            return 200, "<p>You searched for: x</p>", {"content-type": "text/html"}
+
+        scripted = self._scripted(
+            ("fetch_url", {"url": "https://outside.invalid/oob", "reason": "oob"}),
+            ("fetch_url", {"url": self.SCOPE_URL, "reason": "baseline"}),
+            ("submit_verdict", {"conclusion": "dead_end", "dead_end_reason": "nothing"}),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self._loop(tmp, scripted, fetcher=fetcher)._verdict_via_tools("U")
+            rows = [json.loads(line) for line in
+                    (Path(tmp) / HTTP_ACTION_LOG).read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+
+        self.assertEqual([self.SCOPE_URL], sent, "the out-of-scope fetch must not go out")
+        decisions = {row["url"]: row["decision"] for row in rows}
+        self.assertTrue(decisions["https://outside.invalid/oob"].startswith("refused:"),
+                        "a refused attempt is still audit")
+        self.assertEqual("allowed", decisions[self.SCOPE_URL])
+
+    def test_a_model_that_never_submits_but_answers_json_still_parses(self) -> None:
+        """The tool contract is the preferred shape, not the only accepted one."""
+        def complete(messages, **kw):
+            return {"content": json.dumps({"conclusion": "dead_end",
+                                           "dead_end_reason": "no evidence"}),
+                    "tool_calls": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, parsed = self._loop(tmp, complete)._verdict_via_tools("U")
+        self.assertEqual("dead_end", parsed["conclusion"])
+
+    def test_hunter_tools_read_the_board_and_refuse_ordinary_delegation(self) -> None:
+        tool_results: List[str] = []
+        calls = [
+            ("read_blackboard", {}),
+            ("delegate_analysis", {"kind": "blackbox", "task": "next request"}),
+            ("submit_verdict", {"conclusion": "dead_end", "dead_end_reason": "nothing"}),
+        ]
+
+        def complete(messages, **kw):
+            tool_results.extend(str(m.get("content") or "") for m in messages
+                                if m.get("role") == "tool")
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done < len(calls):
+                name, args = calls[done]
+                return {"content": "", "tool_calls": [
+                    {"id": f"c{done}", "function": {"name": name,
+                                                     "arguments": json.dumps(args)}}]}
+            return {"content": "done", "tool_calls": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = self._loop(tmp, complete)
+            SrcBlackboard(Path(tmp) / "bb.json").sync_candidates(
+                [{"candidate_id": "SC-1", "url": "https://example.com/x", "priority": 50}],
+                run_id="t",
+            )
+            loop._verdict_via_tools("U")
+        joined = "\n".join(tool_results)
+        self.assertTrue("Queued Intents" in joined or "Facts" in joined, joined)
+        self.assertIn("stays on the current hunter", joined)
+
+    def test_an_unreachable_model_returns_none_so_the_caller_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, parsed = self._loop(tmp, lambda *a, **k: None)._verdict_via_tools("U")
+        self.assertIsNone(raw)
+        self.assertIsNone(parsed)
+
+    def test_one_intent_cannot_spend_more_than_its_allowance(self) -> None:
+        """The cap that makes tool mode usable at all.
+
+        Uncapped, per-intent fetches measured 30, 28, 38, 17, 27 — one intent eating most
+        of the ~42 agent requests, which collapsed explored intents from 18 to 6 and recall
+        from 10.4 to 7.0. The cap is cumulative, not per round: 6 rounds x 3 calls would
+        still let one intent reach 18.
+        """
+        from agents.src_agent import MAX_TOOL_FETCHES_PER_INTENT as cap
+
+        sent: List[str] = []
+        tool_messages: List[str] = []
+
+        def fetcher(url, **kw):
+            sent.append(url)
+            return 200, "{}", {}
+
+        def complete(messages, *, tools=None, timeout=0.0, prefer="", only=False, **kw):
+            tool_messages.extend(str(m.get("content") or "") for m in messages
+                                 if m.get("role") == "tool")
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done == 0:
+                # Ask for more than the allowance in a single round, so this measures the
+                # cap and not the round limit.
+                return {"content": "", "tool_calls": [
+                    {"id": f"c{i}", "function": {"name": "fetch_url",
+                                                 "arguments": json.dumps(
+                                                     {"url": f"{self.SCOPE_URL}&n={i}"})}}
+                    for i in range(cap + 2)]}
+            return {"content": "", "tool_calls": [
+                {"id": "v", "function": {"name": "submit_verdict",
+                                         "arguments": json.dumps({"conclusion": "dead_end"})}}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._loop(tmp, complete, fetcher=fetcher)._verdict_via_tools("U")
+
+        self.assertEqual(cap, len(sent), "no fetch may go out past the per-intent allowance")
+        self.assertTrue(any("allowance exhausted" in m for m in tool_messages),
+                        "the model must be told why it cannot fetch again, or it spins")
+
+    def test_provider_engine_does_not_disable_tools_mode(self) -> None:
+        """CLI/Console default explorer_engine='provider' is still the HTTP provider."""
+        os.environ.pop("LODE_EXPLORER_ENGINE", None)
+        os.environ.pop("LODE_HUNTER_ENGINE", None)
+        provider = AgentConfig(blackboard_path=Path("x"), scope=_make_scope(),
+                               explorer_engine="provider")
+        empty = AgentConfig(blackboard_path=Path("x"), scope=_make_scope())
+        cli = AgentConfig(blackboard_path=Path("x"), scope=_make_scope(),
+                          explorer_engine="codex")
+        self.assertFalse(explorer_uses_cli_engine(provider))
+        self.assertFalse(explorer_uses_cli_engine(empty))
+        self.assertTrue(explorer_uses_cli_engine(cli))
+
+    def test_blank_explorer_follows_the_hunter_engine(self) -> None:
+        os.environ.pop("LODE_EXPLORER_ENGINE", None)
+        grok = AgentConfig(blackboard_path=Path("x"), scope=_make_scope(),
+                           hunter_engine="grok")
+        self.assertTrue(explorer_uses_cli_engine(grok))
+        provider_worker = AgentConfig(blackboard_path=Path("x"), scope=_make_scope(),
+                                      hunter_engine="grok", explorer_engine="provider")
+        self.assertFalse(explorer_uses_cli_engine(provider_worker))
+
+    def test_cli_explorer_defaults_to_lode_hosted_tools(self) -> None:
+        from agents.src_agent import configured_explorer_mode
+
+        os.environ.pop("LODE_EXPLORER_MODE", None)
+        cli = AgentConfig(blackboard_path=Path("x"), scope=_make_scope(),
+                          explorer_engine="pi")
+        self.assertEqual("tools", configured_explorer_mode(cli))
+        self.assertEqual("json", configured_explorer_mode(AgentConfig(
+            blackboard_path=Path("x"), scope=_make_scope(), explorer_engine="provider")))
+
+
+class CliEngineRoutingTests(unittest.TestCase):
+    def test_reasoner_passes_engine_into_the_complete_fn(self) -> None:
+        seen = []
+
+        def complete(system, user, **kwargs):
+            seen.append(kwargs.get("engine"))
+            if "Reasoner" in system:
+                return json.dumps({
+                    "reasoning": "t", "should_stop": True, "stop_reason": "done",
+                    "selected_intents": [],
+                })
+            return json.dumps({"conclusion": "dead_end", "findings": []})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb_path = Path(tmp) / "bb.json"
+            bb = SrcBlackboard(bb_path)
+            _seed_blackboard(bb, 1)
+            run_src_agent(bb_path, _make_scope(), max_cycles=1,
+                          llm_complete_fn=complete, worker_id="test-w",
+                          reasoner_engine="codex", explorer_engine="pi")
+        self.assertIn("codex", seen)
+
+    def test_cli_engine_is_tried_before_the_http_provider(self) -> None:
+        with patch("core.cli_engines.complete", return_value='{"ok": 1}') as cli, \
+             patch("core.llm_client.complete_messages") as provider:
+            text = _default_llm_complete("s", "u", engine="codex")
+        self.assertEqual('{"ok": 1}', text)
+        cli.assert_called_once()
+        provider.assert_not_called()
+
+    def test_cli_failure_falls_back_to_the_http_provider(self) -> None:
+        with patch.dict(os.environ, {"LODE_CLI_FALLBACK_PROVIDER": "1"}, clear=False), \
+             patch("core.cli_engines.complete", return_value=None), \
+             patch("core.cli_engines.last_error", return_value="exit 1"), \
+             patch("core.llm_client.complete_messages",
+                   return_value={"content": "from-provider"}) as provider:
+            text = _default_llm_complete("s", "u", engine="pi")
+        self.assertEqual("from-provider", text)
+        provider.assert_called_once()
+
+    def test_cli_fallback_can_be_turned_off(self) -> None:
+        with patch.dict(os.environ, {"LODE_CLI_FALLBACK_PROVIDER": "0"}, clear=False), \
+             patch("core.cli_engines.complete", return_value=None), \
+             patch("core.cli_engines.last_error", return_value="exit 1"), \
+             patch("core.llm_client.complete_messages") as provider:
+            self.assertIsNone(_default_llm_complete("s", "u", engine="pi"))
+            provider.assert_not_called()
 
 
 class TestRouteReflow(unittest.TestCase):

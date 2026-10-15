@@ -169,6 +169,42 @@ class SrcAutopilotTests(unittest.TestCase):
         self.assertEqual(0, summary["candidate_count"])
         self.assertEqual(1, state["rounds"][0]["blocked_candidates"])
 
+    def test_a_live_origin_with_no_extracted_paths_still_becomes_a_candidate(self) -> None:
+        """SPA / gzip-empty HTML used to leave the blackboard with zero intents."""
+        result = {
+            "schema": "SrcSurfaceResult/v1",
+            "target": "https://example.com/",
+            "base_url": "https://example.com",
+            "status": 200,
+            "paths": [],
+            "api_urls": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = SrcAutopilot(self._scope(), root / "state.json", root / "out")
+            summary = agent.run_round(["https://example.com/"], results=[result])
+            candidates = json.loads(
+                (root / "out" / "src-autopilot-candidates.json").read_text(encoding="utf-8"))["candidates"]
+
+        self.assertEqual(1, summary["candidate_count"])
+        self.assertEqual("https://example.com/", candidates[0]["url"])
+        self.assertIn("origin", candidates[0]["sources"])
+
+    def test_an_unreachable_origin_is_not_queued(self) -> None:
+        result = {
+            "schema": "SrcSurfaceResult/v1",
+            "target": "https://example.com/",
+            "base_url": "https://example.com",
+            "status": 0,
+            "paths": [],
+            "api_urls": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = SrcAutopilot(self._scope(), root / "state.json", root / "out")
+            summary = agent.run_round(["https://example.com/"], results=[result])
+        self.assertEqual(0, summary["candidate_count"])
+
     def test_missing_authorization_and_unbounded_limits_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "surface_authorization_required"):
             SrcAutopilot(

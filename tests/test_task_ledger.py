@@ -18,7 +18,7 @@ sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "core"))
 
 from console.projections import ReadOnlyControlPlane  # noqa: E402
-from console.task_ledger import load_rows, record_run  # noqa: E402
+from console.task_ledger import begin_run, finish_run, load_rows, record_run  # noqa: E402
 
 
 class TaskLedgerTests(unittest.TestCase):
@@ -122,6 +122,150 @@ class TaskLedgerTests(unittest.TestCase):
         self.assertTrue(lock.is_file())
         payload = json.loads((self.state / "strix_tasks.jsonl").read_text(encoding="utf-8").strip())
         self.assertTrue(payload["output_path"])
+
+
+class InFlightRunTests(unittest.TestCase):
+    """``begin_run``/``finish_run`` —— 让"正在扫的那台"在界面上真的存在。
+
+    ``record_run`` 只写一行,而且写完就是 ``finished``;一台正在扫的主机在 Console
+    上从来不存在。这组钉住三件事:开工时台账里**先**出现 ``running``;收尾之后它折叠
+    回**同一个** task(不是一个项目里冒出两条记录);以及 0 和"没记"是两码事。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name) / "state"
+        self.out = Path(self._tmp.name) / "out" / "login.example.com"
+        self.out.mkdir(parents=True)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _card(self):
+        page = ReadOnlyControlPlane(self.state).projects()
+        return next(p for p in page["projects"] if p["project_id"] == "https-login.example.com"), page
+
+    def test_an_open_run_is_visible_while_it_works(self) -> None:
+        begin_run(self.state, target="https://login.example.com/", output_path=self.out,
+                  batch_index=137, batch_size=325)
+
+        card, page = self._card()
+        self.assertEqual("running", card["status"])
+        self.assertEqual("137/325", f"{card['batch_index']}/{card['batch_size']}")
+        self.assertTrue(card["running_task_id"])
+        # 横幅读的是全局那一条,所以它跟当前页无关(翻到第 9 页也该看得见)
+        self.assertEqual("https://login.example.com/", page["running"]["target"])
+        self.assertEqual((137, 325),
+                         (page["running"]["batch_index"], page["running"]["batch_size"]))
+
+    def test_finishing_folds_back_into_one_task(self) -> None:
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], target="https://login.example.com/",
+                   output_path=self.out,
+                   surface={"paths": 12, "api_urls": 3, "scripts": 8, "status": 200})
+
+        # 两行台账,仍然一个项目、一个 task —— 折叠靠 id,不是靠"再来一条记录"
+        self.assertEqual(2, len(load_rows(self.state)))
+        card, page = self._card()
+        self.assertEqual(1, card["task_count"])
+        self.assertEqual("done", card["status"])
+        self.assertEqual("", card["running_task_id"])
+        self.assertIsNone(page["running"])
+        self.assertEqual((12, 3, 8, 200),
+                         (card["surface_paths"], card["surface_api"],
+                          card["surface_scripts"], card["http_status"]))
+        self.assertTrue(card["has_surface"])
+        # 收尾行刻意不带 created_ts,所以 最近活动 停在**开工**那一刻而不是收尾那一刻
+        self.assertEqual(load_rows(self.state)[0]["created_ts"], card["last_activity"])
+
+    def test_a_zero_surface_is_a_real_answer_not_a_missing_one(self) -> None:
+        """扫到了、但这台什么都没有(0/0/0 + 403)和"这条路不产生面计数"长得像,语义不同。"""
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], target="https://login.example.com/",
+                   output_path=self.out,
+                   surface={"paths": 0, "api_urls": 0, "scripts": 0, "status": 403})
+
+        card, _ = self._card()
+        self.assertTrue(card["has_surface"])
+        self.assertEqual(403, card["http_status"])
+        self.assertEqual(0, card["surface_paths"])
+
+    def test_a_run_without_surface_counts_does_not_claim_zero(self) -> None:
+        """``auto`` 产出候选、不爬面 —— 那要说"没有面计数",不是"面是 0"。"""
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], target="https://login.example.com/",
+                   output_path=self.out)
+
+        card, _ = self._card()
+        self.assertFalse(card["has_surface"])
+
+    def test_a_failed_run_does_not_stay_running(self) -> None:
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], status="failed",
+                   target="https://login.example.com/", error="ValueError: bad target")
+
+        card, page = self._card()
+        self.assertIsNone(page["running"])
+        self.assertEqual("", card["running_task_id"])
+        self.assertFalse(card["has_surface"])
+        # 项目行的状态只有 running/done 两档(既有口径),所以失败在**详情**里看:
+        # task 自己记着 failed。注意这意味着列表上"失败"和"跑完了什么都没出"目前
+        # 长得一样 —— 要分开得先扩状态词表,那是另一件事。
+        detail = ReadOnlyControlPlane(self.state).project_detail("https-login.example.com")
+        statuses = [t["status"] for s in detail["sessions"] for t in s["tasks"]]
+        self.assertEqual(["failed"], statuses)
+
+    def test_rescanning_a_target_clears_the_orphan(self) -> None:
+        """被 SIGKILL 留下的 running 行没人来收尾 —— 重扫时就地补成 interrupted。
+
+        没有这一步,界面上会永远挂着一行假的"在跑",而它对应的进程早就不在了。
+        """
+        orphan = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        rescanned = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+
+        rows = {row["id"]: row for row in load_rows(self.state)}
+        self.assertEqual("interrupted", rows[orphan["id"]]["status"])
+        self.assertEqual("running", rows[rescanned["id"]]["status"])
+        card, page = self._card()
+        self.assertEqual("running", card["status"])
+        # 两次开工是两个 task(和 record_run 跑两趟同一个结果),但只有新的那条在跑
+        self.assertEqual(2, card["task_count"])
+        self.assertEqual(rescanned["id"], page["running"]["task_id"])
+
+    def test_a_run_identity_makes_the_session_real(self) -> None:
+        """``auto`` 结束时把 autopilot 真实的 run id 写进 goal_id,会话列才不是 0。"""
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], target="https://login.example.com/",
+                   output_path=self.out, goal_id="SA-abc123")
+
+        card, _ = self._card()
+        self.assertEqual(1, card["session_count"])
+        detail = ReadOnlyControlPlane(self.state).project_detail("https-login.example.com")
+        self.assertEqual(["SA-abc123"], [s["session_id"] for s in detail["sessions"]])
+
+    def test_a_legacy_row_reports_no_surface_rather_than_zero(self) -> None:
+        """老路径(cmd_surface_import / record_run)写的行没有面计数,界面要画 "—"。"""
+        record_run(self.state, target="https://login.example.com/", output_path=self.out)
+
+        card, _ = self._card()
+        self.assertEqual("done", card["status"])
+        self.assertFalse(card["has_surface"])
+
+    def test_the_card_does_not_carry_paths_or_error_text(self) -> None:
+        """新加的数值字段不该顺手把 output_path / error 带上屏。
+
+        台账是本机的,项目卡片是会上屏的 —— 这两者之间的边界以前靠"投影只挑它要的
+        字段"来维持。加了新字段就得把这条重新钉一遍,否则下次多加一个字段就可能
+        把一个本机路径(或一段含密钥的异常文本)漏到界面上。
+        """
+        opened = begin_run(self.state, target="https://login.example.com/", output_path=self.out)
+        finish_run(self.state, task_id=opened["id"], status="failed",
+                   target="https://login.example.com/", output_path=self.out,
+                   error="ValueError: token=hunter2 at /etc/shadow")
+
+        serialized = json.dumps(ReadOnlyControlPlane(self.state).projects(), ensure_ascii=False)
+        self.assertNotIn("output_path", serialized)
+        self.assertNotIn("hunter2", serialized)
+        self.assertNotIn("/etc/shadow", serialized)
+        self.assertNotIn("error", serialized)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,11 @@
-"""LLM-driven SRC agent loop: Reason → Explore → Blackboard.
+"""LLM-driven SRC agent loop: Planner → Worker → Review → blackboard.
 
-Borrows Cairn's 3-phase OODA (Bootstrap/Reason/Explore) and Muteki's
-cheap-planner / expensive-executor split.  Uses the existing blackboard,
-scope checker, surface fetcher, and the shared LLM client (core.llm_client).
+Follows Muteki's swarm split: a cheap Planner proposes non-overlapping
+intents, a Worker (the operator's 主力 CLI) claims one and gathers evidence,
+an independent Reviewer audits high-risk findings. Scope, admission, rate
+and budget are hard gates — not a competing agent. HTTP still goes through
+Lode-hosted tools because this is authorized SRC, not a CTF full shell.
+
 
 The agent's HTTP surface is exactly what the authorisation document declares:
 ``SurfaceScope.allowed_methods`` (default GET/HEAD) plus ``allow_request_body``.
@@ -129,13 +132,34 @@ def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
     """LLM completion through the single shared client.
 
     Delegates to :func:`core.llm_client.complete_messages` so the provider pool,
-    the ``prefer``/``only`` tier routing (smart Reasoner vs cheap Explorer) and
+    the ``prefer``/``only`` tier routing (Planner vs Worker provider names) and
     cross-provider failover all actually apply — one transport for the whole
     product. Returns ``None`` when the pool is empty or every provider failed.
     """
     timeout = kwargs.get("timeout", 60.0)
     prefer = str(kwargs.get("prefer") or "")
     only = bool(kwargs.get("only") or False)
+    role = str(kwargs.get("role") or "reasoner")
+    try:
+        from core.cli_engines import (
+            complete as cli_complete,
+            configured_engine,
+            fallback_to_provider,
+            last_error as cli_last_error,
+        )
+        engine = configured_engine(str(kwargs.get("engine") or ""), role=role)
+    except Exception:  # noqa: BLE001 - optional adapter must not break provider mode
+        engine = "provider"
+    if engine != "provider":
+        schema = kwargs.get("json_schema")
+        if schema is None and role == "explorer" and engine == "grok":
+            schema = EXPLORER_GROK_SCHEMA
+        text = cli_complete(engine, system, user, timeout=timeout, json_schema=schema)
+        if text:
+            return text
+        _note_llm_failure(f"{engine}_cli: {cli_last_error() or 'completion failed'}")
+        if not fallback_to_provider():
+            return None
     try:
         from core.llm_client import complete_messages
     except Exception:  # noqa: BLE001
@@ -182,41 +206,56 @@ def _default_llm_complete(system: str, user: str, **kwargs) -> "Optional[str]":
 # 这里只留这个角色自己那份契约:它负责什么、输出长什么样。以前这两段各自抄了一份
 # doctrine,和 SKILL.md 三份并存 —— 抄本早晚会漂,所以收成一份。
 REASONER_SYSTEM = """\
-你是 SRC Reasoner，这次运行的决策层。你读黑板，决定下一步挖什么。
+你是 SRC Planner（Reasoner）。你读黑板，提出互不重叠的 intent，不执行请求。
+Worker 会去认领；闸门（scope / 只读准入 / 预算）是硬规则，不是你。
+
+## 证据审计（规划时就要问，不要等打脸）
+1. status="queued" 的 intent 是未验证的表面观察，不是漏洞。
+2. hints 是线索，verified=false，**不要把未验证 hint 当成事实来规划关键路径**。
+3. dead_ends 已经试过了，不要重新建议；被 Review 压过的方向不要原样重开。
+4. 选中的 intent 必须互不重叠：同一路径/同一参数不要派两条。
+5. "## Recalled Experience" 是历史记忆：[已失效] 的事实已经给过结论，[死路] 的不要重复。
 
 ## 规则
-1. status="queued" 的 intent 是未验证的表面观察，不是漏洞。
-2. dead_ends 已经试过了，不要重新建议。
-3. hints 是之前探索的线索。
-4. 能力面以下面这行为准 —— 不要假设更多，也不要假设更少。那不是"声明了什么就能发什么":
+6. 能力面以下面这行为准 —— 不要假设更多，也不要假设更少。那不是"声明了什么就能发什么":
    OPTIONS 随时可用；POST 只有在能**正面证明是读**的时候才放行（URL 里有读选择器，
    或是一个 GraphQL `query`）；PUT/PATCH 与任何改数据/配置的请求**当场硬拒**。
-   **没有"发出去等人工确认"这条路** —— 需要人判断的一律被拒，所以别把这类请求写进计划。
+   **没有"发出去等人工确认"这条路** —— 改数据/后利用被拒；存在性探针（布尔/报错/短 SLEEP、
+   换 id、id/whoami/echo/time、LFI /etc/passwd、SSRF 打 metadata/127.0.0.1）写进 check，让 Worker 真发，不要标待确认。
    {capabilities}
-5. 优先级：高 priority + 带参数的 API > 静态路径 > 纯资源文件。
-6. 每个选中的 intent 必须给出具体假设（如"res_id 参数可能存在 SQLi"）。
-7. 若发现某个 intent 必须先拿到另一个 intent 的结果才能验证（例如先取到 token 再测越权），
+7. 优先级（高危/RCE 优先，Origin-Direct）：
+   编排引擎/工作流/未授权管理面/反序列化/RCE 形状
+   > 越权与注入（证明存在即可，不 CRUD/dump 真实业务数据）
+   > 普通信息泄露。
+   DNS NXDOMAIN 不等于后端死亡；401/403 带业务体是活后端；同 IP 不同 Host 是不同系统，不要并成一个洞。
+   高价值名字（*-admin / *-api / *-gateway / *-manager / hweb-* / *-portal /
+   test-/pre-/gray-/uat-，以及 actuator / swagger / druid / nacos / workflow /
+   conductor / xxl）出现即加重测。静态资源垫底。
+8. 每个选中的 intent 必须给出具体假设（如"res_id 参数可能存在 SQLi"）。
+9. 若发现某个 intent 必须先拿到另一个 intent 的结果才能验证（例如先取到 token 再测越权），
    把它填进 depends_on —— 有未完成依赖的 intent 不会被提前执行，顺序由你决定。
-8. "## Recalled Experience" 是历史记忆：[已失效] 的事实已经给过结论，[死路] 的不要重复；
-   能复用历史结论就直接引用，别重新挖一遍。
+10. worker_class：普通黑盒 = worker；需要独立证伪的高危 = review；源码/调用链 = specialist。
 
 ## 需要打法细节就点名要
 这套系统里有一批打法卡。判断这步要用到哪本(比如看出是客户端、是联调域名、是越权形状),
 把卡名填进 `read_knowledge`,它会在**下一轮**成为你上下文里的一节,然后照着它干活。
 可用:`mobile`(安卓客户端面) · `url-trust`(域名/白名单信任边界) · `evidence`(怎么让发现被接受)
-· `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains`,以及长文知识库
-(`idor-test` / `ssrf-test` / `xss-test` / http-smuggling-test …)。最多 2 个。
+· `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains` · `bytesrc`,以及长文知识库
+(`case-index` / `orphan-origin-test` / `sandbox-escape-test` / `arl-recon` /
+`idor-test` / `ssrf-test` / `xss-test` …)。最多 2 个。
+对照以前的案例拉 `case-index`，然后用当前站差分，不要复述旧报告。
 不确定就留空 —— 系统也会从你的分析里自己认。
 
 ## 输出（严格 JSON，无 markdown fence）
 {
-  "reasoning": "当前状态分析",
+  "reasoning": "当前状态分析（含：哪些 hint 还没被验证，所以没拿来当事实）",
   "selected_intents": [
     {
       "intent_id": "I-xxxx",
       "hypothesis": "具体漏洞假设",
       "check_description": "看响应中的什么来验证",
       "expected_evidence": "什么样的响应能确认/否定",
+      "worker_class": "worker",
       "depends_on": []
     }
   ],
@@ -238,7 +277,8 @@ Output JSON only.\
 """
 
 EXPLORER_SYSTEM = """\
-你是 SRC Explorer，这次运行的执行层。你分析 HTTP 响应，找真实漏洞证据。
+你是 SRC Worker（Explorer），蜂群里的执行者。你认领 Planner 派来的**一条** intent，
+通过 Lode 工具取证，把事实/死路写回黑板。你不跟其他 Worker 直接说话。
 
 响应该怎么读(status / headers / body 的启发式、SQLi 与 IDOR 的识别特征)在本次运行
 的作业规范里,已经拼在你的上下文前面;这里只重复一条底线:
@@ -248,6 +288,7 @@ EXPLORER_SYSTEM = """\
 - 没有证据 = 不是 finding，是猜测 → 标 dead_end
 - confidence: high=直接证据 / medium=可疑 pattern 需验证 / low=弱信号
 - 发现不了就说发现不了，不编造
+- 有差分面就打存在性对照（基线 vs 探针）。闸门会拦后利用；被拒才换方向，不要预先把自己吓停
 
 ## Sandboxed HTTP Tool
 可请求额外的方法,上限 {max_actions} 个、scope 内:
@@ -263,8 +304,10 @@ EXPLORER_SYSTEM = """\
 ## 需要打法细节就点名要
 看清响应之后如果要用到某本打法(比如差分怎么设、这个弱点的证据要长什么样),把卡名填进
 `read_knowledge`,它会在**下一轮**成为你上下文里的一节。可用:`mobile` · `url-trust` ·
-`evidence` · `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains`,以及长文知识库
-(`idor-test` / `ssrf-test` / `xss-test` …)。最多 2 个;不确定就留空。
+`evidence` · `recon` · `idor` · `ssrf` · `injection` · `auth` · `chains` · `bytesrc`,以及长文知识库
+(`case-index` / `orphan-origin-test` / `sandbox-escape-test` / `arl-recon` /
+`idor-test` / `ssrf-test` / `xss-test` …)。最多 2 个;不确定就留空。
+想对照以前的形状就拉 `case-index`，用当前站差分，不要复述旧报告。
 
 ## 输出（严格 JSON）
 {
@@ -290,6 +333,7 @@ EXPLORER_SYSTEM = """\
 
 EXPLORER_USER_TEMPLATE = """\
 Intent: {intent_id}
+Lane: {worker_class}
 Target URL: {target_url}
 Phase: {phase}
 Priority: {priority}
@@ -317,23 +361,81 @@ Analyze this response for the stated hypothesis. Output JSON only.\
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.S)
 
 
+#: How the URL-shape prior is put in front of the Explorer.
+#:
+#: Measured 2026-09-25: in `anchor` mode the Explorer was handed one direction, and on
+#: `?q=` that direction was "injection" — no reflection probe was sent in 12 requests
+#: across two runs, because XSS was not in the shape vocabulary. XSS is now a
+#: sibling signal of injection. The three modes
+#: exist to measure whether this prior helps or anchors:
+#:   anchor — one concrete direction per signal (the original behaviour)
+#:   soft   — same signals, plus an explicit "this is not an exhaustive list"
+#:   off    — no prior at all; the Explorer reads the response and decides what to test
+SHAPE_BRIEF_ENV = "LODE_SHAPE_BRIEF"
+SHAPE_BRIEF_MODES = ("anchor", "soft", "off")
+
+
+def configured_shape_brief() -> str:
+    value = os.environ.get(SHAPE_BRIEF_ENV, "").strip().lower()
+    return value if value in SHAPE_BRIEF_MODES else "anchor"
+
+
 # 形状信号 → 一句具体的检查方向(信号本身来自 core/src_blackboard.hypotheses)。
 #
 # authz_boundary 的措辞是刻意的:这条路径上**没有**头部/凭据通道(_fetch_text 只发
 # 固定的 UA/Accept),所以它问的是"未授权状态下是否已经可读",而不是"换个身份去
 # 对比"。提示词不能暗示一个不存在的通道 —— 模型会照着它写出没法执行的计划。
 _HYPOTHESIS_BRIEF = {
+    "rce": "编排引擎/管理面/执行入口 —— 先看未授权是否已进业务方法;"
+           "存在性探针（id/whoami/echo/time）要发,不发反弹/webshell",
     "idor": "对象引用可枚举 —— 换一个同形状的对象,看是否回的是别人的数据",
-    "injection": "带搜索/过滤/排序参数 —— 看回显与报错,判断能否注入",
-    "ssrf": "参数看起来是 URL/目标地址 —— 看服务端是否会替你去取",
+    "injection": "带搜索/过滤/排序参数 —— 看回显与报错,判断能否注入；查询随便测，不 DELETE/DROP/拖库",
+    "xss": "参数会反射进 HTML/JS —— 打最小对照（基线 vs 标记），反射/存储/DOM 都算",
+    "ssrf": "参数看起来是 URL/目标地址 —— 打 169.254.169.254 / 127.0.0.1 / 回连，看服务端是否去取；拿到钥就停",
     "path_traversal": "参数看起来是文件路径 —— 看能否读到预期之外的文件",
     "graphql": "GraphQL 端点 —— 看内省是否开放、字段级授权是否逐字段校验",
     "authz_boundary": "路径位于授权边界上 —— 只判断它在**未授权**状态下是否已经可读"
                       "(不做凭据重放,这条路径没有凭据通道)",
 }
 
+# ByteSRC V6 / 测试红线：禁止系统命令、禁止内网/metadata、禁止深层渗透。
+_BYTESRC_HYPOTHESIS_BRIEF = {
+    "rce": "编排引擎/管理面 —— 只看未授权是否已进业务方法；不发 id/whoami/time，"
+           "不上传、不 webshell。能进就记 finding，危害验证交给平台审核。",
+    "idor": "对象引用可枚举 —— 换一个同形状的对象,看是否回的是别人的数据；真实数据不超过 5 组",
+    "injection": "带搜索/过滤/排序参数 —— 布尔/报错/一次短 SLEEP≤5s；真实表数据不超过 5 组；禁止增删改",
+    "xss": "参数会反射进 HTML/JS —— 打最小对照；Self-XSS 不当 finding",
+    "ssrf": "参数看起来是 URL —— 只打自己的外网回连/FLAG；禁止 127.0.0.1 / 内网 / 169.254 / metadata",
+    "path_traversal": "参数看起来是文件路径 —— 不要读 /etc/passwd 或主机文件；能证明越界就停",
+    "graphql": "GraphQL 端点 —— 看内省是否开放、字段级授权是否逐字段校验；禁止 mutation",
+    "authz_boundary": "路径位于授权边界上 —— 只判断它在**未授权**状态下是否已经可读"
+                      "(不做凭据重放,这条路径没有凭据通道)",
+}
 
-def _shape_signals_section(names: Any, url: str = "") -> str:
+BYTESRC_DOCTRINE = """\
+## ByteSRC overlay（本场覆盖上面的「大胆存在性」）
+对齐《安全报告处置规则 V6.0》与《测试红线10条》。本场比全局闸门更严，被拒不要换包装再发。
+- 只打授权文档里的**精确主机**。低频 GET/HEAD（及能证明是读的 POST）。禁止扫描器式批量探测、爆破、DoS。
+- 禁止执行系统命令：不发 `id` / `whoami` / `echo` / `time`，不 `system()`，不 webshell，不反弹，不容器逃逸，不文件上传。
+- 禁止内网横向：不让目标去打 `127.0.0.1` / RFC1918 / `169.254.169.254` / metadata；不扫内网。
+- 注入：布尔 / 报错 / 一次短 SLEEP≤5s。真实表数据不超过 5 组。禁止 INSERT/UPDATE/DELETE。
+- 越权：换 id 证明能读即可，真实数据不超过 5 组。写越权只动自己的测试对象。
+- 翻到 AK/SK / kube-config / ServiceAccount：记 finding 立刻停，提交平台让审核验证。严禁自行深入业务验证危害。
+- 敏感测试（反弹、逃逸、上传）未报备不做。翻凭据、增删改属于禁止测试；报告里写利用思路即可。
+- 不测第三方 / CDN / 外部 API。不测模型提示词与内容安全（平台不收）。不用违法素材。
+- 先对照暂不收取清单（`read_knowledge` 名 `bytesrc`）。oladance / daliapp / 开言英语 / 心光 / 妙搭 / Pico / 幕布 / 美中宜和 / 图虫 / 99cases / Meegle / AI学 / CSV 注入 / 简单 DNS SSRF / 用户名遍历 / SPF / Self-XSS / 电商 ISV / 子账号越权 / 快递面单照片：命中就 dead_end，不当 finding。
+- 不社工、不钓鱼、不打扰真实用户。高风险须人工判断 = 本场直接不做。
+- 提交前必须人工复核；未经人工复现的 AI 报告会被直接驳回，累计 5 次可封号。本场只追高危 RCE 形状与可报的 HTTP SSRF，低危不当 finding。
+"""
+
+
+def _shape_signals_section(
+    names: Any,
+    url: str = "",
+    *,
+    program: str = "",
+    authorization: str = "",
+) -> str:
     """The Explorer's 'what to look for' block, or '' when the shape says nothing.
 
     Empty is a real answer: a static asset with no parameters gives the Explorer no
@@ -348,11 +450,216 @@ def _shape_signals_section(names: Any, url: str = "") -> str:
     needs it should not have to re-thread it.
     """
     del url
-    wanted = [str(name) for name in (names or []) if str(name) in _HYPOTHESIS_BRIEF]
-    notes: List[str] = [f"  - {name}: {_HYPOTHESIS_BRIEF[name]}" for name in wanted]
+    mode = configured_shape_brief()
+    if mode == "off":
+        return ""
+    briefs = (
+        _BYTESRC_HYPOTHESIS_BRIEF
+        if action_admission.is_bytesrc_program(program, authorization)
+        else _HYPOTHESIS_BRIEF
+    )
+    wanted = [str(name) for name in (names or []) if str(name) in briefs]
+    notes: List[str] = [f"  - {name}: {briefs[name]}" for name in wanted]
     if not notes:
         return ""
+    if mode == "soft":
+        # Keep the prior but deny it the last word: the failure this mode exists to
+        # measure is the Explorer treating one named direction as the whole assignment.
+        return (
+            "Shape signals (from the URL, not a claim — and NOT an exhaustive list of what "
+            "this endpoint could be vulnerable to; read the response and decide what to test):\n"
+            + "\n".join(notes) + "\n\n"
+        )
     return "Shape signals (from the URL, not a claim):\n" + "\n".join(notes) + "\n\n"
+
+
+#: How the Explorer is driven.
+#:
+#: ``json``  — one call returns the whole round's decision, including any extra requests
+#:             it wants written into ``http_actions`` for the sandbox below to send.
+#: ``tools`` — the same job through :func:`core.llm_client.run_tool_loop`: the model calls
+#:             ``fetch_url`` itself (same five gates) and ends with ``submit_verdict``.
+#:
+#: The measurable reason to prefer ``tools``: under ``json`` **every** call carries the
+#: whole decision, so a truncated reply is indistinguishable from "the model said
+#: nothing" — that is what `unparseable_response` is. Under ``tools`` a cut-off only
+#: loses one tool round trip, and the verdict is a small separate message.
+EXPLORER_MODE_ENV = "LODE_EXPLORER_MODE"
+EXPLORER_MODES = ("json", "tools")
+
+
+def configured_explorer_mode(config: Any = None) -> str:
+    explicit = str(getattr(config, "explorer_mode", "") or "").strip().lower()
+    if explicit in EXPLORER_MODES:
+        return explicit
+    value = os.environ.get(EXPLORER_MODE_ENV, "").strip().lower()
+    if value in EXPLORER_MODES:
+        return value
+    # A CLI hunter cannot use its own bash/edit/write. Drive Lode's tool loop
+    # instead, with tools described in the prompt and executed here.
+    if explorer_uses_cli_engine(config):
+        return "tools"
+    return "json"
+
+
+def explorer_uses_cli_engine(config: Any = None) -> bool:
+    """True when Worker inference is an installed CLI, not the HTTP provider.
+
+    CLI engines stay text-only (``--no-tools``). Lode still drives the tool
+    loop: the CLI emits JSON ``tool_calls`` for ``read_blackboard`` /
+    ``fetch_url`` / ``read_knowledge`` / ``delegate_analysis`` /
+    ``submit_verdict``, and Lode executes them. Empty follows the hunter;
+    ``provider`` keeps JSON mode unless ``LODE_EXPLORER_MODE`` says tools.
+    """
+    explicit = str(
+        getattr(config, "explorer_engine", "")
+        or getattr(config, "hunter_engine", "")
+        or ""
+    )
+    try:
+        from core.cli_engines import configured_engine
+        return configured_engine(explicit, role="explorer") != "provider"
+    except Exception:  # noqa: BLE001 - adapter missing must not disable tools mode
+        return False
+
+
+#: Lode-hosted tools for the hunter loop. Native CLI tools (bash/edit/write/network)
+#: stay off — Pi/Grok/Codex/Claude only emit these names; Lode executes them.
+EXPLORER_TOOLS: List[Dict[str, Any]] = [
+    {"type": "function", "function": {
+        "name": "read_blackboard",
+        "description": ("Read queued candidates, hints, facts and dead ends. Use this "
+                        "before inventing a new path — dead ends are already tried."),
+        "parameters": {"type": "object", "properties": {
+            "intent_id": {"type": "string", "description": "optional, focus one intent"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "fetch_url",
+        "description": ("Send one in-scope GET/HEAD and read the response. Use it to "
+                        "compare variants, drive a parameter, or check a path the current "
+                        "response mentions. Out-of-scope or non-read requests are refused, "
+                        "and you will see the refusal instead of a response."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "absolute URL"},
+                "method": {"type": "string", "enum": ["GET", "HEAD"]},
+                "reason": {"type": "string", "description": "why this request, one line"},
+            },
+            "required": ["url"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "read_knowledge",
+        "description": ("Pull one playbook card by name (e.g. orphan-origin-test, idor-test, "
+                        "injection). One card per call. A miss returns the available list."),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "delegate_analysis",
+        "description": ("Ask a specialist CLI (claude/codex/grok) for structured analysis. "
+                        "Use only for source/repo call-chains, independent high-risk review, "
+                        "or a second pass after two empty answers. Ordinary next-request "
+                        "work stays on the current hunter. Specialists have no network."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string",
+                         "enum": ["source_repo", "high_risk_review", "retry_empty", "lode_self"]},
+                "task": {"type": "string"},
+                "context": {"type": "string"},
+                "engine": {"type": "string", "enum": ["claude", "codex", "grok"]},
+            },
+            "required": ["kind", "task"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "submit_verdict",
+        "description": ("Finish this intent with your conclusion. Call it exactly once, "
+                        "after you have enough evidence. A finding needs `evidence` quoted "
+                        "from what you actually observed — without it the run records a "
+                        "guess, not a finding."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "analysis": {"type": "string"},
+                "conclusion": {"type": "string",
+                               "enum": ["confirmed", "dead_end", "needs_human", "inconclusive"]},
+                "dead_end_reason": {"type": "string"},
+                "discovered_routes": {"type": "array", "items": {"type": "string"}},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "confidence": {"type": "string",
+                                           "enum": ["low", "medium", "high"]},
+                            "severity": {"type": "string"},
+                            "evidence": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["conclusion"],
+        },
+    }},
+]
+
+
+def _default_llm_complete_messages(messages: List[Dict[str, Any]], *, tools: Any = None,
+                                   timeout: float = 60.0, prefer: str = "",
+                                   only: bool = False, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    """The messages-list seam the tool loop needs.
+
+    CLI engines speak a JSON tool protocol described in the prompt; native CLI
+    tools stay disabled. Missing CLIs fall back to the HTTP provider so a hunt
+    does not stop because Pi/Grok is logged out.
+    """
+    role = str(kwargs.get("role") or "explorer")
+    try:
+        from core.cli_engines import (
+            complete_messages as cli_complete_messages,
+            configured_engine,
+            fallback_to_provider,
+            last_error as cli_last_error,
+        )
+        engine = configured_engine(str(kwargs.get("engine") or ""), role=role)
+    except Exception:  # noqa: BLE001
+        engine = "provider"
+    if engine != "provider":
+        message = cli_complete_messages(engine, messages, tools=tools, timeout=timeout)
+        if message:
+            return message
+        _note_llm_failure(f"{engine}_cli: {cli_last_error() or 'completion failed'}")
+        if not fallback_to_provider():
+            return None
+    try:
+        from core.llm_client import complete_messages
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        message = complete_messages(
+            list(messages), tools=tools, timeout=timeout, prefer=prefer, only=only,
+            max_tokens=configured_max_tokens(), temperature=0.2,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _note_llm_failure(f"{type(exc).__name__}: {str(exc)[:200]}")
+        return None
+    if not message:
+        try:
+            from core.llm_client import last_error
+
+            _note_llm_failure(last_error() or "complete_messages returned None")
+        except Exception:  # noqa: BLE001
+            pass
+    return message
 
 
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
@@ -403,6 +710,65 @@ def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
         if parsed is not None:
             return parsed
     return None
+
+
+_BACKTICK_ROUTE_RE = re.compile(r"`(/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+)`")
+_PROSE_ANALYSIS_HINTS = (
+    "probe", "sso", "actuator", "login", "nacos", "druid", "workflow",
+    "302", "401", "403", "ssrf", "rce", "spa", "signin",
+)
+EXPLORER_GROK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "analysis": {"type": "string"},
+        "findings": {"type": "array", "items": {"type": "object"}},
+        "http_actions": {"type": "array", "items": {"type": "object"}},
+        "read_knowledge": {"type": "array", "items": {"type": "string"}},
+        "conclusion": {"type": "string"},
+        "dead_end_reason": {"type": "string"},
+        "suggested_next": {"type": "string"},
+        "discovered_routes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["analysis", "conclusion"],
+}
+
+
+def _explorer_payload_keys(parsed: Mapping[str, Any]) -> bool:
+    return any(
+        parsed.get(key)
+        for key in ("conclusion", "findings", "analysis", "http_actions", "dead_end_reason")
+    )
+
+
+def _prose_explorer_payload(raw: str) -> Optional[Dict[str, Any]]:
+    """Turn a useful Explorer prose dump into the verdict dict the loop already understands."""
+    text = str(raw or "").strip()
+    if len(text) < 40:
+        return None
+    low = text.lower()
+    if low.startswith("exit ") or "cli not found" in low:
+        return None
+    routes = _BACKTICK_ROUTE_RE.findall(text)[:12]
+    if not routes and not any(hint in low for hint in _PROSE_ANALYSIS_HINTS):
+        return None
+    return {
+        "analysis": text[:2000],
+        "findings": [],
+        "http_actions": [],
+        "read_knowledge": [],
+        "conclusion": "inconclusive",
+        "dead_end_reason": text[:200],
+        "suggested_next": text[:200],
+        "discovered_routes": routes,
+    }
+
+
+def _coerce_explorer_parsed(
+    parsed: Optional[Dict[str, Any]], raw: str,
+) -> Optional[Dict[str, Any]]:
+    if isinstance(parsed, dict) and _explorer_payload_keys(parsed):
+        return parsed
+    return _prose_explorer_payload(raw)
 
 
 def _parse_json_candidate(text: str) -> Optional[Dict[str, Any]]:
@@ -483,10 +849,12 @@ def _blackboard_to_context(snapshot: Dict[str, Any], *, max_facts: int = 50,
             dep_note = f" deps={','.join(str(d) for d in deps)}" if deps else ""
             shapes = i.get("hypotheses") or []
             shape_note = f" shapes={','.join(str(s) for s in shapes)}" if shapes else ""
+            risks = i.get("risk_signals") or []
+            risk_note = f" risk={','.join(str(s) for s in risks)}" if risks else ""
             lines.append(
                 f"- {i.get('intent_id', '?')}: target={i.get('target', '?')} "
                 f"priority={i.get('priority', 0)} phase={i.get('phase', '?')} "
-                f"candidate_id={i.get('candidate_id', '?')}{shape_note}{dep_note}"
+                f"candidate_id={i.get('candidate_id', '?')}{shape_note}{risk_note}{dep_note}"
             )
     else:
         lines.append("\n## Queued Intents: (none)")
@@ -569,6 +937,7 @@ TERMINAL_REFUSAL_PREFIXES = (
     action_admission.NOT_PROVEN,
     action_admission.CLASSIFIER_UNAVAILABLE,
     "mutating_request_refused:",
+    f"{action_admission.HAZARDOUS_PAYLOAD}:",
 )
 
 
@@ -659,8 +1028,11 @@ def _fetch_for_analysis(
     # 要么放行要么给出一个操作员能照着改的理由。**没有"待人工确认"这一档** ——
     # guardrails 的人工门恒为 hard_blocked,本地没有任何可达的放行路径,所以"需要人
     # 判断"在这里就等于"拒绝",审计里会写明这一点。
-    verdict = action_admission.admit(method=verb, url=url, body=body or "",
-                                     content_type=content_type)
+    verdict = action_admission.admit(
+        method=verb, url=url, body=body or "", content_type=content_type,
+        program=getattr(scope, "program", "") or "",
+        authorization=getattr(scope, "authorization", "") or "",
+    )
     if not verdict.allowed:
         return _refused(verdict.reason, verb)
     # 计数点在这里:治理拒掉的请求不消耗额度,而额度用完的运行立刻返回 —— 不然它会先
@@ -699,8 +1071,18 @@ class AgentConfig:
     scope: SurfaceScope
     reasoner_prefer: str = "deepseek"
     explorer_prefer: str = ""
+    # Text-only inference backend. Lode still owns every network request and gate.
+    hunter_engine: str = ""
+    reasoner_engine: str = ""
+    explorer_engine: str = ""
     reasoner_only: bool = False
     explorer_only: bool = False
+    #: "" = follow LODE_EXPLORER_MODE. "tools" drives the Explorer through
+    #: core.llm_client.run_tool_loop instead of one-complete-JSON-per-call.
+    explorer_mode: str = ""
+    #: Injectable messages-list completion seam for tools mode (tests). Falls back to
+    #: _default_llm_complete_messages.
+    tool_complete_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
     max_cycles: int = 20
     max_explore_per_cycle: int = 3
     # 一个 cycle 里同时探几个 intent。1 = 老行为(串行)。每轮的墙钟大头是
@@ -752,6 +1134,16 @@ MAX_CYCLES = 50
 MAX_EXPLORE_PER_CYCLE = 5
 MAX_PARALLEL_EXPLORE = 5
 MAX_HTTP_ACTIONS = 3
+#: Total fetches the model may drive for ONE intent in `tools` mode (cumulative, not
+#: per round — 6 rounds × 3 calls would still let a single intent reach 18).
+#:
+#: Without this the loop ran away. Measured 2026-09-25, per-intent fetches in tool mode
+#: were 30, 28, 38, 17, 27 — one intent eating most of the ~42 agent requests, which
+#: collapsed explored intents from 18 to 6 and recall from 10.4 to 7.0. The JSON path
+#: never exceeded 8 per intent because it caps at ``MAX_HTTP_ACTIONS`` per round, so
+#: this matches the ceiling the working path already had. Raising it is the wrong
+#: direction: with a shared budget, one intent's allowance is everyone else's loss.
+MAX_TOOL_FETCHES_PER_INTENT = MAX_HTTP_ACTIONS * 2
 BODY_LIMIT = 15_000
 #: 一圈最多把多少条 Explorer 报的路由变成新候选。模型一次可以列很多,而每一条被探索
 #: 都是一次真实请求 —— 顶部剪掉,不靠模型自觉。
@@ -854,8 +1246,19 @@ class SrcAgentLoop:
             raise ValueError(f"max_parallel_explore must be 1..{MAX_PARALLEL_EXPLORE}")
         self.config = config
         self.blackboard = SrcBlackboard(config.blackboard_path)
+        # Requests the crawl already spent before this loop started: the pipeline shares
+        # one budget, so a total of 60 hides which half starved. Snapshotted at
+        # construction, which is before this loop sends anything.
+        self._crawl_requests = int(config.request_budget.used) if config.request_budget else 0
+        # Refusals are the plan the gate would not let out, or the budget would not fund.
+        # Grouped by reason because "the agent wanted to test X and could not" is the one
+        # thing the cycle counts cannot show — it was invisible until this existed, and a
+        # SQL-injection miss read as variance instead of starvation.
+        self._refusals: Dict[str, int] = {}
         self._complete = config.llm_complete_fn or _default_llm_complete
         self._worker_id = config.worker_id or f"src-agent-{os.getpid()}"
+        self._empty_reason_streak = 0
+        self._lane_by_intent: Dict[str, str] = {}
         # 已激活的打法:name -> 正文。只在第一次激活时读盘,之后每轮复用。
         self._activated: Dict[str, str] = {}
         self._activation_log: List[Dict[str, Any]] = []
@@ -864,6 +1267,10 @@ class SrcAgentLoop:
         self._doctrine_text: Optional[str] = None
         if config.knowledge_seed:
             self.activate(config.knowledge_seed, source="seed")
+
+    def _worker_engine(self) -> str:
+        """Worker inference backend: explicit explorer, else the operator 主力."""
+        return str(self.config.explorer_engine or self.config.hunter_engine or "")
 
     # ------------------------------------------------------------ activation
     #
@@ -945,7 +1352,14 @@ class SrcAgentLoop:
         if capabilities:
             base = base.replace("{capabilities}", self.config.scope.capability_line())
             base = base.replace("{max_actions}", str(MAX_HTTP_ACTIONS))
-        parts = [part for part in (self._doctrine(), base, self._activated_section()) if part]
+        overlay = ""
+        scope = self.config.scope
+        if action_admission.is_bytesrc_program(
+            getattr(scope, "program", "") or "",
+            getattr(scope, "authorization", "") or "",
+        ):
+            overlay = BYTESRC_DOCTRINE
+        parts = [part for part in (self._doctrine(), base, overlay, self._activated_section()) if part]
         return "\n\n".join(parts)
 
     def run(self) -> Dict[str, Any]:
@@ -1075,6 +1489,14 @@ class SrcAgentLoop:
             # 只靠速率桶的话,"多快"有据可查,"多少"是空的。
             "requests_used": int(self.config.request_budget.used) if self.config.request_budget else 0,
             "request_budget": int(self.config.request_budget.limit) if self.config.request_budget else 0,
+            # Of that total, how much went to the crawl before this loop started. The two
+            # halves share one budget, so a bare "60/60" cannot say which one ran out.
+            "crawl_requests": self._crawl_requests,
+            # Requests the loop planned and could not send, by reason. A run that ends
+            # request_budget_exhausted with a clean plan is not the same as a run that
+            # had nothing to try — this is the number that tells them apart.
+            "refused_requests": sum(self._refusals.values()),
+            "refused_reasons": dict(sorted(self._refusals.items())),
             # 有多少 intent 是 Explorer 在响应里看见、再回灌进来的 —— 这就是"清单有没有
             # 在第 1 圈之后长过"的直接读数。
             "intents_from_routes": total_reflowed,
@@ -1153,6 +1575,11 @@ class SrcAgentLoop:
         body is exactly the sort of thing that walks past a regex.
         """
         method = str(result.get("method") or "GET")
+        error = str(result.get("error") or "")
+        if error:
+            # Group by reason prefix so the count is a read-out, not a wall of text
+            # (`request_budget_exhausted` vs `scope_rejected:...` mean different things).
+            self._refusals[error.split(":", 1)[0]] = self._refusals.get(error.split(":", 1)[0], 0) + 1
         if method not in {"GET", "HEAD"}:
             self._timeline(
                 "http_action", "",
@@ -1250,6 +1677,12 @@ class SrcAgentLoop:
             seen.add(intent_id)
             hypothesis = str(spec.get("hypothesis", "")).strip() or "general security analysis"
             check = str(spec.get("check_description", "")).strip() or "look for security-relevant patterns"
+            lane = str(spec.get("worker_class") or spec.get("lane") or "worker").strip().lower()
+            if lane not in {"worker", "review", "specialist", "verifier"}:
+                lane = "worker"
+            if lane == "verifier":
+                lane = "review"
+            self._lane_by_intent[intent_id] = lane
             planned.append((intent_id, hypothesis, check))
         return planned[:self.config.max_explore_per_cycle]
 
@@ -1333,7 +1766,7 @@ class SrcAgentLoop:
         ]
 
     def _reason(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Call LLM Reasoner to select intents and generate hypotheses."""
+        """Call the Planner to select intents and generate hypotheses."""
         context = _blackboard_to_context(snapshot)
         recalled = self._recall_context(snapshot)
         if recalled:
@@ -1349,6 +1782,8 @@ class SrcAgentLoop:
                 timeout=self.config.timeout,
                 prefer=self.config.reasoner_prefer,
                 only=self.config.reasoner_only,
+                engine=self.config.reasoner_engine,
+                role="reasoner",
             )
             if raw is not None:
                 break
@@ -1362,12 +1797,56 @@ class SrcAgentLoop:
                                f"reasoner 第 {attempt + 1} 发失败(传输层):{reason[:120]}")
                 time.sleep(REASON_TRANSIENT_BACKOFF * (attempt + 1))
         if raw is None:
-            return None
+            self._empty_reason_streak += 1
+            if self._empty_reason_streak >= 2:
+                try:
+                    from core.analysis_router import alternate_engine
+                    alt = alternate_engine(self.config.reasoner_engine)
+                except Exception:  # noqa: BLE001
+                    alt = "provider"
+                if alt:
+                    self._timeline("llm_retry", "",
+                                   f"reasoner 连续两次无结论,换 {alt} 重试一次")
+                    raw = self._complete(
+                        self._system(REASONER_SYSTEM), user_msg,
+                        timeout=self.config.timeout,
+                        prefer=self.config.reasoner_prefer,
+                        only=self.config.reasoner_only,
+                        engine=alt,
+                        role="reasoner",
+                    )
+            if raw is None:
+                return None
         parsed = _parse_json_response(raw)
         if parsed is None:
+            self._empty_reason_streak += 1
             self._last_reason_error = (f"unparseable({len(raw)} chars, "
                                        f"head={raw[:80]!r}, tail={raw[-60:]!r})")
+            if self._empty_reason_streak >= 2:
+                try:
+                    from core.analysis_router import alternate_engine
+                    alt = alternate_engine(self.config.reasoner_engine)
+                except Exception:  # noqa: BLE001
+                    alt = "provider"
+                if alt and alt != (self.config.reasoner_engine or "provider"):
+                    self._timeline("llm_retry", "",
+                                   f"reasoner 连续两次无结论,换 {alt} 重试一次")
+                    retry_raw = self._complete(
+                        self._system(REASONER_SYSTEM), user_msg,
+                        timeout=self.config.timeout,
+                        prefer=self.config.reasoner_prefer,
+                        only=self.config.reasoner_only,
+                        engine=alt,
+                        role="reasoner",
+                    )
+                    parsed = _parse_json_response(retry_raw or "")
+                    if parsed is not None:
+                        self._empty_reason_streak = 0
+                        self._last_reason_error = ""
+                        self._activate_from_reasoner(parsed)
+                        return parsed
             return None
+        self._empty_reason_streak = 0
         self._last_reason_error = ""
         self._activate_from_reasoner(parsed)
         return parsed
@@ -1538,30 +2017,51 @@ class SrcAgentLoop:
         body_text = fetch_result["body"][:BODY_LIMIT]
         user_msg = EXPLORER_USER_TEMPLATE.format(
             intent_id=claimed_intent_id,
+            worker_class=self._lane_by_intent.get(claimed_intent_id, "worker"),
             target_url=target_url,
             phase=intent.get("phase", "?"),
             priority=intent.get("priority", 0),
             hypothesis=hypothesis or "general security analysis",
             check_description=check_description or "look for security-relevant patterns",
             hints_section=hints_section,
-            shape_section=_shape_signals_section(intent.get("hypotheses"), target_url),
+            shape_section=_shape_signals_section(
+                intent.get("hypotheses"), target_url,
+                program=getattr(self.config.scope, "program", "") or "",
+                authorization=getattr(self.config.scope, "authorization", "") or "",
+            ),
             status=fetch_result["status"],
             headers_text=_sanitize_headers(fetch_result["headers"]),
             body_limit=BODY_LIMIT,
             body_text=body_text if body_text else "(empty response body)",
         )
 
-        raw = self._complete(
-            self._system(EXPLORER_SYSTEM), user_msg,
-            timeout=self.config.timeout,
-            prefer=self.config.explorer_prefer,
-            only=self.config.explorer_only,
-        )
+        # 两种 explorer 形态,见 EXPLORER_MODE_ENV。``tools`` 模式下 ``parsed`` 自带
+        # ``discovered_routes`` 而不带 ``http_actions`` —— 下面那个沙箱循环因此第一次
+        # 判断就 break,一行都不用改。两条路产出的 ``parsed`` 形状必须一致:下游的
+        # ``_process_explorer_result`` 只认那一个契约。
+        # CLI engines still cannot use their own bash/network. They drive *this*
+        # tool loop through a JSON protocol; Lode executes every fetch.
+        if configured_explorer_mode(self.config) == "tools":
+            raw, parsed = self._verdict_via_tools(user_msg)
+            llm_failed = raw is None
+        else:
+            raw = self._complete(
+                self._system(EXPLORER_SYSTEM), user_msg,
+                timeout=self.config.timeout,
+                prefer=self.config.explorer_prefer,
+                only=self.config.explorer_only,
+                engine=self._worker_engine(),
+                role="explorer",
+            )
+            llm_failed = raw is None
+            parsed = None if raw is None else _parse_json_response(raw)
 
-        if raw is None:
+        if llm_failed:
             # Model unavailable / rate-limited → retry rather than dead-end.
+            why = last_llm_error() or "explorer_llm_unavailable"
             self.blackboard.fail(
                 claimed_intent_id, self._worker_id, "explorer_llm_unavailable",
+                detail=why,
                 backoff_seconds=RETRY_BACKOFF_SECONDS,
             )
             return ExploreResult(
@@ -1569,8 +2069,8 @@ class SrcAgentLoop:
                 dead_end_reason="explorer_llm_unavailable",
                 raw_llm_response="",
             )
-
-        parsed = _parse_json_response(raw)
+        raw = raw or ""
+        parsed = _coerce_explorer_parsed(parsed, raw)
 
         # Sandboxed HTTP action loop: LLM can request additional GET/HEAD
         # requests within scope. Max MAX_HTTP_ACTIONS per explore, max 2 rounds.
@@ -1624,6 +2124,8 @@ class SrcAgentLoop:
                 timeout=self.config.timeout,
                 prefer=self.config.explorer_prefer,
                 only=self.config.explorer_only,
+                engine=self._worker_engine(),
+                role="explorer",
             )
             if raw is None:
                 break
@@ -1637,6 +2139,170 @@ class SrcAgentLoop:
         result.discovered_routes = _routes_from(parsed, target_url)
         return result
 
+    def _verdict_via_tools(self, user_msg: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Driving the Explorer as a tool loop. Returns ``(raw, parsed)``.
+
+        ``raw`` is ``None`` only when the model could not be reached at all, so the caller
+        applies the same retry it applies on the JSON path. When the model never calls
+        ``submit_verdict`` but writes the JSON as its final answer, that is parsed too —
+        the tool contract is the preferred shape, not the only accepted one.
+        """
+        try:
+            from core.llm_client import run_tool_loop
+        except Exception:  # noqa: BLE001
+            return None, None
+
+        verdict: Dict[str, Any] = {}
+        # Cumulative per intent, and the refusal is fed back as a tool result rather than
+        # silently dropped: the model has to be told why it cannot fetch again, or it
+        # keeps asking instead of submitting what it already has.
+        spent = {"fetches": 0}
+
+        def dispatch(name: str, args: Dict[str, Any]) -> str:
+            if name == "fetch_url":
+                if spent["fetches"] >= MAX_TOOL_FETCHES_PER_INTENT:
+                    return (f"per-intent request allowance exhausted "
+                            f"({MAX_TOOL_FETCHES_PER_INTENT} requests already sent for this "
+                            f"intent). You have what you need — call submit_verdict now.")
+                spent["fetches"] += 1
+                return self._tool_fetch(args or {})
+            if name == "read_blackboard":
+                return self._tool_read_blackboard(args or {})
+            if name == "read_knowledge":
+                return self._tool_read_knowledge(args or {})
+            if name == "delegate_analysis":
+                return self._tool_delegate(args or {})
+            if name == "submit_verdict":
+                verdict.clear()
+                verdict.update(dict(args or {}))
+                return "verdict recorded — stop calling tools."
+            return f"unknown tool: {name}"
+
+        outcome = run_tool_loop(
+            [{"role": "system", "content": self._system(EXPLORER_SYSTEM)},
+             {"role": "user", "content": user_msg}],
+            tools=EXPLORER_TOOLS,
+            dispatch=dispatch,
+            timeout=self.config.timeout,
+            complete_fn=self._tool_complete,
+            stop_if=lambda name, _args, _result: name == "submit_verdict",
+        )
+        text = str(outcome.get("text") or "")
+        if verdict:
+            return json.dumps(verdict, ensure_ascii=False), verdict
+        if not text:
+            return None, None
+        return text, _parse_json_response(text)
+
+    def _tool_complete(self, messages: List[Dict[str, Any]], *, tools: Any = None,
+                       timeout: float = 0.0) -> Optional[Dict[str, Any]]:
+        """The tool loop's completion seam — injectable so tools mode is testable."""
+        if self.config.tool_complete_fn:
+            return self.config.tool_complete_fn(
+                messages, tools=tools, timeout=timeout or self.config.timeout,
+                prefer=self.config.explorer_prefer, only=self.config.explorer_only,
+                engine=self._worker_engine(), role="explorer",
+            )
+        if self.config.llm_complete_fn:
+            system = ""
+            user = ""
+            for message in messages:
+                role = str(message.get("role") or "")
+                content = str(message.get("content") or "")
+                if role == "system":
+                    system = content
+                elif role == "user":
+                    user = content
+                elif role == "tool":
+                    user = (user + "\n\nTOOL RESULT:\n" + content).strip()
+            text = self.config.llm_complete_fn(
+                system, user, timeout=timeout or self.config.timeout,
+                prefer=self.config.explorer_prefer, only=self.config.explorer_only,
+                engine=self._worker_engine(), role="explorer",
+            )
+            if not text:
+                return None
+            try:
+                from core.cli_engines import assistant_from_text
+                return assistant_from_text(text)
+            except Exception:  # noqa: BLE001
+                return {"role": "assistant", "content": text, "tool_calls": []}
+        return _default_llm_complete_messages(
+            messages, tools=tools, timeout=timeout or self.config.timeout,
+            prefer=self.config.explorer_prefer, only=self.config.explorer_only,
+            engine=self._worker_engine(), role="explorer",
+        )
+
+    def _tool_read_blackboard(self, args: Mapping[str, Any]) -> str:
+        try:
+            snapshot = self.blackboard.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            return f"blackboard_unavailable:{type(exc).__name__}"
+        intent_id = str(args.get("intent_id") or "").strip()
+        if intent_id:
+            intent = next((row for row in (snapshot.get("intents") or [])
+                           if isinstance(row, dict) and row.get("intent_id") == intent_id), None)
+            hints = [h for h in (snapshot.get("hints") or [])
+                     if isinstance(h, dict) and h.get("intent_id") == intent_id]
+            return json.dumps({"intent": intent, "hints": hints[:10]}, ensure_ascii=False)[:8000]
+        return _blackboard_to_context(snapshot)[:8000]
+
+    def _tool_read_knowledge(self, args: Mapping[str, Any]) -> str:
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return json.dumps({"error": "name required",
+                               "available": _skills.knowledge_catalogue()}, ensure_ascii=False)[:4000]
+        got = _skills.read_knowledge(name, limit=min(KNOWLEDGE_CARD_CHARS, 4000))
+        if got.get("text"):
+            self.activate([name], source="tool")
+        return json.dumps(got, ensure_ascii=False)[:8000]
+
+    def _tool_delegate(self, args: Mapping[str, Any]) -> str:
+        from core.analysis_router import delegate_analysis, may_delegate
+
+        kind = str(args.get("kind") or "").strip().lower()
+        task = str(args.get("task") or "").strip()
+        context = str(args.get("context") or "")
+        engine = str(args.get("engine") or "").strip().lower()
+        if not may_delegate(kind):
+            return ("delegate_analysis refused: ordinary black-box next-request work "
+                    "stays on the current hunter. Use fetch_url / submit_verdict.")
+        if not task:
+            return "delegate_analysis requires a task"
+        result = delegate_analysis(
+            engine, task, context, kind=kind,
+            original_engine=self._worker_engine() or self.config.reasoner_engine,
+            hunter=self.config.hunter_engine or self.config.reasoner_engine,
+            timeout=self.config.timeout,
+        )
+        return json.dumps(result, ensure_ascii=False)[:8000]
+
+    def _tool_fetch(self, args: Mapping[str, Any]) -> str:
+        """``fetch_url``: every gate stays in ``_fetch_for_analysis``.
+
+        No second admission list here on purpose — two copies of "what may be sent"
+        drift apart, and the gate is the one that has to be right.
+        """
+        url = str(args.get("url") or "").strip()
+        method = str(args.get("method") or "GET").upper().strip()
+        reason = str(args.get("reason") or "")[:200]
+        if not url:
+            return "fetch_url requires a url"
+        fr = _fetch_for_analysis(
+            url, self.config.scope, method=method,
+            fetcher=self.config.fetcher, requester=self.config.requester,
+            budget=self.config.request_budget,
+        )
+        # A refused attempt is recorded too — "the model tried this" is audit, not noise.
+        self._record_http_action(url, "", "", fr, reason)
+        if fr["error"]:
+            return f"BLOCKED {fr['method']} {url}: {fr['error'][:120]}"
+        return (f"--- {fr['method']} {url} (reason: {reason}) ---\n"
+                f"Status: {fr['status']}\n"
+                f"Headers:\n{_sanitize_headers(fr['headers'])}\n"
+                f"Body ({min(len(fr['body']), BODY_LIMIT)} chars):\n"
+                f"{fr['body'][:BODY_LIMIT]}")
+
     def _process_explorer_result(
         self,
         intent_id: str,
@@ -1648,6 +2314,7 @@ class SrcAgentLoop:
             # Malformed model output is usually transient → retry.
             self.blackboard.fail(
                 intent_id, self._worker_id, "explorer_response_unparseable",
+                detail=(raw or last_llm_error())[:500],
                 backoff_seconds=RETRY_BACKOFF_SECONDS,
             )
             return ExploreResult(
@@ -1692,6 +2359,7 @@ class SrcAgentLoop:
                     f"description={str(f.get('description', ''))[:200]}"
                 )
                 self.blackboard.add_hint(intent_id, hint_text, source="src_agent_explorer")
+            self._maybe_review(intent_id, valid_findings, parsed)
             self._timeline("finding", intent_id, f"高置信发现 {len(valid_findings)} 项,待人工复核")
             self.blackboard.finish(intent_id, self._worker_id, status="blocked")
             return ExploreResult(
@@ -1708,6 +2376,7 @@ class SrcAgentLoop:
                 f"description={str(f.get('description', ''))[:200]}"
             )
             self.blackboard.add_hint(intent_id, hint_text, source="src_agent_explorer")
+        self._maybe_review(intent_id, valid_findings, parsed)
         self._timeline("finding", intent_id, f"中置信线索 {len(valid_findings)} 项")
         self.blackboard.finish(intent_id, self._worker_id, status="completed")
         return ExploreResult(
@@ -1715,6 +2384,63 @@ class SrcAgentLoop:
             findings=valid_findings,
             raw_llm_response=raw[:500],
         )
+
+    def _maybe_review(self, intent_id: str, findings: Sequence[Mapping[str, Any]],
+                      parsed: Optional[Mapping[str, Any]]) -> None:
+        """Independent second opinion for high-risk findings. Best-effort, never fatal."""
+        if self.config.llm_complete_fn or self.config.tool_complete_fn:
+            return
+        if os.environ.get("LODE_AUTO_REVIEW", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return
+        try:
+            from core.analysis_router import (
+                delegate_analysis, high_risk_finding, route,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        lane = self._lane_by_intent.get(intent_id, "worker")
+        risky = [dict(item) for item in findings if high_risk_finding(item)]
+        if not risky and lane != "review":
+            return
+        if not risky:
+            risky = [dict(item) for item in findings]
+        if not risky:
+            return
+        original = self._worker_engine() or self.config.reasoner_engine
+        engine = route("high_risk_review", original_engine=original,
+                       hunter=self.config.hunter_engine or self.config.reasoner_engine)
+        if engine != "provider":
+            try:
+                from core.cli_engines import _command
+                if not _command(engine):
+                    return
+            except Exception:  # noqa: BLE001
+                return
+        result = delegate_analysis(
+            engine,
+            "Independent review of a high-risk SRC finding. Cite only the given evidence.",
+            json.dumps({"intent_id": intent_id, "findings": risky,
+                        "analysis": (parsed or {}).get("analysis")}, ensure_ascii=False),
+            kind="high_risk_review",
+            original_engine=original,
+            hunter=self.config.hunter_engine or self.config.reasoner_engine,
+            timeout=min(self.config.timeout, 60.0),
+        )
+        analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        conclusion = str(analysis.get("conclusion") or result.get("reason") or "inconclusive")
+        self._timeline(
+            "review", intent_id,
+            f"high-risk review via {result.get('engine')}: {conclusion[:120]}",
+        )
+        try:
+            self.blackboard.add_hint(
+                intent_id,
+                f"[review:{result.get('engine')}] {conclusion} "
+                f"{str(analysis.get('analysis') or '')[:200]}",
+                source="delegate_analysis",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1730,6 +2456,9 @@ def run_src_agent(
     max_parallel_explore: int = 3,
     reasoner_prefer: str = "deepseek",
     explorer_prefer: str = "",
+    hunter_engine: str = "",
+    reasoner_engine: str = "",
+    explorer_engine: str = "",
     worker_id: str = "",
     fetcher: Optional[Callable] = None,
     requester: Optional[Callable] = None,
@@ -1756,6 +2485,9 @@ def run_src_agent(
         scope=scope,
         reasoner_prefer=reasoner_prefer,
         explorer_prefer=explorer_prefer,
+        hunter_engine=hunter_engine,
+        reasoner_engine=reasoner_engine,
+        explorer_engine=explorer_engine or hunter_engine,
         max_cycles=max_cycles,
         max_explore_per_cycle=max_explore_per_cycle,
         max_parallel_explore=max_parallel_explore,
@@ -1820,6 +2552,7 @@ def _self_test() -> int:
                         "hypothesis": "test IDOR",
                         "check_description": "check user ID",
                         "expected_evidence": "other user data",
+                        "worker_class": "worker",
                     }],
                     "should_stop": False,
                 })

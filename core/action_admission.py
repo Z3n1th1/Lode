@@ -20,6 +20,17 @@ audit row says so.
 
 Reason codes mirror the guardrails rule names on purpose, so the two layers do not
 drift into two vocabularies for the same finding.
+
+A second, independent scan covers **payloads on the read path**. Proving a bug
+exists is in scope: boolean SQLi, a short ``SLEEP(5)``, ``id`` / ``whoami`` /
+``echo`` / ``time``, LFI ``../../etc/passwd``, and SSRF that makes the *target* fetch
+loopback / RFC1918 / cloud metadata over HTTP(S). DELETE / DROP / TRUNCATE /
+dump / ``UPDATE … SET`` are the hard red line, even on GET. INSERT canaries
+(test garbage) stay allowed except on ByteSRC. ``value_scanners.url_or_callback``
+cannot do this job: it flags any URL-shaped value, so applying it to reads would
+refuse ``GET /api/orders`` and ``GET ?url=https://internal.example/``. The
+payload scan never looks at the request host — a local range at
+``http://127.0.0.1:8080/api/orders`` stays an ordinary read.
 """
 from __future__ import annotations
 
@@ -28,8 +39,8 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
-from urllib.parse import parse_qsl
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from core.src_blackboard import read_operation_selector, state_changing_reason
 
@@ -55,9 +66,125 @@ DESTRUCTIVE_METHOD = "destructive_method_forbidden"
 NOT_PROVEN = "probe_not_proven_non_mutating"
 CLASSIFIER_UNAVAILABLE = "admission_classifier_unavailable"
 NOT_IN_PROBE_TIER = "method_not_in_probe_tier"
+# Payload-level red lines (ByteSRC 测试红线 3/4/5, JSRC 测试规范, TPSA19-22).
+# Prefix is stable so ``agents.src_agent.TERMINAL_REFUSAL_PREFIXES`` can match it.
+HAZARDOUS_PAYLOAD = "hazardous_payload"
+RESOURCE_EXHAUSTION = f"{HAZARDOUS_PAYLOAD}:resource_exhaustion"
+DESTRUCTIVE_SQL = f"{HAZARDOUS_PAYLOAD}:destructive_sql"
+SHELL_OR_WEBSHELL = f"{HAZARDOUS_PAYLOAD}:shell_or_webshell"
+INTRANET_OR_METADATA = f"{HAZARDOUS_PAYLOAD}:intranet_or_metadata"
+SYSTEM_COMMAND = f"{HAZARDOUS_PAYLOAD}:system_command"
+DANGEROUS_SCHEME = f"{HAZARDOUS_PAYLOAD}:dangerous_scheme"
+
+# ByteSRC《测试红线10条》+《安全报告处置规则 V6.0》：禁止执行系统命令、
+# 禁止内网横向 / 打 metadata、禁止深层渗透。其它 SRC 仍走下面的存在性探针。
+_BYTESRC_MARKERS = (
+    "bytesrc", "bytedance", "src.bytedance.com",
+    "字节跳动", "字节 src", "字节src",
+)
+# Bare ``id`` / ``time`` are ordinary query keys. Only command-injection shapes.
+_BYTESRC_CMD_RE = re.compile(
+    r"(?is)(?:(?:^|[=/\s;|&`$()]|\$\()(?:whoami|hostname|uname(?:\s+-a)?)\b"
+    r"|(?:[=;|&`$()]|\$\()\s*(?:id|time)\b"
+    r"|echo\s+[A-Za-z0-9._-]{1,40}"
+    r"|\bsystem\s*\("
+    r"|\.\./(?:\.\./)*(?:etc/(?:passwd|shadow)|windows/win\.ini|win\.ini))"
+)
+
+# Existence tests (boolean SQLi, SLEEP(5), WAITFOR DELAY '0:0:5') are allowed.
+# BENCHMARK / long pipe waits are CPU/IO DoS, not "is there injection".
+_RESOURCE_EXHAUSTION_RE = re.compile(
+    r"(?is)(?:\bbenchmark\s*\(|\bdbms_pipe\s*\.\s*receive_message\b|\bget_lock\s*\()"
+)
+_SLEEP_SECONDS_RE = re.compile(
+    r"(?is)\b(?:sleep|pg_sleep)\s*\(\s*(\d+(?:\.\d+)?)\s*\)"
+)
+_WAITFOR_RE = re.compile(
+    r"(?is)waitfor\s+delay\s+'(\d+):(\d+):(\d+(?:\.\d+)?)'"
+)
+# One short delay is an existence probe. Anything longer is a stall.
+_MAX_SLEEP_SECONDS = 5.0
+# CRUD: query and INSERT canaries are allowed. DELETE / DROP / TRUNCATE / dump
+# are the hard red line. UPDATE SET is treated as dangerous mutation.
+_DESTRUCTIVE_SQL_RE = re.compile(
+    r"(?is)(?:\bdrop\s+(?:table|database|index|view|schema)\b"
+    r"|\btruncate\s+(?:table\b|\w+)"
+    r"|\bdelete\s+from\b|\bupdate\s+\w+\s+set\b"
+    r"|\binto\s+(?:out|dump)file\b|\bload_file\s*\(|\bxp_cmdshell\b)"
+)
+# ByteSRC 红线 5 still forbids 增删改, including INSERT canaries.
+_BYTESRC_INSERT_RE = re.compile(r"(?is)\binsert\s+into\b")
+# Post-exploitation only. Existence markers (id / whoami / echo / time /
+# ../../etc/passwd) are allowed; reverse shells, webshells and shadow dumps are not.
+_EXISTENCE_CMD = r"(?:id|whoami|hostname|uname(?:\s+-a)?|time|echo\s+[A-Za-z0-9._-]{1,40})"
+_POST_EXPLOIT_RE = re.compile(
+    r"(?is)(?:/bin/(?:ba)?sh\b|\bbash\s+-i\b|\bsh\s+-i\b"
+    r"|\bcmd\.exe\b|\bpowershell(?:\.exe)?"
+    r"|<\?php|\beval\s*\(|\bassert\s*\(|\bpassthru\s*\(|\bshell_exec\s*\("
+    r"|\bproc_open\s*\("
+    r"|/dev/tcp\b|\bmkfifo\b|\bnc\s+-e\b"
+    r"|\bmeterpreter\b|\breverse[\s_-]?shell\b|\bwebshell\b"
+    r"|cat\s+/etc/shadow|/etc/shadow"
+    r"|\brm\s+-rf\b|\bcurl\s+[^\s]*\|\s*(?:ba)?sh\b)"
+)
+_SYSTEM_CALL_RE = re.compile(r"(?is)\bsystem\s*\(")
+_EXISTENCE_SYSTEM_RE = re.compile(
+    rf"(?is)\bsystem\s*\(\s*['\"]{_EXISTENCE_CMD}['\"]\s*\)"
+)
+_DANGEROUS_SCHEME_RE = re.compile(
+    r"(?i)\b(?:gopher|dict|file|ldap|ldaps|jar|tftp)\s*:"
+)
+# Hosts extracted from *payloads* (query / body / path), never the request netloc.
+_URL_HOST_RE = re.compile(
+    r"(?i)(?:[a-z][a-z0-9+.-]*:)?//(?:\[([^\]]+)\]|([^/\s?#]+))"
+)
+_PATH_INTRANET_RE = re.compile(
+    r"(?i)/(?:127(?:\.\d+){1,3}|10(?:\.\d+){3}|192\.168(?:\.\d+){2}"
+    r"|172\.(?:1[6-9]|2\d|3[01])(?:\.\d+){2}|169\.254\.169\.254"
+    r"|localhost)(?:[:/]|$)"
+)
+_METADATA_HOSTS = frozenset({
+    "localhost", "ip6-localhost", "metadata.google.internal", "metadata.goog",
+    "metadata.azure.com", "instance-data", "100.100.100.200",
+    "169.254.169.254", "fd00:ec2::254", "::1", "0.0.0.0",
+})
+# Parameter names that mean "this value is a URL the server will fetch".
+# Bare RFC1918 as ``?id=`` is left alone; as ``?url=`` it is intranet SSRF.
+_URLISH_KEYS = frozenset({
+    "url", "uri", "target", "dest", "destination", "redirect", "next", "continue",
+    "callback", "webhook", "image", "img", "fetch", "proxy", "host", "domain",
+    "returnurl", "return", "link", "src", "source", "endpoint", "site", "feed",
+    "avatar", "imageurl", "fileurl", "targeturl", "notify_url", "notifyurl",
+    "callback_url", "callbackurl", "redirect_uri", "redirecturi",
+})
 
 _GQL_PATH_TOKENS = ("graphql", "graphiql", "gql")
 _GQL_ALLOWED_KEYS = frozenset({"query", "operationname", "variables"})
+# Only a complete terminal route segment can prove a POST read. ``/search/delete``
+# and ``/removeFromSearch`` are not reads merely because they contain "search".
+_POST_READ_ROUTES = frozenset({"search", "_search", "query", "list", "lookup", "count"})
+# These body fields select an RPC operation rather than supplying a search term.
+# Unknown values refuse the route proof; an explicit read value is not, by itself,
+# a new proof of a generic POST endpoint.
+_BODY_OPERATION_KEYS = frozenset({
+    "action", "_action", "op", "operation", "_operation", "do", "cmd",
+    "method", "_method", "function", "func", "verb", "act", "task",
+    "handler", "event", "method_name", "operationtype", "actiontype", "oper",
+})
+_BODY_AMBIGUOUS_ACTION_KEYS = frozenset({
+    "type", "mode", "操作", "类型", "caozuo", "leixing",
+})
+_BODY_MUTATING_WORDS = (
+    "delete", "remove", "destroy", "purge", "erase", "recycle", "clear", "drop",
+    "trash", "wipe", "truncate", "unlink", "update", "edit", "modify", "patch",
+    "reset", "cancel", "disable", "revoke", "logout", "signout", "unsubscribe",
+    "refund", "transfer", "activate", "upload", "create", "register", "send",
+    "删除", "移除", "销毁", "清空", "清除", "作废", "修改", "更新", "取消", "关闭",
+)
+_METHOD_OVERRIDE_KEYS = frozenset({
+    "_method", "_method_override", "method_override", "x-http-method-override",
+    "x-http-method", "x-original-method", "_verb",
+})
 # GraphQL only leaves the read operation off the wire when the document says
 # ``mutation``/``subscription``; a word-boundary test is therefore sound for the
 # operation *type*. (A server may still implement an effectful field as a query field —
@@ -138,7 +265,7 @@ def _parse_container(body: str, content_type: str) -> Optional[Any]:
     form_shaped = "json" in lowered or text[:1] in ("{", "[")
     if form_shaped:
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(text, object_pairs_hook=_preserve_duplicate_json_keys)
         except (ValueError, TypeError):
             parsed = None
         if isinstance(parsed, (dict, list)):
@@ -151,7 +278,30 @@ def _parse_container(body: str, content_type: str) -> Optional[Any]:
         pairs = parse_qsl(text, keep_blank_values=True)
     except ValueError:
         return None
-    return dict(pairs) if pairs else None
+    if not pairs:
+        return None
+    # Keep duplicate form keys. ``action=delete&action=query`` must not collapse
+    # into only the last value before the semantic classifier sees it.
+    values: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in values:
+            previous = values[key]
+            values[key] = previous + [value] if isinstance(previous, list) else [previous, value]
+        else:
+            values[key] = value
+    return values
+
+
+def _preserve_duplicate_json_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Retain every JSON selector occurrence so a later benign key cannot mask it."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            previous = result[key]
+            result[key] = previous + [value] if isinstance(previous, list) else [previous, value]
+        else:
+            result[key] = value
+    return result
 
 
 def build_action_card(method: str, url: str, body: str = "",
@@ -163,16 +313,288 @@ def build_action_card(method: str, url: str, body: str = "",
         card["body"] = body
     if isinstance(container, dict):
         card["form"] = container
-        if "json" in (content_type or "").lower() or (body or "").strip()[:1] in ("{", "["):
-            card["json"] = container
+    if isinstance(container, (dict, list)) and (
+        "json" in (content_type or "").lower() or (body or "").strip()[:1] in ("{", "[")
+    ):
+        card["json"] = container
     return card
+
+
+def _body_operation_reason(body: str, content_type: str) -> str:
+    """Reject unproved RPC selectors, including nested/encoded and duplicate ones."""
+    if not body:
+        return ""
+    container = _parse_container(body, content_type)
+    if container is None:
+        return ""
+    for key, value in _body_fields(container):
+        decoded_key = unquote(unquote(unquote(key))).strip().lower()
+        # Rails/PHP-style brackets and dotted JSON field names can name the same
+        # selector. Inspect every segment rather than only a literal "action" key.
+        keys = {part for part in re.split(r"[.\[\]]+", decoded_key) if part}
+        key_words = set(re.findall(r"[a-z]+", re.sub(
+            r"(?<=[a-z0-9])(?=[A-Z])", " ", unquote(unquote(unquote(key))),
+        ).lower()))
+        if key_words.intersection(_BODY_MUTATING_WORDS) or keys & {"del", "rm"}:
+            return "unknown_operation_selector"
+        if keys & _METHOD_OVERRIDE_KEYS:
+            return "unknown_operation_selector"
+        decoded_value = unquote(unquote(unquote(str(value)))).strip().lower()
+        if keys & _BODY_OPERATION_KEYS:
+            if decoded_value not in {"get", "head", "options", "read", "list", "view", "search", "query"}:
+                return "unknown_operation_selector"
+        if keys & _BODY_AMBIGUOUS_ACTION_KEYS and (
+            decoded_value in {"del", "rm"} or any(word in decoded_value for word in _BODY_MUTATING_WORDS)
+        ):
+            return "unknown_operation_selector"
+    return ""
+
+
+def _body_fields(value: Any) -> Iterable[Tuple[str, Any]]:
+    """Include selector containers/nulls as well as scalar leaves; neither proves read."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield str(key), child
+            yield from _body_fields(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _body_fields(child)
+
+
+# ---------------------------------------------------------------------------
+# Payload red lines (GET as well as POST)
+# ---------------------------------------------------------------------------
+
+def _decode_layers(text: str) -> str:
+    """Raw plus up to three rounds of percent-decode, so ``%53LEEP%28`` still matches."""
+    current = text or ""
+    layers = [current]
+    for _ in range(3):
+        nxt = unquote(current.replace("+", " "))
+        if nxt == current:
+            break
+        layers.append(nxt)
+        current = nxt
+    return "\n".join(layers)
+
+
+def _haystack(url: str, body: str) -> str:
+    parsed = urlsplit(url or "")
+    raw = "\n".join((parsed.path or "", parsed.query or "", parsed.fragment or "", body or ""))
+    return _decode_layers(raw)
+
+
+def _ipv4_from_host(host: str) -> Optional[Tuple[int, int, int, int]]:
+    text = (host or "").strip().lower()
+    if text.startswith("0x") and len(text) <= 10:
+        try:
+            number = int(text, 16)
+        except ValueError:
+            return None
+        if 0 <= number < 2**32:
+            return ((number >> 24) & 255, (number >> 16) & 255,
+                    (number >> 8) & 255, number & 255)
+        return None
+    if text.isdigit():
+        try:
+            number = int(text, 10)
+        except ValueError:
+            return None
+        if 0 <= number < 2**32:
+            return ((number >> 24) & 255, (number >> 16) & 255,
+                    (number >> 8) & 255, number & 255)
+        return None
+    parts = text.split(".")
+    if len(parts) not in (2, 3, 4) or not all(parts):
+        return None
+    nums: List[int] = []
+    for part in parts:
+        try:
+            if part.startswith("0") and part != "0" and set(part) <= set("01234567"):
+                nums.append(int(part, 8))
+            else:
+                nums.append(int(part, 10))
+        except ValueError:
+            return None
+    if any(item < 0 or item > 255 for item in nums):
+        return None
+    if len(nums) == 4:
+        return (nums[0], nums[1], nums[2], nums[3])
+    if nums[0] == 127 and len(nums) == 2:
+        return (127, 0, 0, nums[1])
+    if nums[0] == 127 and len(nums) == 3:
+        return (127, nums[1], 0, nums[2])
+    return None
+
+
+def _is_forbidden_host(host: str) -> bool:
+    """True for localhost / RFC1918 / link-local / cloud metadata — as a *host*."""
+    text = (host or "").strip().lower().strip("[]")
+    if not text:
+        return False
+    if "%" in text:
+        text = text.split("%", 1)[0]
+    if text.count(":") == 1 and not text.startswith(":"):
+        left, right = text.rsplit(":", 1)
+        if right.isdigit():
+            text = left
+    if text in _METADATA_HOSTS or text.endswith(".google.internal"):
+        return True
+    if text == "::1" or text.endswith("::1"):
+        return True
+    octets = _ipv4_from_host(text)
+    if octets is None:
+        return False
+    a, b, _c, _d = octets
+    if a in (0, 10, 127):
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 169 and b == 254:
+        return True
+    return octets == (100, 100, 100, 200)
+
+
+def _walk_values(obj: Any, key: str = "") -> Iterable[Tuple[str, str]]:
+    if isinstance(obj, dict):
+        for child_key, child in obj.items():
+            yield from _walk_values(child, str(child_key))
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_values(item, key)
+    elif obj is None:
+        return
+    else:
+        yield key, str(obj)
+
+
+def _payload_values(url: str, body: str) -> List[Tuple[str, str]]:
+    parsed = urlsplit(url or "")
+    values: List[Tuple[str, str]] = []
+    try:
+        values.extend(parse_qsl(parsed.query, keep_blank_values=True))
+    except ValueError:
+        pass
+    container = _parse_container(body, "")
+    if container is not None:
+        values.extend(_walk_values(container))
+    elif body:
+        values.append(("", body))
+        try:
+            values.extend(parse_qsl(body, keep_blank_values=True))
+        except ValueError:
+            pass
+    return values
+
+
+def _host_in_blob(blob: str) -> bool:
+    if _PATH_INTRANET_RE.search(blob):
+        return True
+    for match in _URL_HOST_RE.finditer(blob):
+        host = match.group(1) or match.group(2) or ""
+        if _is_forbidden_host(host):
+            return True
+    return False
+
+
+def _overlong_delay(blob: str) -> bool:
+    """True when a delay payload would stall the target longer than an existence probe."""
+    for match in _SLEEP_SECONDS_RE.finditer(blob):
+        try:
+            if float(match.group(1)) > _MAX_SLEEP_SECONDS:
+                return True
+        except ValueError:
+            return True
+    for match in _WAITFOR_RE.finditer(blob):
+        try:
+            hours, minutes, seconds = (float(match.group(1)), float(match.group(2)),
+                                       float(match.group(3)))
+        except ValueError:
+            return True
+        if hours * 3600 + minutes * 60 + seconds > _MAX_SLEEP_SECONDS:
+            return True
+    return False
+
+
+def _is_post_exploit_shell(blob: str) -> bool:
+    """True for reverse shells / webshells / shadow dumps, not ``id``/``whoami``."""
+    if _POST_EXPLOIT_RE.search(blob):
+        return True
+    if _SYSTEM_CALL_RE.search(blob) and not _EXISTENCE_SYSTEM_RE.search(blob):
+        return True
+    return False
+
+
+def is_bytesrc_program(program: str = "", authorization: str = "") -> bool:
+    """True when this engagement is ByteSRC (V6 / 测试红线 10 条)."""
+    blob = f"{program}\n{authorization}".lower()
+    return any(marker.lower() in blob for marker in _BYTESRC_MARKERS)
+
+
+def _bytesrc_probe_reason(blob: str) -> str:
+    """ByteSRC overlay: no system commands, no LFI of host files, no intranet SSRF."""
+    if _BYTESRC_CMD_RE.search(blob) or _EXISTENCE_SYSTEM_RE.search(blob):
+        return SYSTEM_COMMAND
+    if _BYTESRC_INSERT_RE.search(blob):
+        return DESTRUCTIVE_SQL
+    if _host_in_blob(blob):
+        return INTRANET_OR_METADATA
+    return ""
+
+
+def hazardous_payload_reason(
+    url: str,
+    body: str = "",
+    *,
+    program: str = "",
+    authorization: str = "",
+) -> str:
+    """Why this request is a banned high-risk payload, or ``""``.
+
+    Looks at path / query / body, never the request host. Proving a bug exists
+    is in scope: boolean SQLi, a short ``SLEEP(5)`` / ``WAITFOR DELAY``,
+    command-injection markers (``id`` / ``whoami`` / ``echo`` / ``time``), LFI
+    ``../../etc/passwd``, and HTTP(S) SSRF to loopback / RFC1918 / cloud
+    metadata. DELETE / DROP / TRUNCATE / dump / LOAD_FILE / ``UPDATE … SET``
+    are the hard red line. INSERT canaries are allowed except on ByteSRC.
+    Exhausting the target (BENCHMARK, SLEEP longer than 5s), reverse shells /
+    webshells, and ``gopher``/``dict``/``file``/``ldap`` are not.
+
+    ByteSRC engagements (``program`` / ``authorization`` matching 字节) additionally
+    refuse system-command probes, ``/etc/passwd`` LFI, and HTTP(S) SSRF to
+    loopback / RFC1918 / cloud metadata — 红线 2 / 5, 不要做危险测试.
+    """
+    blob = _haystack(url, body)
+    if _DANGEROUS_SCHEME_RE.search(blob):
+        return DANGEROUS_SCHEME
+    if _RESOURCE_EXHAUSTION_RE.search(blob) or _overlong_delay(blob):
+        return RESOURCE_EXHAUSTION
+    if _DESTRUCTIVE_SQL_RE.search(blob):
+        return DESTRUCTIVE_SQL
+    if _is_post_exploit_shell(blob):
+        return SHELL_OR_WEBSHELL
+    if is_bytesrc_program(program, authorization):
+        extra = _bytesrc_probe_reason(blob)
+        if extra:
+            return extra
+    return ""
 
 
 # ---------------------------------------------------------------------------
 # The decision
 # ---------------------------------------------------------------------------
 
-def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> Verdict:
+def admit(
+    *,
+    method: str,
+    url: str,
+    body: str = "",
+    content_type: str = "",
+    program: str = "",
+    authorization: str = "",
+) -> Verdict:
     """Allowed, or refused with a reason. Pure; no network, no I/O.
 
     Gate order is the point, and the caller runs this *after* the scope check, the
@@ -188,7 +610,7 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
         return _refuse(DESTRUCTIVE_METHOD, "read", method=verb)
 
     if verb in READ_METHODS:
-        return _admit_read(verb, url)
+        return _admit_read(verb, url, body, program=program, authorization=authorization)
 
     tier = "probe"
     if verb not in PROBE_METHODS:
@@ -202,6 +624,13 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
         return _refuse("unknown_operation_selector", tier, method=verb)
     if read_reason:
         return _refuse("state_changing_endpoint", tier, method=verb)
+
+    # Payload red lines do not need the classifier, so they run even when it is
+    # missing. A proven GraphQL ``query`` that embeds DELETE/BENCHMARK is still refused.
+    hazard = hazardous_payload_reason(
+        url, body, program=program, authorization=authorization)
+    if hazard:
+        return _refuse(hazard, tier, method=verb)
 
     action_policy, value_scanners, error = _guardrails()
     if action_policy is None or value_scanners is None:
@@ -221,11 +650,9 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
         return _refuse("mutating_request_refused:delete", tier, method=verb, kind=kind)
     if kind == "modify":
         return _refuse("mutating_request_refused:update_semantics", tier, method=verb, kind=kind)
-    # The one signal that stays a hard gate even for a proven read: a URL-valued
-    # parameter makes the *target* fetch a third party, and no scope gate can see where
-    # that lands (红线 8: 禁止对第三方服务、外部 API 连带测试).
-    if scan.get("url_or_callback"):
-        return _refuse("mutating_request_refused:server_side_egress", tier, method=verb, kind=kind)
+    # HTTP(S) URL-valued parameters are SSRF existence probes (metadata / loopback /
+    # callback). ``gopher``/``dict``/``file`` already failed above via
+    # ``hazardous_payload_reason``. Do not refuse ``url_or_callback`` here.
 
     # Now the request has to *prove* it is a read. Note what is deliberately NOT checked
     # above: ``privilege_or_credential`` / ``cleanup_keyword`` / ``shared_state``.
@@ -239,7 +666,10 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
     # 2026-09-21, which is how this ordering was found. Reading a sensitive surface is the
     # hunt's whole job; ``guardrails.action_policy.refine`` only consults these scanners
     # for create/modify/other for exactly this reason.
-    proof = _read_proof(verb, url, body)
+    body_reason = _body_operation_reason(body, content_type)
+    if body_reason:
+        return _refuse(body_reason, tier, method=verb, kind=kind)
+    proof = _read_proof(verb, url, body, content_type)
     if proof:
         return _allow(tier, method=verb, proof=proof)
 
@@ -253,10 +683,10 @@ def admit(*, method: str, url: str, body: str = "", content_type: str = "") -> V
     return _refuse(NOT_PROVEN, tier, method=verb, kind=kind)
 
 
-def _read_proof(verb: str, url: str, body: str) -> str:
-    """``"options"`` / ``"read_selector"`` / ``"graphql_query"``, or ``""`` for no proof.
+def _read_proof(verb: str, url: str, body: str, content_type: str = "") -> str:
+    """``"options"`` / ``"read_selector"`` / ``"graphql_query"`` / ``"read_route"``.
 
-    Three shapes and nothing else, each of which says on its face what it does:
+    Four shapes and nothing else, each of which says on its face what it does:
     ``OPTIONS`` cannot mutate by spec; a read operation selector is the endpoint
     declaring its own operation; a GraphQL ``query`` needs the literal keyword
     ``mutation`` to be anything else. An empty body is **not** on this list — ``POST
@@ -265,14 +695,59 @@ def _read_proof(verb: str, url: str, body: str) -> str:
     if verb == "OPTIONS":
         return "" if body else "options"
     if verb == "POST":
+        if not _inspectable_post_body(body, content_type):
+            return ""
         if read_operation_selector(url):
             return "read_selector"
         if _graphql_read(url, body):
             return "graphql_query"
+        if _post_read_route(url):
+            return "read_route"
     return ""
 
 
-def _admit_read(verb: str, url: str) -> Verdict:
+def _post_read_route(url: str) -> bool:
+    """Only a complete terminal route segment can identify a POST read endpoint."""
+    path = urlsplit(url or "").path.rstrip("/")
+    for _ in range(3):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    segment = path.rsplit("/", 1)[-1].lower()
+    return segment in _POST_READ_ROUTES
+
+
+def _inspectable_post_body(body: str, content_type: str) -> bool:
+    """Body formats whose operation selectors can be checked before sending."""
+    if not body:
+        return True
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if media_type and not (
+        media_type == "application/json" or media_type.endswith("+json")
+        or media_type == "application/x-www-form-urlencoded"
+    ):
+        return False
+    if not body.lstrip().startswith(("{", "[")):
+        try:
+            # parse_qsl's permissive default accepts arbitrary text as an empty
+            # form key. That cannot count as an inspected search/filter body.
+            parse_qsl(body, keep_blank_values=True, strict_parsing=True)
+        except ValueError:
+            return False
+    container = _parse_container(body, content_type)
+    # Opaque payloads and JSON batches cannot prove every operation is a read.
+    return isinstance(container, dict)
+
+
+def _admit_read(
+    verb: str,
+    url: str,
+    body: str = "",
+    *,
+    program: str = "",
+    authorization: str = "",
+) -> Verdict:
     """The read path.
 
     Deliberately *not* routed through ``value_scanners``: it flags any parameter whose
@@ -281,17 +756,31 @@ def _admit_read(verb: str, url: str) -> Verdict:
     ``GET /api/orders``, the product's single most common read. The token-set heuristic
     below is weaker on purpose; that is the right trade for reads.
 
-    The one tightening over the previous policy: a state-changing-looking URL is refused
-    **unconditionally**. Declaring a write method used to downgrade this to a warning,
-    which let ``GET /logout`` and ``GET /api/deleteUser`` through — and "禁止任何增删改
-    数据/配置的写操作" is written in terms of what the operation *does*, not which verb
-    carries it.
+    Two tightenings over a naive GET-allow: a state-changing-looking URL is refused
+    **unconditionally**, and a payload that deletes, dumps, or ``UPDATE … SET``
+    (DROP/DELETE/TRUNCATE/outfile, gopher, reverse shell, webshell, BENCHMARK) is
+    refused even though the verb is a read. INSERT canaries are allowed except on
+    ByteSRC. Short ``SLEEP(5)``, ``id``/``whoami``/``echo``/``time``, LFI
+    ``../../etc/passwd``, and HTTP(S) SSRF to metadata / loopback / RFC1918 to prove
+    a bug exists are allowed. ``value_scanners`` still stays off this path so
+    ``GET ?url=https://internal.example/`` and ``GET /api/orders`` remain the
+    product's core reads.
     """
     reason = state_changing_reason(url)
     if reason == "unknown_operation_selector":
         return _refuse("unknown_operation_selector", "read", method=verb)
     if reason:
         return _refuse("state_changing_endpoint", "read", method=verb)
+    hazard = hazardous_payload_reason(
+        url, body, program=program, authorization=authorization)
+    if hazard:
+        return _refuse(hazard, "read", method=verb)
+    # Payload red lines take precedence over selector heuristics: a destructive
+    # SQL body should be audited as destructive SQL, even when its free-form text
+    # happens to contain a word such as ``delete``.
+    body_reason = _body_operation_reason(body, "")
+    if body_reason:
+        return _refuse(body_reason, "read", method=verb)
     return _allow("read", method=verb)
 
 
@@ -313,7 +802,11 @@ def _graphql_read(url: str, body: str) -> bool:
 
 
 __all__ = [
-    "CLASSIFIER_UNAVAILABLE", "DESTRUCTIVE_METHOD", "DESTRUCTIVE_METHODS",
-    "NOT_IN_PROBE_TIER", "NOT_PROVEN", "PROBE_METHODS", "READ_METHODS",
-    "Verdict", "admit", "build_action_card", "classifier_available", "classifier_error",
+    "CLASSIFIER_UNAVAILABLE", "DANGEROUS_SCHEME", "DESTRUCTIVE_METHOD",
+    "DESTRUCTIVE_METHODS", "DESTRUCTIVE_SQL", "HAZARDOUS_PAYLOAD",
+    "INTRANET_OR_METADATA", "NOT_IN_PROBE_TIER", "NOT_PROVEN", "PROBE_METHODS",
+    "READ_METHODS", "RESOURCE_EXHAUSTION", "SHELL_OR_WEBSHELL", "SYSTEM_COMMAND",
+    "Verdict",
+    "admit", "build_action_card", "classifier_available", "classifier_error",
+    "hazardous_payload_reason", "is_bytesrc_program",
 ]

@@ -25,6 +25,8 @@ class _ConsoleTestCase(unittest.TestCase):
     _ENV_KEYS = (
         "LLM_PROVIDERS", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
         "SRC_REASONER_PREFER", "SRC_EXPLORER_PREFER", "LLM_ACTIVE_PROVIDER_FILE",
+        "LODE_REASONER_ENGINE", "LODE_EXPLORER_ENGINE",
+        "LODE_HUNTER_ENGINE", "LODE_VERIFIER_ENGINE", "LODE_SPECIALIST_ENGINE",
     )
 
     def setUp(self) -> None:
@@ -78,6 +80,7 @@ class LlmSettingsEndpointTests(_ConsoleTestCase):
              "model": "deepseek-chat", "api_key": "sk-cheap-zzzz9999"},
         ],
         "tiers": {"reasoner": "smart", "explorer": "cheap"},
+        "engines": {"reasoner": "provider", "explorer": "codex"},
     }
 
     def test_read_is_empty_then_write_persists_masked(self) -> None:
@@ -95,6 +98,14 @@ class LlmSettingsEndpointTests(_ConsoleTestCase):
         self.assertNotIn("api_key", json.dumps(body))
         self.assertEqual(["1234", "9999"], [p["key_hint"] for p in body["providers"]])
         self.assertEqual({"reasoner": "smart", "explorer": "cheap"}, body["tiers"])
+        self.assertEqual("provider", body["engines"]["reasoner"])
+        self.assertEqual("codex", body["engines"]["explorer"])
+        self.assertEqual("provider", body["engines"]["hunter"])
+        self.assertEqual("grok", body["engines"]["verifier"])
+        self.assertEqual("codex", body["engines"]["specialist"])
+        self.assertEqual("codex", os.environ.get("LODE_EXPLORER_ENGINE"))
+        reread = self.client.get("/api/v1/llm/settings").json()
+        self.assertEqual("codex", reread["effective"]["explorer_engine"])
         self.assertTrue((self.state_dir / "llm_settings.json").is_file())
         self.assertFalse((self.state_dir / ".llm_settings.json.tmp").exists())
         # The running process is updated too, so the next SRC run picks it up.
@@ -102,6 +113,15 @@ class LlmSettingsEndpointTests(_ConsoleTestCase):
         self.assertTrue(os.environ.get("LLM_PROVIDERS", "").startswith("smart|"))
         self.assertEqual("smart", os.environ.get("SRC_REASONER_PREFER"))
         self.assertEqual("cheap", os.environ.get("SRC_EXPLORER_PREFER"))
+
+    def test_omitting_engines_keeps_the_stored_choice(self) -> None:
+        self.login()
+        self.client.put("/api/v1/llm/settings", json=self._PAYLOAD)
+        body = self.client.put("/api/v1/llm/settings", json={
+            "providers": self._PAYLOAD["providers"],
+            "tiers": self._PAYLOAD["tiers"],
+        }).json()
+        self.assertEqual("codex", body["engines"]["explorer"])
 
     def test_keyless_round_trip_keeps_the_stored_keys(self) -> None:
         self.login()

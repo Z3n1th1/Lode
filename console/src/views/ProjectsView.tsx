@@ -1,6 +1,6 @@
 import { Plus, RefreshCw } from 'lucide-react'
 
-import type { PendingIntakeRow, ProjectCard } from '../api'
+import { PROJECT_PAGE_SIZES, type PendingIntakeRow, type ProjectCard } from '../api'
 import PageHeader from '../components/shell/PageHeader'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -29,8 +29,38 @@ const PROJECT_COLUMNS: Column<ProjectCard>[] = [
   {
     key: 'status',
     header: '状态',
-    width: 84,
-    render: (row) => <Badge tone={projectStatusTone(row.status)}>{row.status}</Badge>
+    width: 96,
+    render: (row) => (
+      // 在跑的那一行带脉冲点:光看 "running" 三个字母,在一屏 done 里不够扎眼。
+      <span className="inline-flex items-center gap-1.5">
+        {row.status === 'running' ? (
+          <i className="inline-block size-1.5 shrink-0 animate-[pulse-dot_1.6s_ease-in-out_infinite] rounded-full bg-accent" />
+        ) : null}
+        <Badge tone={projectStatusTone(row.status)}>{row.status}</Badge>
+      </span>
+    )
+  },
+  {
+    key: 'surface',
+    header: '产出',
+    width: 236,
+    mono: true,
+    render: (row) => {
+      if (row.status === 'running') {
+        return (
+          <span className="text-accent">
+            {row.batch_size > 1 ? `${row.batch_index}/${row.batch_size}` : '扫描中'}
+          </span>
+        )
+      }
+      // has_surface=false 是"这条路本来就不产生面计数"(auto 产出的是候选),
+      // 跟"扫了但这台什么都没有"是两件事,不能都画成一个 0。
+      if (!row.has_surface) return <span className="text-fg-4">—</span>
+      if (row.surface_paths + row.surface_api + row.surface_scripts === 0) {
+        return <span className="text-fg-4">未产出</span>
+      }
+      return `路径 ${row.surface_paths} · API ${row.surface_api} · 脚本 ${row.surface_scripts}`
+    }
   },
   {
     key: 'last_activity',
@@ -79,20 +109,29 @@ const INTAKE_COLUMNS: Column<PendingIntakeRow>[] = [
 export default function ProjectsView() {
   const projects = usePanels((state) => state.projects)
   const projectTotal = usePanels((state) => state.projectTotal)
+  const projectOffset = usePanels((state) => state.projectOffset)
+  const projectPageSize = usePanels((state) => state.projectPageSize)
+  const projectRunning = usePanels((state) => state.projectRunning)
   const projectsMoreError = usePanels((state) => state.projectsMoreError)
   const intakes = usePanels((state) => state.intakes)
   const intakeQueueStatus = usePanels((state) => state.intakeQueueStatus)
   const loading = usePanels((state) => state.loading)
 
-  // 列表是分页的:页头写的必须是总数,不是本页条数。
-  const shown = `${projectTotal} 个目标`
-  const hasMore = projects.length < projectTotal
+  // 列表是分页的:页头要写清"这一页是全部里的哪一段",不能把本页条数当总数。
+  const pageSize = projectPageSize || PROJECT_PAGE_SIZES[0]
+  const page = Math.floor(projectOffset / pageSize) + 1
+  const pages = Math.max(1, Math.ceil(projectTotal / pageSize))
+  const first = projectTotal ? projectOffset + 1 : 0
+  const last = Math.min(projectOffset + pageSize, projectTotal)
+  const shown = projectTotal ? `${first}–${last} / ${projectTotal} 个目标` : '0 个目标'
+  const atStart = projectOffset <= 0
+  const atEnd = projectOffset + pageSize >= projectTotal
 
   return (
     <section className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="项目"
-        meta={hasMore ? `${projects.length} / ${shown}` : shown}
+        meta={shown}
         actions={
           <>
             <Button
@@ -112,6 +151,20 @@ export default function ProjectsView() {
         }
       />
 
+      {/* 在跑的那台放在页头下面、滚动区外面 —— 翻到第 9 页也该看得见"现在在扫什么"。
+          它读的是全局那一条,不是当前页里的,所以不受翻页影响。 */}
+      {projectRunning ? (
+        <div className="flex shrink-0 items-center gap-2 border-y border-line bg-accent-soft px-4 py-1.5 font-mono text-2xs text-accent">
+          <i className="inline-block size-1.5 shrink-0 animate-[pulse-dot_1.6s_ease-in-out_infinite] rounded-full bg-accent" />
+          <span className="truncate">
+            正在扫描 {projectRunning.target}
+            {projectRunning.batch_size > 1
+              ? ` · ${projectRunning.batch_index}/${projectRunning.batch_size}`
+              : ''}
+          </span>
+        </div>
+      ) : null}
+
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         <Table
           columns={PROJECT_COLUMNS}
@@ -122,25 +175,48 @@ export default function ProjectsView() {
           onRowClick={(row) => usePanels.getState().selectProject(row.project_id)}
         />
 
-        {/* 还有没取回来的项目时,必须让操作者看得见"下面还有"。失败也要说 ——
-            一个点了没反应的按钮,和当初那个静默截断是同一类毛病。 */}
-        {hasMore || projectsMoreError ? (
+        {/* 翻页条。必须是 Table 的兄弟节点:Table 空行时会直接短路成 EmptyState,
+            没有 footer 插槽。总数永远显示 —— 一个点了没反应的按钮,和当初那个
+            静默截断是同一类毛病。 */}
+        {projectTotal ? (
           <div className="flex shrink-0 items-center gap-3 border-b border-line px-3 py-2">
+            <span className="font-mono text-2xs text-fg-4">
+              第 {page} / {pages} 页 · 共 {projectTotal}
+            </span>
             {projectsMoreError ? (
-              <span className="text-xs text-warn">加载下一页失败:{projectsMoreError}</span>
-            ) : (
-              <span className="font-mono text-2xs text-fg-4">
-                已显示 {projects.length} / {projectTotal}
-              </span>
-            )}
+              <span className="text-xs text-warn">取页失败:{projectsMoreError}</span>
+            ) : null}
             <span className="flex-1" />
+            <select
+              value={pageSize}
+              disabled={loading}
+              aria-label="每页条数"
+              onChange={(event) =>
+                void usePanels.getState().setProjectPage(0, Number(event.target.value))
+              }
+              className="rounded-sm border border-line bg-transparent px-1.5 py-1 font-mono text-2xs text-fg-3 disabled:opacity-50"
+            >
+              {PROJECT_PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {size} / 页
+                </option>
+              ))}
+            </select>
             <Button
               variant="quiet"
               size="sm"
-              disabled={!hasMore}
-              onClick={() => void usePanels.getState().loadMoreProjects()}
+              disabled={loading || atStart}
+              onClick={() => void usePanels.getState().setProjectPage(projectOffset - pageSize)}
             >
-              加载更多
+              上一页
+            </Button>
+            <Button
+              variant="quiet"
+              size="sm"
+              disabled={loading || atEnd}
+              onClick={() => void usePanels.getState().setProjectPage(projectOffset + pageSize)}
+            >
+              下一页
             </Button>
           </div>
         ) : null}

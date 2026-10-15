@@ -1,6 +1,6 @@
 # Lode — AI 驱动的 SRC 漏洞挖掘平台
 
-> 跨平台（Windows / Linux / macOS）。统一入口 `lode.py`。
+> 跨平台（Windows / Linux / macOS）。统一入口 `lode.py`。架构边界见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 快速开始
 
@@ -29,6 +29,7 @@ python lode.py console
 | `python lode.py resume <session_id> --scope scope.json` | 继续上次会话 |
 | `python lode.py progress` | 测试进度总览 |
 | `python lode.py doctor` | 环境检查 |
+| `python lode.py recon --scope S --out-dir O --arl-export dump.json` | 导入 ARL 导出 → 精确 host |
 
 ## Console API
 
@@ -43,7 +44,7 @@ python lode.py console
 | `POST /api/v1/chat/sessions/{id}/turn/stop` | 停止本轮 |
 | `GET /api/v1/jobs` | 持久化任务列表 / 状态 |
 
-## Agent 工具（全部 scope-checked，只发 GET/HEAD）
+## Agent 工具（全部 scope-checked；请求语义决定是否允许安全 POST）
 
 | 工具 | 作用 |
 |------|------|
@@ -75,7 +76,7 @@ deploy/multi-platform.md    多平台部署指南（Windows/Linux/macOS）
 
 ## 安全边界
 
-- 只发 GET/HEAD，scope 内，低频
+- 默认只读、scope 内、低频；明确查询语义的 POST 可通过同一准入门
 - 语义写操作拦截（delete/update/pay/send 等）
 - 发现需证据，不报未验证猜测
 - VPS 部署详见 `docs/security-boundary.md`

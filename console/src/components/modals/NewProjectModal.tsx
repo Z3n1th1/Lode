@@ -24,6 +24,7 @@ const TOGGLES: { key: keyof IntakeToggles; label: string }[] = [
   { key: 'asset_inventory', label: '资产清单' },
   { key: 'subdomain_enum', label: '子域枚举' },
   { key: 'fingerprint_precise', label: '精确指纹' },
+  { key: 'arl_next', label: 'ARL 资产' },
   { key: 'scan_enabled', label: '主动扫描' },
   { key: 'nuclei', label: 'Nuclei 模板' },
   { key: 'tscan', label: 'TScan' },
@@ -329,9 +330,16 @@ export default function NewProjectModal() {
 
         <DialogFooter>
           {scopeResult ? (
-            <Button variant="outline" size="sm" onClick={() => usePanels.getState().setNewProjectOpen(false)}>
-              完成
-            </Button>
+            <>
+              <Button variant="outline" size="sm" onClick={() => usePanels.getState().setNewProjectOpen(false)}>
+                完成
+              </Button>
+              {scopeResult.run ? (
+                <Button variant="primary" size="sm" onClick={() => void usePanels.getState().openIntakeRun()}>
+                  去看运行
+                </Button>
+              ) : null}
+            </>
           ) : scopePreview ? (
             <>
               <Button

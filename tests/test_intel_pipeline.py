@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from intel.models import IntelQuery
+from intel.models import AssetCandidate, IntelQuery
 from intel.providers.crtsh import CrtShProvider
 from intel.providers.cisa_kev import CisaKevProvider
 from intel.providers.feed import FeedProvider
@@ -98,6 +98,37 @@ class IntelPipelineTests(unittest.TestCase):
             self.assertFalse(second.candidates[0].is_new)
             self.assertTrue((Path(tmp) / "runs" / "second" / "candidates.jsonl").is_file())
             self.assertTrue((Path(tmp) / "runs" / "second" / "candidates.csv").is_file())
+
+    def test_duplicate_asset_keeps_all_evidence_refs_across_jsonl_and_csv(self) -> None:
+        class EvidenceProvider:
+            def __init__(self, source: str, evidence_ref: str) -> None:
+                self.id = source
+                self.evidence_ref = evidence_ref
+
+            def collect(self, query, *, timeout, max_items):
+                del query, timeout, max_items
+                return [AssetCandidate(
+                    value="api.example.com", kind="hostname", source=self.id,
+                    confidence=0.8, evidence_ref=self.evidence_ref,
+                )]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = IntelStore(tmp)
+            report = collect(
+                self.query(),
+                [EvidenceProvider("crtsh", "crt.sh:cert-1"),
+                 EvidenceProvider("arl-export", "arl-export:row-7")],
+                store=store,
+                run_id="evidence-roundtrip",
+            )
+            expected = ["crt.sh:cert-1", "arl-export:row-7"]
+            self.assertEqual(expected, report.candidates[0].to_dict()["evidence_refs"])
+            jsonl_item = next(store.iter_candidates("evidence-roundtrip"))
+            self.assertEqual(expected, list(jsonl_item.all_evidence_refs))
+            csv_item = FileProvider(
+                Path(tmp) / "runs" / "evidence-roundtrip" / "candidates.csv"
+            ).collect(self.query(), timeout=1, max_items=10)[0]
+            self.assertEqual(expected, list(csv_item.all_evidence_refs))
 
     def test_file_provider_accepts_json_and_does_not_execute_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

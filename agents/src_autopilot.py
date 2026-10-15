@@ -46,6 +46,8 @@ _HIGH_SIGNAL = {
     "admin", "auth", "oauth", "sso", "user", "users", "profile", "account",
     "order", "orders", "payment", "pay", "upload", "download", "export",
     "internal", "debug", "config", "graphql", "swagger", "openapi", "actuator",
+    "manager", "management", "portal", "workflow", "conductor",
+    "nacos", "druid", "xxl", "heapdump", "runtime", "execute", "exec",
 }
 _MEDIUM_SIGNAL = {
     "api", "apis", "v1", "v2", "v3", "service", "gateway", "query", "search",
@@ -69,6 +71,7 @@ _SOURCE_WEIGHT = {
     # 字符串弱。但它能看到提取器根本不看的 Location 头/错误体,所以还是值一条候选。
     "explorer-route": 12,
     "html": 10,
+    "origin": 8,
     "robots": 8,
     "sitemap": 8,
 }
@@ -80,6 +83,28 @@ _SOURCE_WEIGHT = {
 #: 下一个 extractor 加进来(或者某个 extractor 调个权重)就又翻过去了 —— 实测翻的就是
 #: sourcemap(25) 对 base-join(18)。加成按"半条证据"给,所以小于 medium 信号的 15。
 _RESOLVED_FRAGMENT_BONUS = 6
+_MANAGEMENT_TOKENS = frozenset({
+    "admin", "manager", "management", "manage", "console", "portal",
+    "actuator", "swagger", "openapi", "nacos", "druid",
+})
+_WORKFLOW_TOKENS = frozenset({"workflow", "conductor", "xxl", "job", "scheduler"})
+_EXECUTION_TOKENS = frozenset({
+    "inline", "runtime", "execute", "exec", "command", "shell", "script",
+})
+_SENSITIVE_RUNTIME_TOKENS = frozenset({"heapdump", "env", "secret", "secrets", "config"})
+_ORIGIN_SOURCES = frozenset({"origin-direct", "historical-dns", "host-matrix", "origin"})
+_HIGH_VALUE_HOST_RE = re.compile(
+    r"(?:^|[.-])(?:admin|api|gateway|manager|portal|hweb)(?:[.-]|$)",
+    re.I,
+)
+_ENV_HOST_RE = re.compile(
+    r"(?:^|[.-])(?:test|pre|gray|uat|staging|dev)(?:[.-]|$)",
+    re.I,
+)
+_HIGHRISK_PATH_RE = re.compile(
+    r"/(?:actuator|druid|nacos|workflow|conductor|xxl[-_]?job|graphql|heapdump|jolokia)\b",
+    re.I,
+)
 
 
 def _safe_query(query: str) -> str:
@@ -133,16 +158,57 @@ def _canonical_url(value: Any, scope: SurfaceScope, *, base_url: str = "") -> tu
     return display, reason, probe
 
 
-def _score_candidate(url: str, sources: Iterable[str]) -> int:
+def _risk_signals(url: str, sources: Iterable[str] = ()) -> List[str]:
+    """URL/source-shaped risk hints, not vulnerability findings."""
+    parts = urlsplit(url)
+    blob = f"{parts.hostname or ''} {parts.path} {parts.query}".lower()
+    tokens = {item for item in re.split(r"[^a-z0-9]+", blob) if item}
+    source_names = {str(item).strip().lower() for item in sources}
+    out: List[str] = []
+    if tokens & _MANAGEMENT_TOKENS:
+        out.append("management_surface")
+    if tokens & _WORKFLOW_TOKENS:
+        out.append("workflow_engine")
+    if tokens & _EXECUTION_TOKENS:
+        out.append("execution_surface")
+    if tokens & _SENSITIVE_RUNTIME_TOKENS:
+        out.append("sensitive_runtime")
+    if source_names & _ORIGIN_SOURCES:
+        out.append("orphan_origin_candidate")
+    return out
+
+
+def _score_candidate(url: str, sources: Iterable[str],
+                     objectives: Iterable[str] = ("critical", "high", "rce")) -> int:
     parts = urlsplit(url)
     segments = {item for item in re.split(r"[^a-z0-9]+", parts.path.lower()) if item}
     names = [str(source).lower() for source in sources]
+    wanted = {str(item).strip().lower() for item in objectives}
+    risks = set(_risk_signals(url, names))
     score = 10
     score += max((_SOURCE_WEIGHT.get(name, 5) for name in names), default=0)
     score += _RESOLVED_FRAGMENT_BONUS if "base-join" in names else 0
     score += 35 if segments & _HIGH_SIGNAL else 0
     score += 15 if segments & _MEDIUM_SIGNAL else 0
     score += 10 if parts.query else 0
+    host = (parts.hostname or "").lower()
+    if _HIGH_VALUE_HOST_RE.search(host):
+        score += 18
+    if _ENV_HOST_RE.search(host):
+        score += 8
+    if _HIGHRISK_PATH_RE.search(parts.path or ""):
+        score += 16
+    if "rce" in wanted:
+        if {"workflow_engine", "execution_surface"} <= risks:
+            score += 30
+        elif risks & {"workflow_engine", "execution_surface"}:
+            score += 20
+    if wanted & {"critical", "high", "management"}:
+        score += 15 if "management_surface" in risks else 0
+        score += 10 if "sensitive_runtime" in risks else 0
+    if (wanted & {"critical", "high", "orphan_origin"}
+            and "orphan_origin_candidate" in risks):
+        score += 20
     return min(100, score)
 
 
@@ -209,13 +275,14 @@ def candidate_from_route(value: Any, scope: SurfaceScope, *, base_url: str) -> O
     if canonical is None:
         return None
     display, _reason, probe = canonical
-    priority = _score_candidate(display, ("explorer-route",))
+    priority = _score_candidate(display, ("explorer-route",), scope.priority_objectives)
     return {
         "candidate_id": _candidate_id(display),
         "url": display,
         "probe_url": probe,
         "priority": priority,
         "sources": ["explorer-route"],
+        "risk_signals": _risk_signals(display, ("explorer-route",)),
         "next_phase": _next_phase(priority),
     }
 
@@ -238,6 +305,7 @@ class CandidateRecord:
     first_seen_round: int = 0
     last_seen_round: int = 0
     status: str = "queued"
+    risk_signals: List[str] = field(default_factory=list)
 
     @property
     def candidate_id(self) -> str:
@@ -260,6 +328,7 @@ class CandidateRecord:
             "path": urlsplit(self.url).path or "/",
             "priority": self.score,
             "sources": sorted(self.sources),
+            "risk_signals": list(self.risk_signals),
             "first_seen_round": self.first_seen_round,
             "last_seen_round": self.last_seen_round,
             "status": self.status,
@@ -312,6 +381,9 @@ class SrcAutopilot:
         self.discover_fn = discover_fn
         # 爬虫的请求同样记在这一轮的额度上(见 core.rate_limit.RequestBudget)。
         self.request_budget = request_budget
+        # probe group -> probes sent in the last discovery pass. Kept so the run state can
+        # show what the crawl's fixed cost was made of, not just what it totalled.
+        self._last_probe_spend: Dict[str, int] = {}
         self._now = now_fn or time.time
         self._lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         blackboard_file = Path(blackboard_path or self.state_path.with_name("src-blackboard.json"))
@@ -362,7 +434,18 @@ class SrcAutopilot:
                 return self._summary(state, "max_rounds")
 
             if not incoming and int(state.get("current_round", 0)) == 0:
+                # The crawl and the agent loop share one request budget, so record what
+                # the crawl took before the agent starts. Without this the only visible
+                # number is the total, and a thin agent run (few cycles, few intents)
+                # has no explanation on the page.
+                spent_before = (
+                    self.request_budget.used if self.request_budget is not None else 0
+                )
                 incoming = self._discover_initial(state["targets"])
+                if self.request_budget is not None:
+                    state["crawl_requests"] = self.request_budget.used - spent_before
+                if self._last_probe_spend:
+                    state["probe_spend"] = dict(sorted(self._last_probe_spend.items()))
             elif not incoming:
                 state["status"] = "awaiting_input"
                 state["stop_reason"] = "awaiting_next_surface_result"
@@ -470,6 +553,7 @@ class SrcAutopilot:
 
         discover = self.discover_fn or discover_surface
         payloads: List[Mapping[str, Any]] = []
+        probe_spend: Dict[str, int] = {}
         for target in targets:
             result = discover(self.scope, target, max_scripts=self.max_scripts,
                               budget=self.request_budget)
@@ -477,7 +561,10 @@ class SrcAutopilot:
             payload = surface_to_dict(result) if isinstance(result, SurfaceResult) else result
             if not isinstance(payload, Mapping):
                 raise RuntimeError("src_autopilot_discovery_result_invalid")
+            for group, count in (payload.get("probe_spend") or {}).items():
+                probe_spend[str(group)] = probe_spend.get(str(group), 0) + int(count)
             payloads.append(payload)
+        self._last_probe_spend = probe_spend
         return payloads
 
     def _audit_crawl(self, result: Any) -> None:
@@ -545,6 +632,7 @@ class SrcAutopilot:
                 first_seen_round=int(raw.get("first_seen_round", 0)),
                 last_seen_round=int(raw.get("last_seen_round", 0)),
                 status=str(raw.get("status", "queued")),
+                risk_signals=[str(item) for item in (raw.get("risk_signals") or ())[:12]],
             )
             samples = raw.get("variant_samples")
             if isinstance(samples, list):
@@ -564,6 +652,18 @@ class SrcAutopilot:
                 blocked_count += 1
                 continue
             values: List[tuple[Any, str]] = []
+            # A 2xx origin with nothing extracted is still a candidate: SPA shells,
+            # gzip-misdecoded pages, and login walls all used to leave the blackboard
+            # empty, so the agent completed with zero intents. Extracted paths still
+            # outrank it via _SOURCE_WEIGHT.
+            origin = str(payload.get("final_url") or payload.get("target")
+                         or payload.get("base_url") or "").strip()
+            try:
+                origin_status = int(payload.get("status") or 0)
+            except (TypeError, ValueError):
+                origin_status = 0
+            if origin and 200 <= origin_status < 400:
+                values.append((origin, "origin"))
             for value in payload.get("paths") or ():
                 values.append((value, "surface"))
             for value in payload.get("api_urls") or ():
@@ -582,7 +682,11 @@ class SrcAutopilot:
                 record = records.get(key)
                 if record is not None:
                     record.sources.update(sources)
-                    record.score = max(record.score, _score_candidate(clean_url, record.sources))
+                    record.score = max(
+                        record.score,
+                        _score_candidate(clean_url, record.sources, self.scope.priority_objectives),
+                    )
+                    record.risk_signals = _risk_signals(clean_url, record.sources)
                     record.last_seen_round = round_number
                     if not record.probe_url:
                         record.probe_url = live_url
@@ -593,11 +697,12 @@ class SrcAutopilot:
                 new_count += 1
                 records[key] = CandidateRecord(
                     url=clean_url,
-                    score=_score_candidate(clean_url, sources),
+                    score=_score_candidate(clean_url, sources, self.scope.priority_objectives),
                     probe_url=live_url,
                     template_id=template_id,
                     variant_urls=[clean_url],
                     sources=sources,
+                    risk_signals=_risk_signals(clean_url, sources),
                     first_seen_round=round_number,
                     last_seen_round=round_number,
                 )

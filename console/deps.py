@@ -96,7 +96,7 @@ def _bounded_profiles(value: Any) -> List[str]:
 _INTAKE_TOGGLE_KEYS = frozenset({
     "scan_enabled", "fingerprint_precise", "nuclei", "tscan",
     "asset_inventory", "subdomain_enum", "intel", "poc_research",
-    "proxy_route", "network_gate", "edge_human_gate",
+    "proxy_route", "network_gate", "edge_human_gate", "arl_next",
 })
 _INTAKE_BRUTE_FLAGS = frozenset({"enabled", "path", "port", "password", "username", "sms", "subdomain"})
 

@@ -101,6 +101,12 @@ python lode.py auto https://www.zomato.com --scope scope-eternal.json --out-dir 
 python lode.py agent ./out/src-blackboard.json --scope scope-eternal.json --max-cycles 20
 ```
 
+### 导入 ARL 导出（精确 host）
+```bash
+python lode.py recon --scope scope.json --out-dir ./out-recon --arl-export arl-task.json
+```
+CDN 丢掉，越界丢掉。加 `--fingerprint` 才对 in-scope host 发管理面 GET 指纹。不爆破、不 Nuclei。
+
 ### 查看进度
 ```bash
 python lode.py progress --state-dir ./lode-state
@@ -225,4 +231,4 @@ projects/
 可以，但注意安全边界。执行机不要放主控源码/私钥。详见 `docs/security-boundary.md`。
 
 **Q: 会不会改目标数据？**
-不会。只发 GET/HEAD，语义写操作（delete/update/pay/send）在发送前拦截。无 shell 工具。
+不会。删除、修改、上传、爆破、凭据使用、数据外带和全量扫描不会由复测或普通分析自动触发。明确查询语义的 POST 可用于 SRC 复测，但仍经过 scope、请求体、语义准入、预算、限速和审计；删除/清空/截断/移除等语义无论 HTTP 方法都硬拦。无 shell 工具。

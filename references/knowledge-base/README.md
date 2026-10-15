@@ -32,6 +32,7 @@
 | `打穿短表.md` | 挖洞手法索引（一行/指针；正文仍在各模块） |
 | `401-403-bypass.md` | **禁开磨登录 HTML**（已收成一行）；业务 API 401 现场自己打 |
 | `api-gateway-test.md` | API 网关 |
+| `arl-recon.md` | 资产测绘：ARL 导出导入、指纹 GET、CDN 过滤；产出精确 host |
 | `agent-tool-exec-test.md` | 对话口工具真执行（不是越狱、不是云 IDE RPC） |
 | `android-broadcast-leak-test.md` | 广播当数据出口：隐式/粘性广播带 token·cookie；priority 只对有序/粘性广播论先后 |
 | `android-intent-redirect-test.md` | 嵌套 Intent 绕过 `exported=false`；外部 extra 决定请求发往哪台服务器（权限重委托） |
@@ -39,6 +40,7 @@
 | `anon-id-chain-test.md` | 匿名总线吐 id → 详情不校验归属；坐席/管理端 JS 里的后台接口 |
 | `authbypass-test.md` | 认证绕过（未登录改密/IDaaS + 短表指针；英文字典已砍） |
 | `cache-poisoning-test.md` | 缓存投毒/欺骗（原有+补充） |
+| `case-index.md` | 以前打过的形状对照表。认出面相再拉对应卡，用当前站差分 |
 | `clickjacking-test.md` | 缺头不写（已收成一行） |
 | `client-trust-response-test.md` | 授权结论由响应字段决定：改校验回包即放行；密码由另一个响应下发 |
 | `cloud-ide-codex-rce-chain.md` | 云 IDE/Codex 系：弱口令→RPC RCE→集群/API Key 链（短表有指针） |
@@ -80,6 +82,7 @@
 | `prototype-pollution-test.md` | 专题知识（hack-skills 导入或融合） |
 | `race-condition-test.md` | 竞态（原有+补充） |
 | `recon-methodology.md` | 侦察方法论 |
+| `sandbox-escape-test.md` | 工作流代码节点 / vm2 external / 共享 PYTHONPATH sitecustomize |
 | `signing-oracle-test.md` | 签名预言机：客户端提交完整待签串、服务端拿生产密钥代签；含 403/206 正负控与 IAM 收敛 |
 | `ssrf-test.md` | SSRF（IMDS 路径差 / GOPROXY / 对象存储回源） |
 | `subdomain-takeover-test.md` | 专题知识（hack-skills 导入或融合） |
@@ -90,10 +93,11 @@
 | `xss-test.md` | XSS（中文开场 + 冷门事件 + XSS→RCE / 自定义协议） |
 | `xxe-test.md` | 专题知识（hack-skills 导入或融合） |
 
-**合计：60 个知识文件**（不含本 README）。其中 12 张是从 SRC 报告集蒸出来的
+**合计：63 个知识文件**（不含本 README）。其中 14 张是从 SRC 报告集蒸出来的
 （`signing-oracle-test` / `anon-id-chain-test` / `js-context-xss-bypass-test` /
 `no-param-target-test` / `android-provider-test` / `android-broadcast-leak-test` /
 `android-intent-redirect-test` / `orderby-sqli-test` / `orphan-origin-test` /
-`forwardable-ticket-test` / `miniprogram-crypto-test` / `client-trust-response-test`）
-—— 只留打法，不带客户名。SRC 报告版式不在本库：见
+`forwardable-ticket-test` / `miniprogram-crypto-test` / `client-trust-response-test` /
+`sandbox-escape-test` / `case-index`）
+—— 只留打法，不带客户名。信息收集另有 `arl-recon`（ARL-Friend 蒸馏）。SRC 报告版式不在本库：见
 `~/.grok/rules/vuln-report-format.md`。定级只认 format，本库不定级。

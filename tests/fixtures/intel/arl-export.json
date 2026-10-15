@@ -1,0 +1,10 @@
+{
+  "data": {
+    "items": [
+      {"site": "https://nacos.example.com/nacos/", "title": "Nacos", "http_status": 200},
+      {"domain": "api.example.com"},
+      {"site": "https://img.alicdn.com/static/foo.png", "title": "cdn"},
+      {"site": "https://evil.other.net/admin", "title": "foreign"}
+    ]
+  }
+}

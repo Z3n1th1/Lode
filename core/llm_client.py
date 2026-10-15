@@ -241,6 +241,7 @@ def run_tool_loop(
     complete_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     on_tool_call: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     on_tool_result: Optional[Callable[[str, Dict[str, Any], str], None]] = None,
+    stop_if: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
 ) -> Dict[str, Any]:
     """OpenAI function-calling loop.
 
@@ -248,7 +249,8 @@ def run_tool_loop(
     the final assistant text; ``error`` is set (with ``text=""``) when an LLM
     call failed. ``complete_fn`` is the injectable completion seam (defaults to
     :func:`complete_messages`); it is called as ``complete_fn(messages,
-    tools=..., timeout=...)``.
+    tools=..., timeout=...)``. ``stop_if`` can terminate immediately after a
+    dispatched tool result, without spending another model round.
     """
     complete = complete_fn or complete_messages
     working: List[Dict[str, Any]] = list(messages)
@@ -277,7 +279,21 @@ def run_tool_loop(
                 args = {}
             if on_tool_call is not None:
                 on_tool_call(name, args)
-            result = dispatch(name, args)
+            # Command judgment is the first gate for Bash / PowerShell / cmd:
+            # record, regex-match the complete command, intercept on hit, never
+            # call a model. Query / INSERT-shaped calls are not this gate.
+            blocked = None
+            try:
+                from core.command_review import intercept_tool_call
+                blocked = intercept_tool_call(name, args)
+            except Exception:  # noqa: BLE001 - a broken gate must fail closed for shell tools
+                lowered = str(name or "").strip().lower()
+                if lowered in {
+                    "run_terminal_cmd", "run_terminal_command", "bash", "shell",
+                    "powershell", "pwsh", "cmd",
+                }:
+                    blocked = "command_review intercepted: gate_error (fail closed)"
+            result = blocked if blocked is not None else dispatch(name, args)
             if on_tool_result is not None:
                 on_tool_result(name, args, result)
             working.append({
@@ -285,6 +301,9 @@ def run_tool_loop(
                 "tool_call_id": str(call.get("id", "")),
                 "content": str(result)[:8000],
             })
+            if stop_if is not None and stop_if(name, args, str(result)):
+                return {"text": "", "messages": working,
+                        "rounds": round_index + 1, "error": "", "stopped": True}
 
     # Tool rounds exhausted — ask once more for a summary (no tools).
     working.append({"role": "user", "content": "Summarize what you found so far."})

@@ -91,6 +91,31 @@ class SessionGuidanceRequest(BaseModel):
     guidance: str
 
 
+class FindingRetestRequest(BaseModel):
+    """Start one bounded retest request from the finding panel."""
+
+    notes: str = ""
+    session_id: str = ""
+    mode: str = "automatic"
+
+
+class FindingRetestResultRequest(BaseModel):
+    verdict: str
+    summary: str
+    evidence: str
+    checks: Dict[str, Any] = {}
+
+
+class FindingReportRequest(BaseModel):
+    report: str
+    expected_digest: str
+
+
+class FindingRetestBatchRequest(BaseModel):
+    finding_ids: List[str] = []
+    notes: str = ""
+
+
 class ModelActiveRequest(BaseModel):
     name: str
 
@@ -113,6 +138,8 @@ class LlmSettingsRequest(BaseModel):
     providers: List[LlmProviderInput] = []
     # role -> provider name substring ("" = let the pool fail over)
     tiers: Dict[str, str] = {}
+    # role -> provider | pi | grok | codex | claude. None = keep stored engines.
+    engines: Optional[Dict[str, str]] = None
 
 
 class LlmTestRequest(BaseModel):

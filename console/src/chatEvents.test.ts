@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { foldSubtasks, groupToolRuns, isSubtaskEvent, lastSeq, pendingApprovals } from './chatEvents'
+import { foldSubtasks, groupToolRuns, isSubtaskEvent, lastSeq, LEDGER_SUBTASK_KINDS, pendingApprovals } from './chatEvents'
 import type { ChatEvent } from './api'
 
 function ev(seq: number, kind: string, extra: Partial<ChatEvent> = {}): ChatEvent {
@@ -13,6 +13,14 @@ describe('isSubtaskEvent', () => {
     expect(isSubtaskEvent(ev(1, 'subtask_progress'))).toBe(true)
     expect(isSubtaskEvent(ev(1, 'subtask_finished'))).toBe(true)
     expect(isSubtaskEvent(ev(1, 'assistant_message'))).toBe(false)
+  })
+})
+
+describe('LEDGER_SUBTASK_KINDS', () => {
+  it('renders engagement host runs as their own card', () => {
+    expect(LEDGER_SUBTASK_KINDS.has('engagement_host_run')).toBe(true)
+    expect(LEDGER_SUBTASK_KINDS.has('src_loop')).toBe(true)
+    expect(LEDGER_SUBTASK_KINDS.has('target_run')).toBe(true)
   })
 })
 

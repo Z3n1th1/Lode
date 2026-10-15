@@ -100,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             continue
     try:
+        def prepare_delivery(report) -> None:  # type: ignore[no-untyped-def]
+            from .feishu_sink import queue_report
+            queue_report(report, program=query.program, store_root=args.out_dir,
+                         min_score=args.feishu_min_score)
+
         def emit(report) -> None:  # type: ignore[no-untyped-def]
             print(json.dumps({
                 "schema": "IntelWatchRun/v1",
@@ -132,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             max_consecutive_errors=args.max_consecutive_errors,
             stop_event=stop_event,
             registry_path=args.registry,
+            before_persist=prepare_delivery if args.feishu and not args.feishu_dry_run else None,
             on_report=emit,
         )
     except TimeoutError as exc:

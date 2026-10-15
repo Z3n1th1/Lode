@@ -26,7 +26,7 @@ $py = 'C:\Users\Z3n1th\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 
 ### 本机离线演示
 
-如果本机的代理/TUN 将公网 DNS 映射到 `198.18.0.0/15`，网络层会按设计拒绝这些地址；不要通过放宽私网校验来绕过。可以先用内置演示候选验证分类、排序、持久化和飞书 dry-run：
+如果本机的代理/TUN 将公网 DNS 映射到 `198.18.0.0/15`，网络层会通过固定的 HTTPS DNS 端点解析真实公网 IP，并固定连接到校验后的地址、保留原域名 TLS 验证；不会直接放行 Fake-IP 或私网。解析或网络不可用时，可以先用内置演示候选验证分类、排序、持久化和飞书 dry-run：
 
 ```powershell
 .\run-radar.ps1 -Mode collect -NoNetwork `
@@ -43,6 +43,21 @@ $py = 'C:\Users\Z3n1th\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 - `runs/<run_id>/candidates.csv`：同一批候选的 Excel/脚本友好导出；
 - `runs/<run_id>/run.json`：各 provider 的 `ok/error`、越界数量、重复合并数量；
 - `history.json`：只保存候选 key，用于下一轮标记 `is_new`。
+
+## ARL / ARL-Friend 导出
+
+`E:\Study\SRC\v2.tar.gz` 是 ARL-Friend 侦察发行包，不是报告包。Lode 不跑它的 Mongo / 爆破 / Nuclei / NPoC。蒸进来的是：导出导入、CDN 后缀过滤、一档安全 GET 指纹（Nacos / XXL-JOB / Harbor / Actuator health / Grafana / WebLogic / 泛微）、以及已经拿到的 HTML/JS 上的 WIH 形状标签。重复资产会保留多个 `evidence_refs`，自定义 200 错误页会经过一次随机路径基线过滤。
+
+把任务导出交给 `recon`，产出精确 host，再写成空 `allowed_domains` 的 `allowed_hosts` 开猎：
+
+```powershell
+python lode.py recon `
+  --scope .\scope.json `
+  --out-dir .\out-recon `
+  --arl-export .\arl-task.json
+```
+
+`--fingerprint` 才对 in-scope host 发这档安全 GET。CLI 的 `scan`/`auto` 可用 `--fingerprint-precise` 打开同一组探针。Console 新建项目开「精确指纹」或「ARL 资产」时，表面发现会加这组探针；只有「ARL 资产」会额外激活 `arl-recon` 打法卡。探针不读取用户列表、环境变量或仓库目录。默认猎场不加，避免烧预算。
 
 离线回放或没有网络时：
 
@@ -76,7 +91,7 @@ $py = 'C:\Users\Z3n1th\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 
 ## 飞书摘要
 
-使用 `watch --feishu` 时，采集完成后只筛选新增且达到阈值的候选，发送标题、URL/标识、score、来源和标签摘要。它不发送文章全文、请求响应、凭据、cookie、token 或敏感证据；默认还会经过已有节流器。`--feishu-dry-run` 只打印将要发送的 payload，不发网络请求。
+使用 `watch --feishu` 时，将新增且达到阈值的候选持久化到 `feishu-outbox.json`，发送标题、URL/标识、score、来源和标签摘要。失败、节流或超过单轮条数的候选保留待下轮补发，成功后确认出队；节流窗口只在成功后更新。它不发送文章全文、请求响应、凭据、cookie、token 或敏感证据。`--feishu-dry-run` 只打印将要发送的 payload，不发网络请求、不消费待发送队列。
 
 环境变量仍由现有通知适配器读取：`FEISHU_WEBHOOK` 和可选的 `FEISHU_SECRET`。飞书入站 bot 的白名单、人工门和任务审批继续由 `notify/feishu_reply_consumer.py` 负责，情报 watcher 的摘要消息不能直接触发扫描。
 

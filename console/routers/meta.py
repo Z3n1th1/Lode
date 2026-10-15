@@ -72,8 +72,11 @@ def build(ctx: Ctx) -> APIRouter:
         return JSONResponse(content=ctx.control_plane.snapshot(), headers={"Cache-Control": "no-store"})
 
     @router.get("/api/v1/src-autopilot")
-    def src_autopilot(request: Request) -> JSONResponse:
+    def src_autopilot(request: Request, session_id: str = "") -> JSONResponse:
         _require_session(request)
-        return JSONResponse(content=ctx.control_plane.src_autopilot(), headers=_NOSTORE)
+        return JSONResponse(
+            content=ctx.control_plane.src_autopilot(session_id=session_id),
+            headers=_NOSTORE,
+        )
 
     return router

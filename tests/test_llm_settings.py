@@ -17,6 +17,9 @@ from core import llm_settings
 _MANAGED_ENV = (
     "LLM_PROVIDERS", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
     "SRC_REASONER_PREFER", "SRC_EXPLORER_PREFER", "LLM_ACTIVE_PROVIDER_FILE",
+    "LODE_REASONER_ENGINE", "LODE_EXPLORER_ENGINE",
+    "LODE_HUNTER_ENGINE", "LODE_VERIFIER_ENGINE", "LODE_SPECIALIST_ENGINE",
+    "LODE_CLI_FALLBACK_PROVIDER",
 )
 
 
@@ -79,6 +82,11 @@ class PersistenceTests(_SettingsTestCase):
             self.assertEqual("smart", doc["providers"][0]["name"])
             reread = llm_settings.read_settings(path)
             self.assertEqual(["smart"], [p["name"] for p in reread["providers"]])
+            self.assertEqual("provider", reread["engines"]["reasoner"])
+            self.assertEqual("provider", reread["engines"]["explorer"])
+            self.assertEqual("provider", reread["engines"]["hunter"])
+            self.assertEqual("grok", reread["engines"]["verifier"])
+            self.assertEqual("codex", reread["engines"]["specialist"])
 
     def test_keyless_update_keeps_the_stored_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +116,62 @@ class PersistenceTests(_SettingsTestCase):
                 {}, path=path, stored=stored,
             )
             self.assertEqual("", doc["providers"][0]["api_key"])
+
+    def test_omitted_explorer_follows_the_hunter(self) -> None:
+        """Switching 主力挖掘 is one Worker field; explorer copies, planner stays cheap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm_settings.json"
+            doc = llm_settings.write_settings(
+                [{"name": "smart", "base_url": "https://a.test", "model": "r1", "api_key": "sk-a"}],
+                {},
+                {"hunter": "grok"},
+                path=path,
+            )
+            self.assertEqual("grok", doc["engines"]["hunter"])
+            self.assertEqual("provider", doc["engines"]["reasoner"])
+            self.assertEqual("grok", doc["engines"]["explorer"])
+            explicit = llm_settings.write_settings(
+                [{"name": "smart", "base_url": "https://a.test", "model": "r1", "api_key": "sk-a"}],
+                {},
+                {"hunter": "grok", "reasoner": "codex", "explorer": "provider"},
+                path=path,
+            )
+            self.assertEqual("codex", explicit["engines"]["reasoner"])
+            self.assertEqual("provider", explicit["engines"]["explorer"])
+            self.assertEqual("grok", explicit["engines"]["hunter"])
+
+    def test_engines_round_trip_and_unknown_values_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm_settings.json"
+            doc = llm_settings.write_settings(
+                [{"name": "smart", "base_url": "https://a.test", "model": "r1", "api_key": "sk-a"}],
+                {"reasoner": "smart"},
+                {"reasoner": "codex", "explorer": "nope"},
+                path=path,
+            )
+            self.assertEqual("codex", doc["engines"]["reasoner"])
+            self.assertEqual("provider", doc["engines"]["explorer"])
+            masked = llm_settings.mask_settings(doc)
+            self.assertEqual("codex", masked["engines"]["reasoner"])
+            self.assertNotIn("api_key", json.dumps(masked))
+
+    def test_omitting_engines_keeps_the_stored_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm_settings.json"
+            stored = llm_settings.write_settings(
+                [{"name": "smart", "base_url": "https://a.test", "model": "r1", "api_key": "sk-a"}],
+                {},
+                {"reasoner": "pi", "explorer": "provider"},
+                path=path,
+            )
+            doc = llm_settings.write_settings(
+                [{"name": "smart", "base_url": "https://a.test", "model": "r2", "api_key": ""}],
+                {},
+                path=path,
+                stored=stored,
+            )
+            self.assertEqual("pi", doc["engines"]["reasoner"])
+            self.assertEqual("r2", doc["providers"][0]["model"])
 
     def test_corrupt_file_reads_as_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +228,31 @@ class EnvProjectionTests(_SettingsTestCase):
         self.assertIn("smart|https://smart.test|sk-smart|max", os.environ["LLM_PROVIDERS"])
         self.assertEqual("smart", os.environ["SRC_REASONER_PREFER"])
         self.assertEqual("cheap", os.environ["SRC_EXPLORER_PREFER"])
+        self.assertEqual("provider", os.environ["LODE_REASONER_ENGINE"])
+        self.assertEqual("provider", os.environ["LODE_EXPLORER_ENGINE"])
+        self.assertEqual("provider", os.environ["LODE_HUNTER_ENGINE"])
+        self.assertEqual("grok", os.environ["LODE_VERIFIER_ENGINE"])
+        self.assertEqual("codex", os.environ["LODE_SPECIALIST_ENGINE"])
+
+    def test_engine_choices_are_projected(self) -> None:
+        doc = self._doc()
+        doc["engines"] = {"reasoner": "codex", "explorer": "pi"}
+        applied = llm_settings.apply_to_environ(doc, force=True)
+        self.assertIn("LODE_REASONER_ENGINE", applied)
+        self.assertEqual("codex", os.environ["LODE_REASONER_ENGINE"])
+        self.assertEqual("pi", os.environ["LODE_EXPLORER_ENGINE"])
+
+    def test_grok_only_disables_http_fallback(self) -> None:
+        doc = self._doc()
+        doc["engines"] = {
+            "hunter": "grok", "reasoner": "grok", "explorer": "grok",
+            "verifier": "grok", "specialist": "grok",
+        }
+        applied = llm_settings.apply_to_environ(doc, force=True)
+        self.assertIn("LODE_CLI_FALLBACK_PROVIDER", applied)
+        self.assertEqual("0", os.environ["LODE_CLI_FALLBACK_PROVIDER"])
+        self.assertEqual("grok", os.environ["LODE_HUNTER_ENGINE"])
+        self.assertEqual("grok", os.environ["LODE_REASONER_ENGINE"])
 
     def test_default_provider_follows_the_reasoner_tier(self) -> None:
         doc = self._doc()

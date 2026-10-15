@@ -48,6 +48,12 @@ ROUTE_CONTRACT = frozenset({
     ("POST", "/api/v1/llm/test"),
     # findings / report
     ("GET", "/api/v1/findings"),
+    ("GET", "/api/v1/findings/{finding_id}"),
+    ("POST", "/api/v1/findings/{finding_id}/report"),
+    ("GET", "/api/v1/findings/{finding_id}/retests"),
+    ("POST", "/api/v1/findings/{finding_id}/retests"),
+    ("POST", "/api/v1/findings/{finding_id}/retests/{retest_id}/result"),
+    ("POST", "/api/v1/findings/retests/batch"),
     ("GET", "/api/v1/report"),
     # projects / tasks / conversation
     ("GET", "/api/v1/proxy"),

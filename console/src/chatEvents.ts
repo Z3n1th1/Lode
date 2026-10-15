@@ -6,6 +6,19 @@ import type { ChatEvent } from './api'
 
 export const SUBTASK_EVENT_KINDS = ['subtask_started', 'subtask_progress', 'subtask_finished'] as const
 
+/** 只有这些 kind 的子任务在对话账本里单独成行。
+ *
+ *  新加一种任务 kind 时要同步这里,否则那一整轮 `subtask_started` 什么都不渲染 ——
+ *  `subtask_progress` / `subtask_finished` 是折进节点里的,不会自己成行。
+ *  `target_run` = 从「新建项目」的确认单开出来的那一轮。
+ *  `engagement_host_run` = 授权文档按主机拆开的那一台。 */
+export const LEDGER_SUBTASK_KINDS = new Set([
+  'src_loop',
+  'surface_scan',
+  'target_run',
+  'engagement_host_run'
+])
+
 export interface SubtaskUpdate {
   phase: string
   at: number
@@ -132,7 +145,7 @@ function nextSignificant(events: ChatEvent[], from: number): number {
 
 /**
  * 把事件序列折成渲染项:连续同工具的调用合成一个 run,其余原样。
- * `subtask_started` 不允许被跳过 —— 它可能自己就占一行(见 Ledger 的 SUBTASK_KINDS),
+ * `subtask_started` 不允许被跳过 —— 它可能自己就占一行(见 LEDGER_SUBTASK_KINDS),
  * 所以它天然打断一个 run。
  */
 export function groupToolRuns(events: ChatEvent[]): LedgerItem[] {

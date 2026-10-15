@@ -25,8 +25,10 @@ import hmac
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.request
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +37,7 @@ _CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
 from confidentiality import external_target_label, sanitize_external_text
+from file_lock import AdvisoryFileLock, replace_with_retry
 
 LEVELS = ("P0", "P1", "P2")
 # 同一 (target,title 前缀) 在该窗口内只发一次（P0 豁免节流除外，由调用方决定）
@@ -84,22 +87,43 @@ class Throttler:
         self.window = window
 
     def allow(self, event: NotifyEvent) -> bool:
+        """Check without consuming the window; only mark successful sends."""
         if event.level == "P0":
             return True
         key = f"{event.target}|{event.title[:32]}"
-        state = {}
-        if self.state_path.is_file():
-            try:
-                state = json.loads(self.state_path.read_text(encoding="utf-8"))
-            except Exception:
-                state = {}
+        state = self._read()
         last = float(state.get(key) or 0)
-        if time.time() - last < self.window:
-            return False
+        return time.time() - last >= self.window
+
+    def _read(self) -> dict:
+        if self.state_path.is_symlink():
+            raise ValueError("notification_state_symlink_rejected")
+        if not self.state_path.exists():
+            return {}
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("notification_state_invalid")
+        return state
+
+    def lock(self) -> AdvisoryFileLock:
+        path = self.state_path.with_name(self.state_path.name + ".lock")
+        if path.is_symlink():
+            raise ValueError("notification_state_symlink_rejected")
+        return AdvisoryFileLock(path, timeout_seconds=30)
+
+    def mark_sent(self, event: NotifyEvent) -> None:
+        if event.level == "P0":
+            return
+        state = self._read()
+        key = f"{event.target}|{event.title[:32]}"
         state[key] = time.time()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-        return True
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False,
+                                         dir=self.state_path.parent, prefix=".notify-", suffix=".tmp") as staged:
+            json.dump(state, staged, ensure_ascii=False)
+            staged.flush()
+            os.fsync(staged.fileno())
+        replace_with_retry(staged.name, self.state_path)
 
 
 def send(webhook: str, payload: dict, timeout: int = 10) -> tuple[bool, str]:
@@ -107,11 +131,17 @@ def send(webhook: str, payload: dict, timeout: int = 10) -> tuple[bool, str]:
     req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            ok = '"code":0' in body or '"StatusCode":0' in body
-            return ok, body[:300]
+            raw = resp.read(65537)
+            if len(raw) > 65536:
+                return False, "feishu_response_too_large"
+            body = raw.decode("utf-8")
+            response = json.loads(body)
+            if not isinstance(response, dict):
+                return False, "feishu_response_invalid"
+            code = response.get("code", response.get("StatusCode"))
+            return type(code) is int and code == 0, body[:300]
     except Exception as exc:  # 通知失败不阻断主流程
-        return False, str(exc)
+        return False, f"feishu_transport_error:{type(exc).__name__}"
 
 
 def notify(event: NotifyEvent, *, webhook: str = "", secret: str = "",
@@ -120,15 +150,21 @@ def notify(event: NotifyEvent, *, webhook: str = "", secret: str = "",
     secret = secret or os.environ.get("FEISHU_SECRET", "")
     if event.level not in LEVELS:
         return {"ok": False, "error": f"bad_level:{event.level}"}
-    if throttler and not throttler.allow(event):
-        return {"ok": True, "suppressed": "throttled"}
     payload = build_payload(event, secret)
     if dry_run:
         return {"ok": True, "dry_run": True, "payload": payload}
     if not webhook:
         return {"ok": False, "error": "FEISHU_WEBHOOK 未配置（设为 env 或参数传入）"}
-    ok, detail = send(webhook, payload)
-    return {"ok": ok, "detail": detail}
+    try:
+        with throttler.lock() if throttler else nullcontext():
+            if throttler and not throttler.allow(event):
+                return {"ok": True, "suppressed": "throttled"}
+            ok, detail = send(webhook, payload)
+            if ok and throttler:
+                throttler.mark_sent(event)
+            return {"ok": ok, "detail": detail}
+    except Exception as exc:
+        return {"ok": False, "error": f"notification_state_error:{type(exc).__name__}"}
 
 
 def _self_test() -> int:
@@ -143,6 +179,8 @@ def _self_test() -> int:
         th = Throttler(Path(tmp) / "state.json", window=60)
         p1_ev = NotifyEvent(level="P1", title="阶段收口", target="t1")
         assert th.allow(p1_ev) is True
+        assert th.allow(p1_ev) is True  # 检查不消费窗口
+        th.mark_sent(p1_ev)
         assert th.allow(p1_ev) is False  # 窗口内被节流
         assert th.allow(ev) is True      # P0 不节流
     out = notify(ev, dry_run=True)

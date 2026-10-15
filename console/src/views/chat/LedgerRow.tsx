@@ -36,6 +36,7 @@ const SUBTASK_LABEL: Record<string, string> = {
   src_loop: '挖洞',
   surface_scan: '攻击面侦察',
   target_run: '确认单运行',
+  engagement_host_run: '授权主机',
   chat_turn: '对话'
 }
 

@@ -31,11 +31,27 @@ MAX_PROVIDERS = 12
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-flash"
 TIER_ROLES = ("reasoner", "explorer")
+ENGINE_ROLES = ("hunter", "reasoner", "explorer", "verifier", "specialist")
+ENGINE_CHOICES = ("provider", "pi", "grok", "codex", "claude")
+ENGINE_DEFAULTS = {
+    "hunter": "provider",
+    "reasoner": "provider",
+    "explorer": "provider",
+    "verifier": "grok",
+    "specialist": "codex",
+}
 
 # 这些 env var 由本模块负责投影(供 core.llm_pool / core.llm_client / agents 消费)。
 PROVIDERS_ENV = "LLM_PROVIDERS"
 LEGACY_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
 PREFER_ENV = {"reasoner": "SRC_REASONER_PREFER", "explorer": "SRC_EXPLORER_PREFER"}
+ENGINE_ENV = {
+    "hunter": "LODE_HUNTER_ENGINE",
+    "reasoner": "LODE_REASONER_ENGINE",
+    "explorer": "LODE_EXPLORER_ENGINE",
+    "verifier": "LODE_VERIFIER_ENGINE",
+    "specialist": "LODE_SPECIALIST_ENGINE",
+}
 ACTIVE_FILE_ENV = "LLM_ACTIVE_PROVIDER_FILE"
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
@@ -61,7 +77,13 @@ def _text(value: Any, limit: int = 200) -> str:
 
 
 def _empty() -> Dict[str, Any]:
-    return {"schema": SCHEMA, "updated_at": 0.0, "providers": [], "tiers": {"reasoner": "", "explorer": ""}}
+    return {
+        "schema": SCHEMA,
+        "updated_at": 0.0,
+        "providers": [],
+        "tiers": {"reasoner": "", "explorer": ""},
+        "engines": dict(ENGINE_DEFAULTS),
+    }
 
 
 def _has_delimiter(value: str) -> bool:
@@ -133,6 +155,27 @@ def normalize_tiers(tiers: Any) -> Dict[str, str]:
     return out
 
 
+def normalize_engines(engines: Any) -> Dict[str, str]:
+    """Normalize role engine choices; unknown values fail closed to the role default.
+
+    Explorer (Worker) follows hunter when the payload omitted it: switching 主力
+    (Grok 订阅 vs ChatGPT HTTP) is one Worker field. Planner (reasoner) stays
+    on the cheap HTTP default unless explicitly set. An explicit explorer value,
+    including ``provider``, is left alone.
+    """
+    source = engines if isinstance(engines, Mapping) else {}
+    out: Dict[str, str] = {}
+    for role in ENGINE_ROLES:
+        raw = _text(source.get(role), 32).lower()
+        if raw in ENGINE_CHOICES:
+            out[role] = raw
+        elif role == "explorer" and "explorer" not in source:
+            out[role] = out.get("hunter") or ENGINE_DEFAULTS["hunter"]
+        else:
+            out[role] = ENGINE_DEFAULTS[role]
+    return out
+
+
 def read_settings(path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Tolerant read; a missing/corrupt/unreadable file yields empty settings."""
     target = Path(path) if path else settings_path()
@@ -152,12 +195,14 @@ def read_settings(path: Optional[str | Path] = None) -> Dict[str, Any]:
         "updated_at": float(doc.get("updated_at") or 0.0),
         "providers": normalized["providers"],
         "tiers": normalize_tiers(doc.get("tiers")),
+        "engines": normalize_engines(doc.get("engines")),
     }
 
 
 def write_settings(
     providers: Any,
     tiers: Any = None,
+    engines: Any = None,
     *,
     path: Optional[str | Path] = None,
     stored: Optional[Mapping[str, Any]] = None,
@@ -166,11 +211,14 @@ def write_settings(
     normalized = normalize_providers(providers, stored=stored)
     if normalized["errors"]:
         raise ValueError(";".join(normalized["errors"]))
+    if engines is None:
+        engines = (stored or {}).get("engines")
     doc = {
         "schema": SCHEMA,
         "updated_at": time.time(),
         "providers": normalized["providers"],
         "tiers": normalize_tiers(tiers),
+        "engines": normalize_engines(engines),
     }
     target = Path(path) if path else settings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +234,7 @@ def mask_settings(doc: Mapping[str, Any]) -> Dict[str, Any]:
         "schema": SCHEMA,
         "updated_at": float(doc.get("updated_at") or 0.0),
         "tiers": dict(doc.get("tiers") or {}),
+        "engines": normalize_engines(doc.get("engines")),
         "providers": [
             {
                 "name": _text(p.get("name"), 64),
@@ -248,6 +297,12 @@ def apply_to_environ(
         value = str(tiers.get(role) or "").strip()
         if value:
             values[env_name] = value
+    engines = normalize_engines(doc.get("engines"))
+    for role, env_name in ENGINE_ENV.items():
+        values[env_name] = engines[role]
+    # No HTTP provider in the swarm: do not fall back to a spent DeepSeek key.
+    if all(engines.get(role) != "provider" for role in ENGINE_ROLES):
+        values["LODE_CLI_FALLBACK_PROVIDER"] = "0"
     if state_dir and not os.environ.get(ACTIVE_FILE_ENV, "").strip():
         # 让 header 的"切换当前模型"与应用内的 provider 池指向同一个文件。
         values[ACTIVE_FILE_ENV] = str(Path(state_dir) / "model_active_provider.json")
@@ -284,9 +339,13 @@ __all__ = [
     "PROVIDERS_ENV",
     "LEGACY_KEYS",
     "ACTIVE_FILE_ENV",
+    "ENGINE_CHOICES",
+    "ENGINE_DEFAULTS",
+    "ENGINE_ENV",
     "settings_path",
     "normalize_providers",
     "normalize_tiers",
+    "normalize_engines",
     "read_settings",
     "write_settings",
     "mask_settings",

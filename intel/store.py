@@ -54,13 +54,14 @@ class IntelStore:
             with (run_dir / "candidates.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
                 for candidate in report.candidates:
                     handle.write(json.dumps(candidate.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
-            fields = ["value", "kind", "source", "sources", "observed_at", "published_at", "title", "summary", "confidence", "scope_status", "evidence_ref", "tags", "score", "is_new"]
+            fields = ["value", "kind", "source", "sources", "observed_at", "published_at", "title", "summary", "confidence", "scope_status", "evidence_ref", "evidence_refs", "tags", "score", "is_new"]
             with (run_dir / "candidates.csv").open("w", encoding="utf-8-sig", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=fields)
                 writer.writeheader()
                 for candidate in report.candidates:
                     row = candidate.to_dict()
                     row["sources"] = "|".join(row["sources"])
+                    row["evidence_refs"] = "|".join(row["evidence_refs"])
                     row["tags"] = "|".join(row["tags"])
                     writer.writerow({field: row.get(field, "") for field in fields})
             keys = self.previous_keys()

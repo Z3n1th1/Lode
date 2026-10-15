@@ -18,14 +18,26 @@ class FileProvider:
             raise ValueError("intel_input_file_missing_or_symlink")
         if self.path.stat().st_size > 20_000_000:
             raise ValueError("intel_input_file_too_large")
-        text = self.path.read_text(encoding="utf-8")
+        text = self.path.read_text(
+            encoding="utf-8-sig" if self.path.suffix.lower() == ".csv" else "utf-8"
+        )
         rows: list[object]
         if self.path.suffix.lower() == ".csv":
             rows = list(csv.DictReader(text.splitlines()))
+            for row in rows:
+                if isinstance(row, dict):
+                    for field in ("sources", "evidence_refs", "tags"):
+                        raw = row.get(field)
+                        if isinstance(raw, str) and "|" in raw:
+                            row[field] = tuple(part.strip() for part in raw.split("|") if part.strip())
         elif self.path.suffix.lower() == ".jsonl":
             rows = [json.loads(line) for line in text.splitlines() if line.strip()]
         else:
             decoded = json.loads(text)
+            from ..arl_ingest import looks_like_arl, parse_arl
+
+            if looks_like_arl(decoded):
+                return parse_arl(decoded, source=self.id, max_items=max_items)
             rows = decoded if isinstance(decoded, list) else [decoded]
         result: list[AssetCandidate] = []
         for row in rows:
@@ -37,6 +49,11 @@ class FileProvider:
             candidate = AssetCandidate.from_mapping({**row, "source": str(row.get("source") or self.id), "observed_at": row.get("observed_at") or utc_now()})
             if candidate.value:
                 result.append(candidate)
+            else:
+                from ..arl_ingest import looks_like_arl, parse_arl
+
+                if looks_like_arl(row):
+                    result.extend(parse_arl([row], source=self.id, max_items=max_items - len(result)))
             if len(result) >= max_items:
                 break
         return result
