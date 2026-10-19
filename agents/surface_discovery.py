@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 import zlib
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from core.action_admission import ADMISSIBLE_METHODS as _ADMISSIBLE_METHODS
@@ -124,6 +124,25 @@ def _host(value: str) -> str:
     return str(value or "").strip().lower().strip("[]").rstrip(".")
 
 
+_SENSITIVE_QUERY_KEYS = frozenset({
+    "code", "token", "access_token", "refresh_token", "id_token", "nonce",
+    "state", "secret", "client_secret", "password", "session", "cookie",
+    "authorization",
+})
+
+
+def _safe_logged_url(value: str) -> str:
+    """Keep evidence useful while removing bearer-like query values."""
+    raw = str(value or "")
+    parsed = urlsplit(raw)
+    if not parsed.query:
+        return raw
+    pairs = []
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        pairs.append((key, "[redacted]" if key.lower() in _SENSITIVE_QUERY_KEYS else item))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), ""))
+
+
 def _as_tuple(value: Any) -> tuple:
     """A string is one value, not a sequence of characters.
 
@@ -137,6 +156,52 @@ def _as_tuple(value: Any) -> tuple:
     if isinstance(value, (list, tuple, set, frozenset)):
         return tuple(value)
     return ()
+
+
+def _path_prefix_tuple(value: Any) -> tuple[str, ...]:
+    """Normalize path prefixes without turning a string into characters."""
+    values = _as_tuple(value)
+    prefixes: list[str] = []
+    for item in values:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        if "://" in raw:
+            raw = urlsplit(raw).path or "/"
+        if not raw.startswith("/"):
+            raw = "/" + raw
+        raw = "/" + "/".join(part for part in raw.split("/") if part)
+        prefixes.append(raw if raw == "/" else raw.rstrip("/"))
+    return tuple(dict.fromkeys(prefixes))
+
+
+def _path_rules(value: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Read host-specific path prefixes from a scope document.
+
+    A host allow-list without path rules remains backward compatible.  When a
+    host is present in this map, only the listed path prefixes are eligible;
+    this keeps a broad platform host from being mistaken for authorization to
+    probe unrelated tenants or management surfaces.
+    """
+    if not isinstance(value, Mapping):
+        return ()
+    rules: list[tuple[str, tuple[str, ...]]] = []
+    for host, prefixes in value.items():
+        key = str(host or "").strip().lower()
+        if not key:
+            continue
+        normalized = _path_prefix_tuple(prefixes)
+        if normalized:
+            rules.append((key, normalized))
+    return tuple(rules)
+
+
+def _path_prefix_matches(path: str, prefix: str) -> bool:
+    path = "/" + "/".join(part for part in str(path or "/").split("/") if part)
+    prefix = "/" + "/".join(part for part in str(prefix or "/").split("/") if part)
+    if prefix == "/":
+        return True
+    return path == prefix or path.startswith(prefix + "/")
 
 
 # 方法词表与顺序都是固定的:两份声明了同一个集合的 scope 必须写出同一个 tuple,
@@ -205,7 +270,29 @@ def _readonly_url_reason(value: str) -> str:
     counts as state-changing" would drift apart, and the gate is the one that has to
     be right. The name stays because it is imported by ``agents/src_agent.py``.
     """
+    if _is_safe_auth_navigation(value):
+        return ""
     return state_changing_reason(value)
+
+
+def _is_safe_auth_navigation(value: str) -> bool:
+    """Allow only the read-only OAuth login hops needed to reach an in-scope app.
+
+    OAuth authorization URLs often carry words such as ``create`` and ``manage``
+    in the requested permission string.  Those words describe the consent being
+    requested after login, not a mutation performed by this GET navigation.
+    The narrow host/path/parameter check prevents this exception from becoming a
+    general bypass for state-changing URLs.
+    """
+    parsed = urlsplit(str(value or ""))
+    if _host(parsed.hostname or "") != "accounts.shopify.com":
+        return False
+    path = parsed.path.rstrip("/").lower()
+    if path == "/oauth/authorize":
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        return (query.get("response_type", [""])[0].lower() == "code"
+                and bool(query.get("redirect_uri", [""])[0]))
+    return False
 
 
 def _is_ip(value: str) -> bool:
@@ -251,6 +338,9 @@ class SurfaceScope:
     allowed_domains: tuple[str, ...] = ()
     allowed_hosts: tuple[str, ...] = ()
     allowed_ips: tuple[str, ...] = ()
+    # Optional host -> path-prefix restrictions.  Empty preserves the legacy
+    # host-only scope behavior; a configured host is path-scoped fail-closed.
+    allowed_path_prefixes: tuple[tuple[str, tuple[str, ...]], ...] = ()
     forbidden: tuple[str, ...] = ()
     # 能力维度:这份授权文档允许**做什么**,不只是允许**去哪里**。
     #
@@ -270,6 +360,19 @@ class SurfaceScope:
         # 归一化放在类型上,不只放在 from_mapping 里:直接构造 SurfaceScope 的调用方
         # 同样不该拿到一份"GET/HEAD 被声明掉"的授权。幂等,所以两种路径的结果一致。
         object.__setattr__(self, "allowed_methods", _method_tuple(self.allowed_methods))
+        normalized_rules: list[tuple[str, tuple[str, ...]]] = []
+        raw_rules = (_path_rules(self.allowed_path_prefixes)
+                     if isinstance(self.allowed_path_prefixes, Mapping)
+                     else self.allowed_path_prefixes)
+        for item in raw_rules:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            host, prefixes = item
+            key = str(host or "").strip().lower()
+            values = _path_prefix_tuple(prefixes)
+            if key and values:
+                normalized_rules.append((key, values))
+        object.__setattr__(self, "allowed_path_prefixes", tuple(normalized_rules))
         allowed_priorities = {"critical", "high", "rce", "orphan_origin", "management"}
         priorities = tuple(dict.fromkeys(
             str(item).strip().lower() for item in self.priority_objectives
@@ -317,6 +420,10 @@ class SurfaceScope:
             allowed_domains=domains,
             allowed_hosts=hosts,
             allowed_ips=tuple(str(item).strip() for item in _as_tuple(data.get("allowed_ips")) if str(item).strip()),
+            allowed_path_prefixes=_path_rules(
+                data.get("allowed_path_prefixes") or data.get("allowed_paths")
+                or data.get("path_prefixes")
+            ),
             forbidden=forbidden,
             allowed_methods=_method_tuple(data.get("allowed_methods") or data.get("methods")),
             allow_request_body=_as_bool(data.get("allow_request_body")),
@@ -386,24 +493,43 @@ class SurfaceScope:
             return False, "missing_host"
         if any(_host_matches(host, item) for item in self.forbidden):
             return False, "forbidden_host"
+        allowed_reason = ""
         if _is_ip(host):
             try:
                 address = ipaddress.ip_address(host)
                 for item in self.allowed_ips:
                     if "/" in item and address in ipaddress.ip_network(item, strict=False):
-                        return True, "allowed_ip_range"
+                        allowed_reason = "allowed_ip_range"
+                        break
                     if address == ipaddress.ip_address(item):
-                        return True, "allowed_ip"
+                        allowed_reason = "allowed_ip"
+                        break
             except ValueError:
                 pass
-            return False, "ip_not_in_scope"
-        if any(_host_matches(host, item, descendants=True) for item in self.allowed_domains):
-            return True, "allowed_domain"
-        for item in self.allowed_hosts:
-            exact = not _scope_host(item).startswith("*.")
-            if _host_matches(host, item, descendants=not exact):
-                return True, "allowed_host"
-        return False, "host_not_in_scope"
+            if not allowed_reason:
+                return False, "ip_not_in_scope"
+        elif any(_host_matches(host, item, descendants=True) for item in self.allowed_domains):
+            allowed_reason = "allowed_domain"
+        else:
+            for item in self.allowed_hosts:
+                exact = not _scope_host(item).startswith("*.")
+                if _host_matches(host, item, descendants=not exact):
+                    allowed_reason = "allowed_host"
+                    break
+        if not allowed_reason:
+            return False, "host_not_in_scope"
+        matching_rules: list[str] = []
+        for entry, prefixes in self.allowed_path_prefixes:
+            if entry == "*":
+                matching_rules.extend(prefixes)
+                continue
+            exact = not _scope_host(entry).startswith("*.")
+            if _host_matches(host, entry, descendants=not exact):
+                matching_rules.extend(prefixes)
+        if matching_rules and not any(_path_prefix_matches(parsed.path or "/", prefix)
+                                     for prefix in matching_rules):
+            return False, "path_not_in_scope"
+        return True, allowed_reason
 
 
 @dataclass
@@ -537,9 +663,25 @@ def _normalized_response_text(text: str, request_url: str) -> str:
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
         "<request-id>", value,
     )
+    # Login shells commonly stamp a fresh CSP nonce on every response.  Leaving
+    # it in the comparison makes the same auth page look like a real endpoint.
+    value = re.sub(r"\bnonce\s*=\s*(['\"]).*?\1", "nonce=<nonce>", value)
+    value = re.sub(r"\bnonce\s*:\s*(['\"]).*?\1", "nonce:<nonce>", value)
     value = re.sub(r"\b[0-9a-f]{20,}\b", "<request-id>", value)
     value = re.sub(r"\b\d{10,}\b", "<request-number>", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _looks_authentication_gate(text: str) -> bool:
+    """Recognize a login wrapper, including 200 responses used for redirects."""
+    value = str(text or "")
+    return bool(re.search(
+        r"(?:no_cookie_session|session-service/login|accounts\.shopify\.com/[^\"'<> ]*login"
+        r"|shopify[-_ ]password|storefront[-_ ]password"
+        r"|<(?:div|meta)\b[^>]*(?:data-url|http-equiv)=[^>]*(?:login|sign[-_ ]?in)"
+        r"|<form\b[^>]*action=[\"'][^\"']*/password(?:[\"'/? >]))",
+        value, re.I,
+    ))
 
 
 def _matches_soft_404(
@@ -884,11 +1026,11 @@ def discover_surface(
     def fetch(url: str, *, follow: bool = True) -> tuple[int, str, dict[str, str]]:
         ok, reason = scope.check_url(url)
         if not ok:
-            result.errors.append(f"blocked:{url}:{reason}")
+            result.errors.append(f"blocked:{_safe_logged_url(url)}:{reason}")
             return 0, "", {}
         read_reason = _readonly_url_reason(url)
         if read_reason:
-            result.errors.append(f"blocked:{url}:{read_reason}")
+            result.errors.append(f"blocked:{_safe_logged_url(url)}:{read_reason}")
             return 0, "", {}
         # 爬虫是 GET 流量的最大来源(SEED_PATHS 加上 max_scripts 个脚本各一跳),所以它
         # 也要吃同一份额度 —— 只让 agent 侧计数等于把大头漏掉了。被拦掉的请求不计。
@@ -896,11 +1038,11 @@ def discover_surface(
             if limiter is not None:
                 limiter.acquire(url)
             outcome = get(url, timeout=scope.timeout_seconds, max_bytes=1_500_000)
-            result.requests.append({"url": url, "status": outcome[0]})
+            result.requests.append({"url": _safe_logged_url(url), "status": outcome[0]})
             return outcome
 
         if budget is not None and not budget.spend():
-            result.errors.append(f"blocked:{url}:request_budget_exhausted")
+            result.errors.append(f"blocked:{_safe_logged_url(url)}:request_budget_exhausted")
             return 0, "", {}
         status, text, headers = _attempt()
         if headers.get("x-lode-tls") == "certificate_verify_failed":
@@ -912,12 +1054,12 @@ def discover_surface(
             if status != 0:
                 break
             if budget is not None and not budget.spend():
-                result.errors.append(f"blocked:{url}:request_budget_exhausted")
+                result.errors.append(f"blocked:{_safe_logged_url(url)}:request_budget_exhausted")
                 break
             status, text, headers = _attempt()
         if status == 0:
             # 试到底还是不行就记下来。以前这里是静默的:结果差一大截,而摘要里看不出原因。
-            result.errors.append(f"unreachable:{url}")
+            result.errors.append(f"unreachable:{_safe_logged_url(url)}")
         if follow and 300 <= status < 400:
             # 跟一跳。不跟的话,回 301/302 的站正文一个字节都取不到,面就是空的 ——
             # 看上去像"这个站没东西",其实是重定向没走(login 跳到 /login/、
@@ -930,11 +1072,14 @@ def discover_surface(
             location = str(headers.get("location") or "").strip()
             if location:
                 hop = urljoin(url, location)
+                if hop == url:
+                    result.errors.append(f"redirect_loop:{_safe_logged_url(url)}")
+                    return status, text, headers
                 hop_status, hop_text, hop_headers = fetch(hop, follow=False)
                 if hop_status:
                     # 只有真跳成了才记下来 —— 被闸门拦下的那一跳不算"落点",
                     # 否则 final_url 会写成一个我们从没请求过的站外地址。
-                    result.requests[-1]["redirected_to"] = hop
+                    result.requests[-1]["redirected_to"] = _safe_logged_url(hop)
                     return hop_status, hop_text, hop_headers
         return status, text, headers
 
@@ -951,6 +1096,8 @@ def discover_surface(
         base = urlunsplit((landed.scheme.lower(), landed.netloc, "", "", ""))
         start = final_url.rstrip("/") or base
     result.fingerprints.update(_fingerprints(html, headers.get("content-type", "")))
+    if _looks_authentication_gate(html):
+        result.fingerprints.add("authentication-gated")
     try:
         from intel.wih import tag_text
         result.fingerprints.update(tag_text(html))
@@ -967,6 +1114,20 @@ def discover_surface(
         result.errors.append("html_parse_error")
     for asset in parser.assets:
         result.add_script(asset, "html", scope, start + "/")
+
+    if 300 <= status < 400:
+        result.fingerprints.add("redirect-chain-incomplete")
+        return result
+
+    # A 429 is an explicit server-side throttle.  Continuing with the fixed
+    # probe list only increases pressure and cannot improve the evidence.  A
+    # 200 login/password shell is equally uninformative without an authenticated
+    # browser capture, so leave a clear marker and wait for that evidence instead.
+    if status == 429:
+        result.fingerprints.add("rate-limited")
+        return result
+    if _looks_authentication_gate(html):
+        return result
 
     extra = tuple(str(item).strip() for item in extra_seeds if str(item).strip())
     extra_set = set(extra)
@@ -991,6 +1152,8 @@ def discover_surface(
             )
         if not text or seed_status == 0:
             continue
+        if _looks_authentication_gate(text):
+            result.fingerprints.add("authentication-gated")
         if 200 <= seed_status < 300 and text != html and text.strip():
             # Calibrate once, and only when a successful probe differs from the root.
             # The request uses the normal scope, rate and shared-budget gates above.
@@ -1071,18 +1234,23 @@ def discover_surface(
 
 
 def surface_to_dict(result: SurfaceResult) -> dict[str, Any]:
+    safe_api_urls = sorted(_safe_logged_url(url) for url in result.api_urls)
+    safe_url_sources = {
+        _safe_logged_url(key): sorted(value)
+        for key, value in sorted(result.url_sources.items())
+    }
     return {
         "schema": "SrcSurfaceResult/v1",
-        "target": result.target,
+        "target": _safe_logged_url(result.target),
         "base_url": result.base_url,
-        "final_url": result.final_url,
+        "final_url": _safe_logged_url(result.final_url),
         "status": result.status,
         "fingerprints": sorted(result.fingerprints),
         "scripts": sorted(result.scripts),
         "paths": sorted(result.paths),
-        "api_urls": sorted(result.api_urls),
+        "api_urls": safe_api_urls,
         "sources": {key: sorted(value) for key, value in sorted(result.sources.items())},
-        "url_sources": {key: sorted(value) for key, value in sorted(result.url_sources.items())},
+        "url_sources": safe_url_sources,
         "requests": result.requests,
         "errors": result.errors,
         "probe_spend": dict(sorted(result.probe_spend.items())),
@@ -1093,7 +1261,7 @@ def render_surface_markdown(result: SurfaceResult) -> str:
     lines = [
         "# SRC Surface Discovery",
         "",
-        f"- target: `{result.target}`",
+        f"- target: `{_safe_logged_url(result.target)}`",
         f"- status: `{result.status}`",
         f"- requests: `{len(result.requests)}`",
         f"- fingerprints: `{', '.join(sorted(result.fingerprints)) or '-'}`",
@@ -1104,7 +1272,10 @@ def render_surface_markdown(result: SurfaceResult) -> str:
     lines.extend(f"- `{path}` source={','.join(sorted(result.sources.get(path, ()))) or '-'}" for path in sorted(result.paths))
     if result.api_urls:
         lines.extend(["", "## In-scope absolute API URLs", ""])
-        lines.extend(f"- `{url}` source={','.join(sorted(result.url_sources.get(url, ()))) or '-'}" for url in sorted(result.api_urls))
+        lines.extend(
+            f"- `{_safe_logged_url(url)}` source={','.join(sorted(result.url_sources.get(url, ()))) or '-'}"
+            for url in sorted(result.api_urls)
+        )
     if result.errors:
         lines.extend(["", "## Errors", ""])
         lines.extend(f"- `{error}`" for error in result.errors[:30])
@@ -1114,7 +1285,7 @@ def render_surface_markdown(result: SurfaceResult) -> str:
 def write_surface_outputs(result: SurfaceResult, out_dir: str | Path) -> tuple[Path, Path]:
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", result.target).strip("-")[:80] or "target"
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", _safe_logged_url(result.target)).strip("-")[:80] or "target"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     json_path = output / f"surface-{stamp}-{safe}.json"
     md_path = output / f"surface-{stamp}-{safe}.md"

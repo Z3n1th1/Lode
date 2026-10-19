@@ -1,6 +1,6 @@
 # SRC 自动化使用说明
 
-`src_autopilot.py` 是一个有界的 SRC surface 分诊器，不是自动利用器。它只在书面授权 scope 内复用 `surface_discovery` 的低频 GET 结果，生成去重、排序、脱敏的候选队列，并把候选同步到本地黑板。探测遇到自定义 200 错误页或 SPA fallback 时，会在同一 scope、速率和请求预算下惰性请求一次随机不存在路径建立响应基线；与基线一致的响应只记录为 `soft-404 fallback`，不会进入路径候选。
+`src_autopilot.py` 是一个有界的 SRC surface 分诊器，不是自动利用器。它只在书面授权 scope 内复用 `surface_discovery` 的低频 GET 结果，生成去重、排序、脱敏的候选队列，并把候选同步到本地黑板。探测遇到自定义 200 错误页或 SPA fallback 时，会在同一 scope、速率和请求预算下惰性请求一次随机不存在路径建立响应基线；与基线一致的响应只记录为 `soft-404 fallback`，不会进入路径候选。平台型主机还可以用 `allowed_path_prefixes` 按主机收窄到自有租户路径；统一登录壳、429 限流和未完成的 302 链会提前结束该目标的固定探针。
 
 ## 首轮
 

@@ -11,6 +11,9 @@
 ## 当前已实现
 
 - Surface 每次抓取前重新检查 scope，并拒绝删除、更新、退出、支付、发送等明显有副作用的 URL，以及未知 operation selector。候选 API 路径不会因为被提取到就自动被访问。
+- **平台主机可以再按路径收窄**。`allowed_path_prefixes` 按精确主机声明允许的路径前缀；配置了某主机的规则后，`.env`、备份和其他租户路径会在出站前被拒绝。需要收集页面脚本时，可只加入明确的同源静态资源前缀（如 `/assets`、`/packs`、`/_next`），而不是放开整台平台主机。未配置该字段的旧 scope 仍按原来的主机级行为运行。
+- **统一登录壳和限流会尽早停**。带随机 nonce 的 200 登录/密码壳会标成 `authentication-gated`，不继续消耗固定探针；基址返回 429 会标成 `rate-limited` 并停止该目标。302 链没有拿到内容时标成 `redirect-chain-incomplete`，不会把授权跳转误报成资产。
+- **证据 URL 会脱敏**。请求台账、结果 JSON、Markdown 和输出文件名会将 OAuth `nonce`/`state`、token、code、secret、session 等查询值替换为 `[redacted]`；原始请求只在内存中用于当前跳转，不进入结果文件。
 - **候选可以从响应里长出来,但主机轴不会。** Explorer 能在响应里看见新路由(见
   `docs/src-autopilot.md`),循环会把它们回灌成新的待验 intent。这条回流不扩大授权范围:
   每个新候选都要过 `scope.check_url`,scope 外的一律丢掉并记 `route_dropped`;主机轴仍然
