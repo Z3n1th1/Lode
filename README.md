@@ -31,6 +31,21 @@ python lode.py console
 | `python lode.py doctor` | 环境检查 |
 | `python lode.py recon --scope S --out-dir O --arl-export dump.json` | 导入 ARL 导出 → 精确 host |
 
+Authenticated surface collection can use a local JSON cookie jar without putting the
+cookie in the scope, command output, or result files:
+
+```json
+{"admin.shopify.com": "_shopify_essential_=example-value"}
+```
+
+```bash
+python lode.py scan https://admin.shopify.com/store/your-owned-store \
+  --scope scope.json --cookie-jar .\shopify.cookie.json
+```
+
+The jar is matched by exact host and is ignored by Git. Do not paste session cookies
+into chat or commit the jar.
+
 ## Console API
 
 | 端点 | 作用 |

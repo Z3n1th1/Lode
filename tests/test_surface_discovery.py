@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agents.surface_discovery import (
     SEED_PATHS, SurfaceScope, _declared_api_bases, _matches_soft_404,
-    _readonly_url_reason, _safe_logged_url,
+    _readonly_url_reason, _safe_logged_url, load_cookie_jar,
     discover_surface, write_surface_outputs,
 )
 
@@ -16,18 +16,36 @@ ROOT = Path(__file__).resolve().parent / "fixtures" / "intel"
 
 
 class SrcSurfaceDiscoveryTests(unittest.TestCase):
+    def test_cookie_jar_is_local_exact_host_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shopify.cookie.json"
+            path.write_text(json.dumps({
+                "admin.shopify.com": "_shopify_essential_=redacted-test-value",
+            }), encoding="utf-8")
+            jar = load_cookie_jar(path)
+        self.assertEqual({"admin.shopify.com": "_shopify_essential_=redacted-test-value"}, jar)
+
+    def test_cookie_jar_rejects_newlines_and_oversized_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.cookie.json"
+            path.write_text(json.dumps({"admin.shopify.com": "a\nb"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cookie_jar_entry_invalid"):
+                load_cookie_jar(path)
+
     def test_host_specific_path_prefixes_keep_platform_hosts_narrow(self) -> None:
         scope = SurfaceScope.from_mapping({
             "program": "shopify-owned",
             "authorization": "owned test organization",
             "allowed_hosts": ["admin.shopify.com", "partners.shopify.com"],
             "allowed_path_prefixes": {
-                "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi"],
+                "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi", "/api/operations"],
                 "partners.shopify.com": ["/4976155", "/assets"],
             },
         })
         self.assertEqual((True, "allowed_host"), scope.check_url(
             "https://admin.shopify.com/store/test-e5nkcuoi/settings/users"))
+        self.assertEqual((True, "allowed_host"), scope.check_url(
+            "https://admin.shopify.com/api/operations/abc/StaffMembers/shopify/test-e5nkcuoi"))
         self.assertEqual((True, "allowed_host"), scope.check_url(
             "https://partners.shopify.com/assets/application.js"))
         self.assertEqual((False, "path_not_in_scope"), scope.check_url(

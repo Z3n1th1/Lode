@@ -122,7 +122,10 @@ def _batch_targets(args: argparse.Namespace) -> list[str]:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     """Surface discovery + candidate triage, one or many targets."""
-    from agents.surface_discovery import SurfaceScope, discover_surface, surface_to_dict, write_surface_outputs
+    from agents.surface_discovery import (
+        SurfaceScope, cookie_fetcher, discover_surface, load_cookie_jar,
+        surface_to_dict, write_surface_outputs,
+    )
     scope = _load_scope(args.scope)
     root = Path(args.out_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -135,6 +138,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         from console import task_ledger
         ledger = task_ledger
     extra_seeds = _arl_extra_seeds(args)
+    fetcher = None
+    if getattr(args, "cookie_jar", None):
+        try:
+            fetcher = cookie_fetcher(load_cookie_jar(args.cookie_jar))
+        except ValueError as exc:
+            raise SystemExit(f"cookie jar rejected: {exc}") from exc
     for index, target in enumerate(targets, start=1):
         # Single target keeps writing straight into --out-dir (the shape callers
         # already have); a batch gets one subdirectory per host.
@@ -155,6 +164,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             try:
                 result = discover_surface(
                     scope, target, max_scripts=args.max_scripts, extra_seeds=extra_seeds,
+                    fetcher=fetcher,
                 )
             except (ValueError, OSError, TypeError) as exc:
                 rows.append({"target": target, "status": 0, "error": str(exc)})
@@ -570,6 +580,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="use the scope's seed_urls, else every allowed_hosts entry, as the list")
     s.add_argument("--console-state", type=Path,
                    help="Console state dir; record each run in its task ledger so it shows up in the UI")
+    s.add_argument("--cookie-jar", type=Path,
+                   help="local JSON host->Cookie header map; exact-host only, never written to results")
     s.add_argument("--arl-next", "--fingerprint-precise", action="store_true", dest="arl_next",
                    help="also GET the ARL-distilled fingerprint catalog (Nacos/XXL/Harbor/...)")
     s.set_defaults(func=cmd_scan)

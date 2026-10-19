@@ -143,6 +143,56 @@ def _safe_logged_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), ""))
 
 
+def load_cookie_jar(path: str | Path) -> dict[str, str]:
+    """Load an explicit host -> Cookie-header map for a local authenticated run.
+
+    The file is operator-supplied, bounded, never copied to output, and matched by
+    exact hostname.  This is deliberately separate from scope: authorization says
+    where a request may go; the jar says which already-authorized host may receive a
+    browser session.  A malformed or symlinked jar fails before the first request.
+    """
+    jar_path = Path(path).expanduser()
+    if jar_path.is_symlink():
+        raise ValueError("cookie_jar_symlink_rejected")
+    try:
+        if jar_path.stat().st_size > 64 * 1024:
+            raise ValueError("cookie_jar_too_large")
+        value = json.loads(jar_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc) in {
+            "cookie_jar_too_large", "cookie_jar_symlink_rejected",
+        }:
+            raise
+        raise ValueError("cookie_jar_unreadable") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("cookie_jar_object_required")
+    result: dict[str, str] = {}
+    for raw_host, raw_cookie in value.items():
+        host = _host(str(raw_host or ""))
+        cookie = str(raw_cookie or "")
+        if not host or host.startswith("*") or any(ord(ch) in (10, 13) for ch in cookie):
+            raise ValueError("cookie_jar_entry_invalid")
+        if len(cookie) > 16 * 1024:
+            raise ValueError("cookie_jar_cookie_too_large")
+        if cookie:
+            result[host] = cookie
+    return result
+
+
+def cookie_fetcher(cookie_jar: Mapping[str, str]) -> Callable[..., tuple[int, str, dict[str, str]]]:
+    """Build a GET fetcher that sends cookies only to exact jar host matches."""
+    cookies = {_host(key): str(value) for key, value in cookie_jar.items() if str(value)}
+
+    def fetch(url: str, *, timeout: float, max_bytes: int = 1_500_000):
+        host = _host(urlsplit(url).hostname or "")
+        cookie = cookies.get(host, "")
+        headers = {"Cookie": cookie} if cookie else {}
+        return _request_text("GET", url, timeout=timeout, max_bytes=max_bytes,
+                             extra_headers=headers)
+
+    return fetch
+
+
 def _as_tuple(value: Any) -> tuple:
     """A string is one value, not a sequence of characters.
 
@@ -950,6 +1000,7 @@ def _request_text(
     max_bytes: int = 1_500_000,
     body: bytes | None = None,
     content_type: str = "",
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[int, str, dict[str, str]]:
     """The one place a request is actually sent.
 
@@ -967,6 +1018,10 @@ def _request_text(
     }
     if body:
         headers["Content-Type"] = content_type or "application/x-www-form-urlencoded"
+    for key, value in (extra_headers or {}).items():
+        header_name = str(key).strip()
+        if header_name and "\r" not in header_name and "\n" not in header_name:
+            headers[header_name] = str(value)
     request = Request(url, data=body or None, headers=headers, method=str(method).upper())
     # Verified TLS first. A broken chain on an *authorized* host used to look like
     # "unreachable" (status 0) and the crawl never started. Retry once without

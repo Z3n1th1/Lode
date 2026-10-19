@@ -10,7 +10,7 @@
   ],
   "allowed_path_prefixes": {
     "partners.shopify.com": ["/4976155", "/assets", "/packs", "/static", "/build", "/_next", "/_nuxt"],
-    "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi", "/login", "/assets", "/packs", "/static", "/build", "/_next", "/_nuxt"],
+    "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi", "/api/operations", "/login", "/assets", "/packs", "/static", "/build", "/_next", "/_nuxt"],
     "accounts.shopify.com": ["/oauth", "/session-service", "/login", "/identity", "/assets", "/packs", "/static", "/build", "/_next", "/_nuxt"],
     "test-e5nkcuoi.myshopify.com": ["/", "/password"]
   },

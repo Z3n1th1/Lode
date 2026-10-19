@@ -4,6 +4,7 @@
 .env.news.local
 *.key
 *.pem
+*.cookie.json
 
 # ---- 运行时状态 / 本机挖洞数据(含目标信息,不入库)----
 lode-state/

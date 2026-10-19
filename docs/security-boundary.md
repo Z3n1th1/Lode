@@ -16,6 +16,7 @@
 - **代理合成页不算目标响应**。Burp/Clash 等中间层偶尔会用 HTTP 200 返回自己的错误 HTML；Lode 会标成 `intercept-proxy-response` 并停止解析，避免把代理页误判成 Shopify API 证据。
 - **WAF 挑战页不算应用路由**。Cloudflare 的 403/429/503 challenge body（`__cf_chl_*`、`challenge-platform`、`Just a moment` 等）会标成 `waf-challenge` 并停止解析，避免把防护页里的固定探针或脚本误报成后台组件。
 - **证据 URL 会脱敏**。请求台账、结果 JSON、Markdown 和输出文件名会将 OAuth `nonce`/`state`、token、code、secret、session 等查询值替换为 `[redacted]`；原始请求只在内存中用于当前跳转，不进入结果文件。
+- **认证态只从本地 cookie jar 注入**。`scan --cookie-jar` 读取一个被 Git 忽略的 JSON host->Cookie 映射，按精确主机发送，不把 cookie 写入 scope、请求台账、结果或黑板；聊天、环境变量和命令行参数都不承载会话值。
 - **候选可以从响应里长出来,但主机轴不会。** Explorer 能在响应里看见新路由(见
   `docs/src-autopilot.md`),循环会把它们回灌成新的待验 intent。这条回流不扩大授权范围:
   每个新候选都要过 `scope.check_url`,scope 外的一律丢掉并记 `route_dropped`;主机轴仍然
