@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from agents.surface_discovery import (
-    SEED_PATHS, SurfaceScope, _declared_api_bases, discover_surface, write_surface_outputs,
+    SEED_PATHS, SurfaceScope, _declared_api_bases, _matches_soft_404,
+    _readonly_url_reason, _safe_logged_url,
+    discover_surface, write_surface_outputs,
 )
 
 
@@ -14,6 +16,68 @@ ROOT = Path(__file__).resolve().parent / "fixtures" / "intel"
 
 
 class SrcSurfaceDiscoveryTests(unittest.TestCase):
+    def test_host_specific_path_prefixes_keep_platform_hosts_narrow(self) -> None:
+        scope = SurfaceScope.from_mapping({
+            "program": "shopify-owned",
+            "authorization": "owned test organization",
+            "allowed_hosts": ["admin.shopify.com", "partners.shopify.com"],
+            "allowed_path_prefixes": {
+                "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi"],
+                "partners.shopify.com": ["/4976155"],
+            },
+        })
+        self.assertEqual((True, "allowed_host"), scope.check_url(
+            "https://admin.shopify.com/store/test-e5nkcuoi/settings/users"))
+        self.assertEqual((False, "path_not_in_scope"), scope.check_url(
+            "https://admin.shopify.com/.env"))
+        self.assertEqual((False, "path_not_in_scope"), scope.check_url(
+            "https://partners.shopify.com/49761550"))
+
+    def test_auth_shell_with_fresh_nonce_is_a_soft_response(self) -> None:
+        shell = ('<html><body><div id="redirect" data-url="'
+                 'https://admin.shopify.com/login?errorHint=no_cookie_session'
+                 '"></div><script nonce="fresh-value">window.x=1</script></body></html>')
+        other = shell.replace("fresh-value", "another-value")
+        self.assertTrue(_matches_soft_404(
+            200, shell, {"content-type": "text/html"}, "https://admin.shopify.com/.env",
+            (200, other, {"content-type": "text/html"},
+             "https://admin.shopify.com/__lode_miss__/random"),
+        ))
+
+    def test_rate_limited_base_stops_fixed_probe_tax(self) -> None:
+        requested: list[str] = []
+
+        def fetcher(url, **kwargs):
+            del kwargs
+            requested.append(url)
+            return 429, "slow down", {"content-type": "text/plain"}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_hosts=("example.com",), delay_seconds=0),
+            "https://example.com", fetcher=fetcher,
+        )
+        self.assertEqual(429, result.status)
+        self.assertIn("rate-limited", result.fingerprints)
+        self.assertEqual(["https://example.com/"], requested)
+
+    def test_oauth_authorize_navigation_is_not_treated_as_a_mutation(self) -> None:
+        url = ("https://accounts.shopify.com/oauth/authorize?response_type=code&"
+               "redirect_uri=https%3A%2F%2Fpartners.shopify.com%2Fidentity%2Fcallback&"
+               "scope=https%3A%2F%2Fapi.shopify.com%2Fauth%2Fshop.create")
+        self.assertEqual("", _readonly_url_reason(url))
+        self.assertEqual("state_changing_url", _readonly_url_reason(
+            "https://accounts.shopify.com/oauth/authorize?response_type=token&create=1"))
+
+    def test_result_urls_redact_bearer_like_query_values(self) -> None:
+        safe = _safe_logged_url(
+            "https://accounts.shopify.com/oauth/authorize?client_id=public&nonce=abc&state=xyz"
+        )
+        self.assertIn("client_id=public", safe)
+        self.assertIn("nonce=%5Bredacted%5D", safe)
+        self.assertIn("state=%5Bredacted%5D", safe)
+        self.assertNotIn("abc", safe)
+        self.assertNotIn("xyz", safe)
+
     def test_aegispilot_rules_are_available_on_pentest_agent_side(self) -> None:
         html = (ROOT / "surface.html").read_text(encoding="utf-8")
         script = b'fetch("/api/internal"); fetch("https://api.example.com/from-js"); //# sourceMappingURL=app.js.map'

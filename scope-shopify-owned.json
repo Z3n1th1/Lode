@@ -1,0 +1,43 @@
+{
+  "program": "Shopify HackerOne - owned Partners organization and owned development store",
+  "authorization": "Shopify Bug Bounty scope as recorded in E:\\Study\\SRC\\Projects\\Shopify\\scope.md and scopes_for_shopify_at_2026-10-19_10_00_05_UTC.csv. Test only the researcher's own Partners organization 4976155, own test store test-e5nkcuoi, the corresponding Shopify Admin routes, and the authentication redirect hosts needed to reach those routes. GET/HEAD/OPTIONS surface discovery only; no third-party stores, no third-party apps, no broad wildcard expansion, no brute force, no DoS, no destructive changes, no invites or permission changes without a separately recorded action.",
+  "allowed_domains": [],
+  "allowed_hosts": [
+    "partners.shopify.com",
+    "admin.shopify.com",
+    "accounts.shopify.com",
+    "test-e5nkcuoi.myshopify.com"
+  ],
+  "allowed_path_prefixes": {
+    "partners.shopify.com": ["/4976155"],
+    "admin.shopify.com": ["/organization/221905156", "/store/test-e5nkcuoi", "/login"],
+    "accounts.shopify.com": ["/oauth", "/session-service", "/login", "/identity"],
+    "test-e5nkcuoi.myshopify.com": ["/", "/password"]
+  },
+  "allowed_ips": [],
+  "forbidden_hosts": [
+    "cdn.shopify.com",
+    "community.shopify.com",
+    "community.shopify.dev",
+    "academy.shopify.com",
+    "livechat.shopify.com",
+    "supplier-portal.shopifycloud.com",
+    "investors.shopify.com"
+  ],
+  "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+  "allow_request_body": false,
+  "seed_urls": [
+    "https://partners.shopify.com/4976155/",
+    "https://partners.shopify.com/4976155/settings",
+    "https://partners.shopify.com/4976155/quick_search",
+    "https://admin.shopify.com/organization/221905156/settings/organization-account",
+    "https://admin.shopify.com/store/test-e5nkcuoi",
+    "https://test-e5nkcuoi.myshopify.com/"
+  ],
+  "rate_limit": {
+    "timeout_seconds": 20,
+    "requests_per_second": 1
+  },
+  "max_items": 250,
+  "max_fanout": 6
+}
