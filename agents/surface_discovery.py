@@ -632,6 +632,12 @@ def _looks_high_signal(path: str) -> bool:
 
 def _fingerprints(text: str, content_type: str) -> set[str]:
     lower = text.lower()
+    if ("<title>burp suite professional</title>" in lower
+            or "burp suite professional" in lower and "<html" in lower[:2000]):
+        return {"intercept-proxy-response"}
+    if ("<title>clash</title>" in lower or "clash for windows" in lower
+            or "mihomo" in lower and "proxy" in lower):
+        return {"intercept-proxy-response"}
     checks = {
         "Vue": ("vue", "__vue__", "vue-router"),
         "React": ("react", "__react", "reactdom", "react-router"),
@@ -646,6 +652,24 @@ def _fingerprints(text: str, content_type: str) -> set[str]:
     if "json" in content_type.lower() and ("paths" in lower or "swagger" in lower):
         found.add("OpenAPI JSON")
     return found
+
+
+def _looks_intercept_proxy_response(text: str) -> bool:
+    """Catch synthetic proxy pages that return HTTP 200 for target requests."""
+    return "intercept-proxy-response" in _fingerprints(text, "")
+
+
+def _looks_waf_challenge(status: int, text: str, headers: Mapping[str, str]) -> bool:
+    """Recognize a WAF challenge page before mining its template as app routes."""
+    if int(status or 0) not in {403, 429, 503}:
+        return False
+    lower = str(text or "").lower()[:120_000]
+    header_text = " ".join(f"{key}:{value}" for key, value in headers.items()).lower()
+    markers = (
+        "__cf_chl_", "cf-chl-", "challenge-platform", "cf-mitigated",
+        "just a moment...", "checking your browser", "cloudflare",
+    )
+    return any(marker in lower or marker in header_text for marker in markers)
 
 
 def _response_content_type(headers: Mapping[str, str]) -> str:
@@ -1096,6 +1120,14 @@ def discover_surface(
         base = urlunsplit((landed.scheme.lower(), landed.netloc, "", "", ""))
         start = final_url.rstrip("/") or base
     result.fingerprints.update(_fingerprints(html, headers.get("content-type", "")))
+    if _looks_intercept_proxy_response(html):
+        result.errors.append("intercept_proxy_response")
+        result.fingerprints.add("unusable-response")
+        return result
+    if _looks_waf_challenge(status, html, headers):
+        result.errors.append("waf_challenge_response")
+        result.fingerprints.add("waf-challenge")
+        return result
     if _looks_authentication_gate(html):
         result.fingerprints.add("authentication-gated")
     try:
@@ -1151,6 +1183,14 @@ def discover_surface(
                 len(result.requests) - sent_before
             )
         if not text or seed_status == 0:
+            continue
+        if _looks_intercept_proxy_response(text):
+            result.fingerprints.add("intercept-proxy-response")
+            result.errors.append(f"intercept_proxy_response:{_safe_logged_url(seed_url)}")
+            continue
+        if _looks_waf_challenge(seed_status, text, seed_headers):
+            result.fingerprints.add("waf-challenge")
+            result.errors.append(f"waf_challenge_response:{_safe_logged_url(seed_url)}")
             continue
         if _looks_authentication_gate(text):
             result.fingerprints.add("authentication-gated")
@@ -1209,6 +1249,14 @@ def discover_surface(
         processed.add(script_url)
         script_status, text, script_headers = fetch(script_url)
         if script_status == 0 or not text:
+            continue
+        if _looks_intercept_proxy_response(text):
+            result.fingerprints.add("intercept-proxy-response")
+            result.errors.append(f"intercept_proxy_response:{_safe_logged_url(script_url)}")
+            continue
+        if _looks_waf_challenge(script_status, text, script_headers):
+            result.fingerprints.add("waf-challenge")
+            result.errors.append(f"waf_challenge_response:{_safe_logged_url(script_url)}")
             continue
         result.fingerprints.update(_fingerprints(text, script_headers.get("content-type", "")))
         try:

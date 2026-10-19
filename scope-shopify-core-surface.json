@@ -1,0 +1,35 @@
+{
+  "program": "Shopify HackerOne - exact core public surface review",
+  "authorization": "Shopify Bug Bounty scope from E:\\Study\\SRC\\Projects\\Shopify\\scopes_for_shopify_at_2026-10-19_10_00_05_UTC.csv. Exact hosts only: shop.app, shopify.plus, arrive-server.shopifycloud.com, and accounts.shopify.com. Low-frequency GET/HEAD/OPTIONS surface discovery only; no wildcard expansion, third-party stores/apps, brute force, DoS, destructive changes, or authenticated actions.",
+  "allowed_domains": [],
+  "allowed_hosts": [
+    "shop.app",
+    "shopify.plus",
+    "arrive-server.shopifycloud.com",
+    "accounts.shopify.com"
+  ],
+  "allowed_ips": [],
+  "forbidden_hosts": [
+    "cdn.shopify.com",
+    "community.shopify.com",
+    "community.shopify.dev",
+    "academy.shopify.com",
+    "livechat.shopify.com",
+    "supplier-portal.shopifycloud.com",
+    "investors.shopify.com"
+  ],
+  "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+  "allow_request_body": false,
+  "seed_urls": [
+    "https://shop.app/",
+    "https://shopify.plus/",
+    "https://arrive-server.shopifycloud.com/",
+    "https://accounts.shopify.com/"
+  ],
+  "rate_limit": {
+    "timeout_seconds": 20,
+    "requests_per_second": 1
+  },
+  "max_items": 120,
+  "max_fanout": 4
+}

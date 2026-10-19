@@ -62,6 +62,39 @@ class SrcSurfaceDiscoveryTests(unittest.TestCase):
         self.assertIn("rate-limited", result.fingerprints)
         self.assertEqual(["https://example.com/"], requested)
 
+    def test_intercept_proxy_200_is_not_treated_as_target_surface(self) -> None:
+        proxy = "<html><head><title>Burp Suite Professional</title></head><body>proxy error</body></html>"
+
+        def fetcher(url, **kwargs):
+            del kwargs
+            return 200, proxy, {"content-type": "text/html"}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_hosts=("example.com",), delay_seconds=0),
+            "https://example.com", fetcher=fetcher,
+        )
+        self.assertIn("intercept-proxy-response", result.fingerprints)
+        self.assertIn("intercept_proxy_response", result.errors)
+        self.assertEqual(1, len(result.requests))
+
+    def test_waf_challenge_403_is_not_mined_as_app_routes(self) -> None:
+        challenge = ('<!doctype html><title>Just a moment...</title>'
+                     '<script src="/cdn-cgi/challenge-platform/h/b"></script>'
+                     '<input name="__cf_chl_tk" value="dynamic">')
+
+        def fetcher(url, **kwargs):
+            del kwargs
+            return 403, challenge, {"content-type": "text/html", "server": "cloudflare"}
+
+        result = discover_surface(
+            SurfaceScope("fixture-src", "authorized", allowed_hosts=("example.com",), delay_seconds=0),
+            "https://example.com", fetcher=fetcher,
+        )
+        self.assertIn("waf-challenge", result.fingerprints)
+        self.assertIn("waf_challenge_response", result.errors)
+        self.assertEqual([], sorted(result.paths))
+        self.assertEqual(1, len(result.requests))
+
     def test_oauth_authorize_navigation_is_not_treated_as_a_mutation(self) -> None:
         url = ("https://accounts.shopify.com/oauth/authorize?response_type=code&"
                "redirect_uri=https%3A%2F%2Fpartners.shopify.com%2Fidentity%2Fcallback&"
